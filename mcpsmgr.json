@@ -1,0 +1,113 @@
+{
+  "$schema": "https://github.com/jtianling/mcps-manager/raw/HEAD/schemas/mcpsmgr.schema.json",
+  "schemaVersion": "1.0",
+  "name": "cross-agent-teams",
+  "displayName": "Cross-Agent Teams (xats)",
+  "description": "Local MCP daemon for cross-agent communication (Claude Code, Codex, OpenCode, Cursor)",
+  "compatibility": {
+    "npmPackage": "cross-agent-teams-mcp@^0.5"
+  },
+  "variables": {
+    "port": {
+      "default": "9100",
+      "prompt": "Daemon port",
+      "required": false
+    }
+  },
+  "envVars": [
+    {
+      "name": "CROSS_AGENT_TEAMS_TOKEN",
+      "required": false,
+      "secret": true,
+      "description": "Optional bearer token. If set, daemon must be started with the same --token, and ALL agent headers must include it (no fallback to no-auth — any mismatch returns 401).",
+      "appliedAs": { "kind": "header", "name": "Authorization", "format": "Bearer ${VALUE}" }
+    }
+  ],
+  "prerequisites": [
+    {
+      "kind": "long-running-command",
+      "description": "Start the daemon (long-running). Keep it alive in tmux/launchd/dedicated terminal.",
+      "command": "npx -y cross-agent-teams-mcp@^0.5 daemon --port ${port}",
+      "notes": [
+        "If you set CROSS_AGENT_TEAMS_TOKEN, append: --token ${CROSS_AGENT_TEAMS_TOKEN}",
+        "Daemon MUST be running before any agent client connects (Claude Code's stdio channel proxy fails to register otherwise)."
+      ]
+    }
+  ],
+  "agents": {
+    "claude-code": {
+      "servers": [
+        {
+          "name": "cross-agent-teams",
+          "config": {
+            "transport": "http",
+            "url": "http://127.0.0.1:${port}/mcp"
+          }
+        },
+        {
+          "name": "cross-agent-teams-channel",
+          "config": {
+            "transport": "stdio",
+            "command": "npx",
+            "args": [
+              "-y",
+              "-p",
+              "cross-agent-teams-mcp@^0.5",
+              "cross-agent-teams-channel",
+              "--daemon-url",
+              "http://127.0.0.1:${port}/mcp"
+            ]
+          }
+        }
+      ],
+      "postInstallNotes": [
+        "Start the daemon BEFORE launching Claude Code; otherwise the stdio channel proxy fails to register.",
+        "Launch Claude Code with: claude --dangerously-load-development-channels server:cross-agent-teams-channel",
+        "The 'server:<name>' suffix MUST equal the MCP server key 'cross-agent-teams-channel' above."
+      ]
+    },
+    "codex": {
+      "servers": [
+        {
+          "name": "cross-agent-teams",
+          "config": {
+            "transport": "streamable-http",
+            "url": "http://127.0.0.1:${port}/mcp"
+          }
+        }
+      ],
+      "postInstallNotes": [
+        "Codex receives messages via mailbox by default — no extra setup required.",
+        "(Optional, for real-time push wake-up of an existing Codex thread) Run: codex app-server --listen ws://127.0.0.1:8799 in one terminal, and codex --remote ws://127.0.0.1:8799 in another."
+      ]
+    },
+    "opencode": {
+      "servers": [
+        {
+          "name": "cross-agent-teams",
+          "config": {
+            "transport": "http",
+            "url": "http://127.0.0.1:${port}/mcp"
+          }
+        }
+      ],
+      "postInstallNotes": [
+        "Run inside tmux so the daemon can resolve pid → tty → pane on register and deliver pokes."
+      ]
+    },
+    "cursor": {
+      "servers": [
+        {
+          "name": "cross-agent-teams",
+          "config": {
+            "transport": "http",
+            "url": "http://127.0.0.1:${port}/mcp"
+          }
+        }
+      ],
+      "postInstallNotes": [
+        "Cursor runs as a GUI app outside tmux; cross-agent pokes will queue in mailbox only — call get_inbox manually or rely on Cursor's MCP tooling polling."
+      ]
+    }
+  }
+}

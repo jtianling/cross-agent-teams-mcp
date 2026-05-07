@@ -3,7 +3,7 @@
 Run once to register the MCP server:
 
 ```bash
-claude mcp add --scope user cross-agent-teams-mcp http://127.0.0.1:9100/mcp --transport streamable-http
+claude mcp add --scope user cross-agent-teams-mcp http://127.0.0.1:9100/mcp --transport http
 ```
 
 Or edit `~/.claude/settings.json` manually:
@@ -12,7 +12,7 @@ Or edit `~/.claude/settings.json` manually:
 {
   "mcpServers": {
     "cross-agent-teams-mcp": {
-      "type": "streamable-http",
+      "type": "http",
       "url": "http://127.0.0.1:9100/mcp"
     }
   }
@@ -25,7 +25,7 @@ With `--token`:
 {
   "mcpServers": {
     "cross-agent-teams-mcp": {
-      "type": "streamable-http",
+      "type": "http",
       "url": "http://127.0.0.1:9100/mcp",
       "headers": { "Authorization": "Bearer YOUR_TOKEN" }
     }
