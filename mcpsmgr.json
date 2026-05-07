@@ -1,6 +1,6 @@
 {
   "$schema": "https://github.com/jtianling/mcps-manager/raw/HEAD/schemas/mcpsmgr.schema.json",
-  "schemaVersion": "1.0",
+  "schemaVersion": "1.0.0",
   "name": "cross-agent-teams",
   "displayName": "Cross-Agent Teams (xats)",
   "description": "Local MCP daemon for cross-agent communication (Claude Code, Codex, OpenCode, Cursor)",
