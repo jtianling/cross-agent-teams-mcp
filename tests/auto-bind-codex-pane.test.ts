@@ -109,6 +109,29 @@ describe('autoBindCodexPane', () => {
     expect(bindSvc.verify).not.toHaveBeenCalled()
   })
 
+  it('a row whose pane the daemon cannot see says so instead of vanishing', async () => {
+    // The daemon shells out to BARE tmux, so a row for a pane on another
+    // server drops out of the candidate set — and the candidate count is the
+    // scan's only correlation.  Unlogged, that subtraction is invisible: the
+    // log afterwards cannot tell "the row was skipped" from "the row was
+    // never there", which is exactly the ambiguity that cost a production
+    // investigation its afternoon.
+    const log = vi.fn()
+    seedCaller(db, 'caller-1')
+    repo.upsert({ pane_id: '%90', xats_agent_id: 'U9', expires_at: '2999-01-01T00:00:00Z' })
+    const bindSvc = makeBindSvc({ ok: true })
+    const ok = await autoBindCodexPane(
+      { callerAgentId: 'caller-1', expectedRegisterGeneration: 1, repo, log,
+        runAtomic: fn => db.transaction(fn)(), bindRuntimeIdentitySvc: bindSvc as never },
+      { listPanes: async () => [{ pane_id: '%10', tty: 'ttys001' }], ttyProcesses: async () => [] }
+    )
+    expect(ok).toBe(false)
+    expect(log).toHaveBeenCalledWith(expect.stringContaining(
+      'pane=%90 reason=pane_not_visible caller=caller-1'
+    ))
+    expect(repo.listUnexpired('2100-01-01T00:00:00Z')).toHaveLength(1)
+  })
+
   it('returns false on multi-match without consuming any row, and says why', async () => {
     // Two codex panes each correctly pre-registered and each hosting their own
     // carrier is the ORDINARY configuration, not an anomaly — and it makes the

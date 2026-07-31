@@ -411,7 +411,21 @@ async function collectCandidates(
 
   for (const row of pending) {
     const pane = paneIndex.get(row.pane_id)
-    if (!pane || !pane.tty) continue
+    if (!pane || !pane.tty) {
+      // The daemon shells out to BARE tmux, so it only sees the server its own
+      // environment resolves to: a row whose pane lives on another server (or
+      // is simply gone) drops out here.  That silently subtracts from the
+      // candidate count, which is the scan's ONLY correlation — leaving it
+      // unlogged meant a row could vanish from consideration with no trace at
+      // all, and reading the log afterwards could not tell that apart from the
+      // row never having existed.
+      input.log?.(
+        `auto-bind skip (debug): pane=${row.pane_id} ` +
+        `reason=${pane ? 'pane_tty_unknown' : 'pane_not_visible'} ` +
+        `caller=${input.callerAgentId}`
+      )
+      continue
+    }
     let procs = ttyProcessCache.get(pane.tty)
     if (procs === undefined) {
       try {
