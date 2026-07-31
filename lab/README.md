@@ -59,9 +59,36 @@ key 只经环境变量, **决不落 argv** (`ps` 全机可见) — 实验室脚�
 ## codex 侧
 
 `codex-config.toml.template` 装到 `$LAB/codex-home/config.toml`, 替换
-`__LAB_PORT__`; 启动 codex 前 `export CODEX_HOME=$LAB/codex-home` 与
-`export CROSS_AGENT_TEAMS_MCP_TOKEN="$(cat $LAB/token)"`.  凭证按整文件复制
-(`cp ~/.codex/auth.json $LAB/codex-home/`), 不读内容.
+`__LAB_PORT__`; 启动 codex 前 `export CODEX_HOME=$LAB/codex-home`.  凭证按整文件
+复制 (`cp ~/.codex/auth.json $LAB/codex-home/`), 不读内容.
+
+**token 不要 export 在 codex 客户端这一侧** —— `--remote` 形态下 codex 的工具调用
+在 **app-server 进程内**执行 (见下), 于是 `bearer_token_env_var` 这类 `*_env_var`
+配置**全部解析在 app-server 的环境里**.  在客户端 pane 里 export 毫无作用, 而
+app-server 会拿它启动时那个 shell 的 token —— 通常就是生产 token —— 去敲实验室
+daemon, 现象是 codex 侧 `HTTP 401` 而实验室 daemon 侧毫无痕迹.
+`start-lab-appserver.sh` 已在 app-server 环境里显式设好实验室 token.
+
+### `--remote` 的工具在 app-server 进程内执行
+
+2026-07-31 实测 (aoe 侧 tester, 实验室内): `--remote` pane 的工具 shell 祖先链是
+`tool shell → vendor codex → codex app-server → launchd`, **该 pane 自己的进程一个
+都不在链上**; 两个不同 pane 的工具调用父进程是**同一个** app-server; 而不带
+`--remote` 的对照组工具是 pane 本地的, 一路上溯到建 pane 的 tmux.  另有正向对照:
+pane 启动行上的唯一 marker 在该 pane 进程环境里确实存在, 在工具里读到 `<unset>`,
+排除了"app-server 按会话注入 pane 环境"这个例外.
+
+由此产生两条对实验室有直接后果的性质:
+
+1. **模型看到的环境是 app-server 的环境**, 不是自己 pane 的.  所以
+   `XATS_IDENTITY_KEY` 到不了模型 (pre-registration 通道正是为此存在), 所有
+   `*_env_var` 配置也一样.
+2. **模型读到的 `$TMUX_PANE` 是固定的错值** —— app-server 从启动它的那个 shell
+   继承而来 (生产上是 `%39`).  这不是"值缺失"而是"值是错的且看起来很真":
+   每个 caller 都会自信地报同一个错 pane.  实验室里若从 jt 的生产 pane 起
+   app-server, 模型读到的就是生产 pane id —— `start-lab-appserver.sh` 因此用
+   `env -u TMUX -u TMUX_PANE` 起进程.  **任何"让模型自报自己 pane"的断言在这里
+   都是假的**, 座位归属只能由 daemon 侧探测证据决定.
 
 ## tmux 红线
 

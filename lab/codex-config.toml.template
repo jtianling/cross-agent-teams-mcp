@@ -8,9 +8,10 @@
 #                  not spell it out, because grep-based "no production port"
 #                  guards match comments too)
 #   __LAB_DIR__    absolute lab root, used for the trust entry below
-# The bearer token is read from the environment at connect time; export it in
-# the pane that launches codex:
-#   export CROSS_AGENT_TEAMS_MCP_TOKEN="$(cat $LAB/token)"
+# The bearer token is read from the environment at connect time — but for a
+# `--remote` codex that environment is the APP-SERVER's, not the launching
+# pane's, so exporting it next to the client does nothing and the daemon
+# answers 401.  `start-lab-appserver.sh` sets it; see the note there.
 #
 # Misconfiguring the url is the single most damaging lab mistake: codex would
 # register into the PRODUCTION daemon and pollute jt's live identities.  The

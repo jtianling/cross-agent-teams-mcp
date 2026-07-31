@@ -24,7 +24,23 @@ if lsof -nP -iTCP:"$LAB_APPSERVER_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
   exit 0
 fi
 
-CODEX_HOME="$LAB_CODEX_HOME" nohup "$codex_bin" \
+# A `--remote` codex runs its tool calls INSIDE this app-server process
+# (measured 2026-07-31: two panes' tool shells share one parent, and a pane-only
+# marker reads back unset), so the model's environment IS this environment.
+# Two consequences the launcher must handle:
+#   - `bearer_token_env_var` resolves here, not in the pane that starts codex.
+#     Exporting the lab token next to the client leaves the app-server holding
+#     whatever the launching shell had — in practice the production token, and
+#     the lab codex answers 401 against the lab daemon.
+#   - $TMUX_PANE inherited from the launching shell is handed to every session
+#     as its own, so a production pane id must not ride in here.
+[ -z "${XATS_IDENTITY_KEY:-}" ] || echo \
+  "lab: WARNING XATS_IDENTITY_KEY is set; every lab codex session will read it" >&2
+
+env -u TMUX -u TMUX_PANE \
+  CODEX_HOME="$LAB_CODEX_HOME" \
+  CROSS_AGENT_TEAMS_MCP_TOKEN="$LAB_TOKEN" \
+  nohup "$codex_bin" \
   app-server \
   --listen "ws://127.0.0.1:$LAB_APPSERVER_PORT" \
   >>"$log" 2>&1 &
