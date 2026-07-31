@@ -56,6 +56,18 @@ A registration carrying a token the daemon does not recognise SHALL be treated
 as offering no correlation and SHALL fall back, never fail.  The recovery notice
 SHALL NOT contain the identity key, unchanged from the existing wording rule.
 
+This requirement SHALL NOT be described as making codex recovery automatic, nor
+as covering restarts generally.  Three limits are part of it: a FIRST launch
+receives no notice and therefore no token, so it still falls back to the
+unique-candidate rule; the re-registration the notice asks for stops at the
+host's approval prompt unless the user has pre-authorised it, so what is
+automatic is the PROMPTING, not the recovery; and whether one restart action
+brings two panes back depends on both panes having entered the recoverable
+state, which is a property of the launcher's adoption timing rather than of
+this requirement.  What this establishes is narrower and worth stating exactly:
+a caller that received a notice can name its own pane, so overlapping
+pre-registration windows no longer make every one of them fail.
+
 #### Scenario: Two panes restarted together each bind their own
 - **GIVEN** two panes with pending pre-reg rows and their own carriers, each having been sent a recovery notice with its own token
 - **WHEN** each codex re-registers quoting the token it received
