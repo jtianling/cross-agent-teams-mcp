@@ -49,6 +49,9 @@ OUT="$(mktemp)"
 
 curl -fsS "http://127.0.0.1:$LAB_PORT/health" >/dev/null 2>&1 \
   || fail "lab daemon is not up; run lab/start-lab-daemon.sh --fresh first"
+# A healthy port only proves some daemon is there.  On 2026-07-31 a second
+# lab took this port and every call in this scenario went to its daemon.
+lab_guard_port_owner
 
 # --- lab pane with a codex-shaped foreground carrier ------------------------
 lab_tmux kill-session -t "$SESSION" 2>/dev/null || true

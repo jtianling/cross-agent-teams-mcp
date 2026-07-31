@@ -74,6 +74,9 @@ OUT_1="$(mktemp)"; OUT_2="$(mktemp)"
 
 curl -fsS "http://127.0.0.1:$LAB_PORT/health" >/dev/null 2>&1 \
   || fail "lab daemon is not up; run lab/start-lab-daemon.sh --fresh first"
+# A healthy port only proves some daemon is there.  On 2026-07-31 a second
+# lab took this port and every call in this scenario went to its daemon.
+lab_guard_port_owner
 
 # No `exec`: codex is a CHILD of the pane shell (production shape), which also
 # lets the carrier be replaced without disturbing the pane.
