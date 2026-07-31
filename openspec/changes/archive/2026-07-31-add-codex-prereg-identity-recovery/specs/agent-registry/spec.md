@@ -203,6 +203,38 @@ Every REGISTER-TIME runtime bind — the explicit `ui_pid` bind, the same-thread
 - **THEN** the manual bind's conditional final write changes ZERO rows: the row keeps B's seat `S2`
 - **AND** the call fails closed with `stale_registration_bind` and the outcome is logged (agent ids and counts only)
 
+### Requirement: CLI pre-register-codex-pane forwards identity_key from the environment
+
+The `cross-agent-teams-mcp pre-register-codex-pane` CLI subcommand SHALL accept an optional `--identity-key-env [VAR]` flag and SHALL NOT accept the identity key itself as an argv value (argv is process-visible; the key must never appear there).  When the flag is present, the CLI SHALL read the key from the named environment variable, defaulting `VAR` to `XATS_IDENTITY_KEY` when the flag is given without a value (end of argv, or a following token starting with `--`, means no value), and SHALL forward the value as the `identity_key` argument of the `pre_register_codex_pane` tool call.  When the flag is present but the environment variable is missing, empty, or whitespace-only, the CLI SHALL exit non-zero with an invalid-arguments JSON error without contacting the daemon.  When the flag is absent the CLI call SHALL be byte-identical in behavior to the pre-change CLI.
+
+#### Scenario: CLI forwards the key from the environment
+- **GIVEN** the pane shell exports `XATS_IDENTITY_KEY=K1`
+- **WHEN** the launcher runs `pre-register-codex-pane --pane %1972 --agent-id U1 --identity-key-env`
+- **THEN** the daemon receives `pre_register_codex_pane({pane_id:"%1972", xats_agent_id:"U1", identity_key:"K1"})`
+- **AND** the CLI exits 0 printing the `{ ok: true, ... }` envelope
+- **AND** the key value appears on no process argv
+
+#### Scenario: Custom variable name is honored
+- **GIVEN** the pane shell exports `MY_XATS_KEY=K1`
+- **WHEN** the launcher runs `pre-register-codex-pane --pane %1972 --agent-id U1 --identity-key-env MY_XATS_KEY`
+- **THEN** the daemon receives `identity_key="K1"` read from `MY_XATS_KEY`
+
+#### Scenario: A following flag is not consumed as the variable name
+- **WHEN** the launcher runs `pre-register-codex-pane --pane %1972 --agent-id U1 --identity-key-env --ttl 300`
+- **THEN** the CLI reads the key from `XATS_IDENTITY_KEY` and still honors `--ttl 300`
+
+#### Scenario: Flag without a usable env value fails fast
+- **GIVEN** `XATS_IDENTITY_KEY` is unset, empty, or whitespace-only
+- **WHEN** the launcher runs `pre-register-codex-pane --pane %1972 --agent-id U1 --identity-key-env`
+- **THEN** the CLI exits non-zero with an invalid-arguments error
+- **AND** the daemon is not called
+
+#### Scenario: Old-style invocation is unchanged
+- **WHEN** the launcher runs `pre-register-codex-pane --pane %1972 --agent-id U1`
+- **THEN** the tool call contains no `identity_key` field
+- **AND** exit code and output format match the pre-change CLI
+
+
 ## MODIFIED Requirements
 
 ### Requirement: register_agent auto-binds codex pane via pending pre-reg
@@ -406,34 +438,3 @@ When a pre-reg for the same `pane_id` already exists, the new call SHALL replace
 - **AND** the launcher calls `pre_register_codex_pane({pane_id:"%1972", xats_agent_id:"B"})` without `identity_key`
 - **THEN** the row for `%1972` now has `identity_key = NULL`
 - **AND** no recovery poke fires on behalf of `K1` for this pane
-
-### Requirement: CLI pre-register-codex-pane forwards identity_key from the environment
-
-The `cross-agent-teams-mcp pre-register-codex-pane` CLI subcommand SHALL accept an optional `--identity-key-env [VAR]` flag and SHALL NOT accept the identity key itself as an argv value (argv is process-visible; the key must never appear there).  When the flag is present, the CLI SHALL read the key from the named environment variable, defaulting `VAR` to `XATS_IDENTITY_KEY` when the flag is given without a value (end of argv, or a following token starting with `--`, means no value), and SHALL forward the value as the `identity_key` argument of the `pre_register_codex_pane` tool call.  When the flag is present but the environment variable is missing, empty, or whitespace-only, the CLI SHALL exit non-zero with an invalid-arguments JSON error without contacting the daemon.  When the flag is absent the CLI call SHALL be byte-identical in behavior to the pre-change CLI.
-
-#### Scenario: CLI forwards the key from the environment
-- **GIVEN** the pane shell exports `XATS_IDENTITY_KEY=K1`
-- **WHEN** the launcher runs `pre-register-codex-pane --pane %1972 --agent-id U1 --identity-key-env`
-- **THEN** the daemon receives `pre_register_codex_pane({pane_id:"%1972", xats_agent_id:"U1", identity_key:"K1"})`
-- **AND** the CLI exits 0 printing the `{ ok: true, ... }` envelope
-- **AND** the key value appears on no process argv
-
-#### Scenario: Custom variable name is honored
-- **GIVEN** the pane shell exports `MY_XATS_KEY=K1`
-- **WHEN** the launcher runs `pre-register-codex-pane --pane %1972 --agent-id U1 --identity-key-env MY_XATS_KEY`
-- **THEN** the daemon receives `identity_key="K1"` read from `MY_XATS_KEY`
-
-#### Scenario: A following flag is not consumed as the variable name
-- **WHEN** the launcher runs `pre-register-codex-pane --pane %1972 --agent-id U1 --identity-key-env --ttl 300`
-- **THEN** the CLI reads the key from `XATS_IDENTITY_KEY` and still honors `--ttl 300`
-
-#### Scenario: Flag without a usable env value fails fast
-- **GIVEN** `XATS_IDENTITY_KEY` is unset, empty, or whitespace-only
-- **WHEN** the launcher runs `pre-register-codex-pane --pane %1972 --agent-id U1 --identity-key-env`
-- **THEN** the CLI exits non-zero with an invalid-arguments error
-- **AND** the daemon is not called
-
-#### Scenario: Old-style invocation is unchanged
-- **WHEN** the launcher runs `pre-register-codex-pane --pane %1972 --agent-id U1`
-- **THEN** the tool call contains no `identity_key` field
-- **AND** exit code and output format match the pre-change CLI
