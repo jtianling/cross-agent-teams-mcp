@@ -79,3 +79,12 @@
 - [x] 8.1 全量类型检查与构建 (`npm run build` / `tsc`); 单测套件通过 (注意: 有实时 session, 不跑依赖真实 tmux 的用例, 全部走注入桩)
 - [x] 8.2 无 key 路径回归: 不带 identity_key 的 pre-register/auto-bind/poke 现有测试全绿, 行为零变化
 - [x] 8.3 CHANGELOG 更新; 与 aoe 的配对契约点记录 (--identity-key-env 可选、key 走环境变量不落 argv、降级、ttl_seconds、发布顺序 xats 先发)
+
+## 10. 同 thread 座位的载体已死时不再 fail-closed (实验室 S7 发现)
+
+- [x] 10.1 缺陷: same-thread 证据此前是**终点** — 唯一座位要么继承要么 fail-closed.  座位记录的 pid 属于已死载体时继承不可能, 而 fail-closed 恰好掐死恢复本身要救的场景: pane 被 recovery 叫醒却无处落地, pre-reg 行无人消费, key 附不上.  S7 双形态 (in-pane 保 pty / `respawn-pane -k` 换 pty) 红在同一条 reason 上, 且 recovery 链路 (schedule/detect/deliver) 全绿并已解析出新 carrier — 断点严格在下游重注册的仲裁
+- [x] 10.2 语义改为"证据**指向**而非**终结**": 座位载体**确证已死**时继续走 pre-reg 扫描, **且只到扫描** — 决不到全局 pane 探测 (座位没了不代表知道 caller 现在在哪个 pane); 无证据路径的落到探测的行为不变; 新 outcome `inherit_seat_vacated`, 日志尾巴写明"pre-reg scan only, no pane detection"
+- [x] 10.3 护栏一 — "确证已死" = 记录了**正数 pid 且该 pid 不在运行**; 无 pid 的座位 (tty/pane 绑定本就不记 pid) 是**存活性未知**, 不是死, 仍 fail-closed (与 identity_key 仲裁、seat-follow 同一条规矩)
+- [x] 10.4 护栏二 — bind 因**注册已被取代** (`stale_registration_bind`) 而失败时**仍然终止**, 与存活无关: 行已推进过的注册不得据此获得任何新路径; 把这一条交给扫描自身的 generation 条件写去挡是纵深防御, 不能顶替规则本身.  **本条由既有并发用例抓出** — 第一版修复只判存活, 会把被取代的注册送进扫描并在决策日志里贴错标签
+- [x] 10.5 测试: 座位确证已死 → 走扫描并重绑新 carrier、消费行、附 key、`detectTmuxPane` 零调用; 无 pid 座位 → 仍 fail-closed 且可消费的行原样保留.  双向变异验证 — 钉死放行 → 新用例红在 `inherit_fail_closed`; 存活判据改恒真 → **三个**用例红 (含两个既有); 全量 191 文件 / 1222 用例绿
+- [x] 10.6 实验室验收: S7 双形态由红转绿, 且绿是**正向**断言 (重绑到 carrier #2、pre-reg 行被消费), `--respawn` 跨 pty 后仍绑对; 其余 8 格与基线一致.  换根作为混淆项已先用旧 dist 同根对照消掉; 唯一差异格 (S1 多一条 `pane_has_pending_prereg`) 经因果实验归因于**共享实验室里别人的 pane**, 非本次修复
