@@ -1560,7 +1560,9 @@ export function registerBusinessTools(
       title: 'Pre-register codex tmux pane',
       description: [
         'Pre-register a pending tmux-pane claim so the launcher can claim a tmux pane before starting codex.',
-        'The launcher should call this with `$TMUX_PANE` and a freshly generated UUID, then `exec codex --remote ... -c xats.agent_id="\\"<uuid>\\""`.',
+        'LAUNCHER-ONLY. Call it from the pane shell BEFORE `exec codex`, with that shell\'s own `$TMUX_PANE` and a freshly generated UUID, then `exec codex --remote ... -c xats.agent_id="\\"<uuid>\\""`.',
+        'If you are a codex agent rather than a launcher, do NOT call this: under `--remote` your tools run in a shared app-server, so the `$TMUX_PANE` you can read belongs to whatever pane started that app-server, not to you — calling with it targets somebody else\'s pane.',
+        'A pane whose pending row carries an `identity_key` and whose original codex process is still running is only replaceable by a call supplying THAT SAME key; anything else is refused with `pane_claimed` and the existing row is left untouched. Once that process is gone the pane is free again, so a tmux restart never leaves panes locked.',
         'When the codex agent later calls `register_agent({agent_type:"codex"})` without `ui_pid`, the daemon uses the pending row to resolve the correct UI pid and auto-bind the pane.',
         'Callable without a prior `register_agent` — launchers have no agent identity yet.',
         'Optional `identity_key` is the launcher-minted restart-stable identity handle. It MUST NEVER appear on any process argv and never in model context; the CLI reads the launcher-exported environment variable and forwards it only over the authenticated HTTP channel.',

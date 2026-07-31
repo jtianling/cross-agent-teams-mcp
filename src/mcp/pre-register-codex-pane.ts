@@ -1,6 +1,12 @@
 import { z } from 'zod'
 import type { CodexPanePreRegRepo } from './codex-pane-pre-register-repo.js'
 import { describeRedactedError } from './log-redact.js'
+import {
+  argvContainsUuid,
+  defaultForegroundProbeSync,
+  defaultPaneTtySync,
+  isCodexRemoteProcess,
+} from './auto-bind-codex-pane.js'
 
 export const preRegisterCodexPaneInputSchema = z
   .object({
@@ -23,6 +29,35 @@ export type PreRegisterCodexPaneInput = z.infer<typeof preRegisterCodexPaneInput
 export type PreRegisterCodexPaneResult =
   | { ok: true; expires_at: string }
   | { error: 'invalid_arguments'; detail: string }
+  | { error: 'pane_claimed'; detail: string }
+
+/**
+ * Positive proof that the row's OWN launch still exists on that pane: a
+ * `codex --remote` process on the pane's tty whose argv carries that row's
+ * uuid.  Deliberately NOT the foreground-carrier proof — that one answers "is
+ * it safe to paste here", which is a different question.  A codex suspended
+ * with Ctrl-Z is still that launch, and its row has no reason to become
+ * overwritable at that moment.
+ */
+export type CarrierAliveProbe = (paneId: string, uuid: string) => boolean
+
+export function defaultCarrierAlive(paneId: string, uuid: string): boolean {
+  try {
+    const tty = defaultPaneTtySync(paneId)
+    if (tty === undefined) return false
+    return defaultForegroundProbeSync(tty).some(
+      line => isCodexRemoteProcess(line) && argvContainsUuid(line, uuid)
+    )
+  } catch {
+    // Probe failure is NOT treated as "still alive".  Everywhere else in this
+    // codebase unknown liveness reads as protective, but the asymmetry flips
+    // here: this guard's refusal blocks a LAUNCHER on the critical path just
+    // before `exec codex`, so a transient tmux/ps hiccup would break agent
+    // startup — a far likelier and more damaging outcome than the overwrite it
+    // guards against.  Protection therefore requires positive proof.
+    return false
+  }
+}
 
 const DEFAULT_TTL_SECONDS = 120
 const MIN_TTL_SECONDS = 1
@@ -47,8 +82,46 @@ export class PreRegisterCodexPaneService {
     private readonly repo: CodexPanePreRegRepo,
     private readonly now: () => Date = () => new Date(),
     private readonly onAccepted?: (row: AcceptedPreRegRow) => void,
-    private readonly log?: (line: string) => void
+    private readonly log?: (line: string) => void,
+    private readonly carrierAlive: CarrierAliveProbe = defaultCarrierAlive
   ) {}
+
+  /**
+   * A pending row's identity_key is that identity's ONLY handle for surviving
+   * a restart, and this write path has never had any arbitration: measured,
+   * a stranger overwriting another pane's row destroys the victim's key, makes
+   * the victim fail to bind (the row now carries someone else's uuid), and
+   * blocks the victim's own pane through pane_has_pending_prereg — while the
+   * victim's register_agent still returns success.  It needs no malice: the
+   * tool description says to call with $TMUX_PANE, and a `--remote` model
+   * reads a value that points at somebody else's pane.
+   *
+   * The key on the row is the write credential, because the launcher has it
+   * and a model provably cannot (its tools run in a shared app-server).  Not
+   * "carries A key" — measured, a DIFFERENT key overwrites just as freely, and
+   * keys do leak through that same app-server environment.
+   *
+   * Protection lasts only while the row's own launch is still there.  Without
+   * that, a tmux server restart — which reissues pane ids from %0 while old
+   * rows linger for their TTL — would refuse a whole batch of legitimate
+   * relaunches for up to ten minutes, right after an incident, which is
+   * exactly when agents most need to reach each other.
+   */
+  private refuseReason(
+    paneId: string,
+    incomingKey: string | undefined,
+    nowIso: string
+  ): string | undefined {
+    const existing = this.repo.getByPaneId(paneId)
+    if (existing === undefined) return undefined
+    if (existing.identity_key === null) return undefined
+    if (existing.expires_at <= nowIso) return undefined
+    if (incomingKey !== undefined && incomingKey === existing.identity_key) {
+      return undefined
+    }
+    if (!this.carrierAlive(paneId, existing.xats_agent_id)) return undefined
+    return incomingKey === undefined ? 'no_key' : 'key_mismatch'
+  }
 
   register(args: unknown): PreRegisterCodexPaneResult {
     const parsed = preRegisterCodexPaneInputSchema.safeParse(args)
@@ -65,9 +138,25 @@ export class PreRegisterCodexPaneService {
     }
 
     const now = this.now()
+    const nowIso = now.toISOString()
+    const refused = this.refuseReason(
+      parsed.data.pane_id, parsed.data.identity_key, nowIso
+    )
+    if (refused !== undefined) {
+      this.log?.(
+        `pre-register refused: pane=${parsed.data.pane_id} reason=${refused}`
+      )
+      return {
+        error: 'pane_claimed',
+        detail:
+          `pane ${parsed.data.pane_id} still holds a live pre-registration for ` +
+          'another identity; supply that identity_key to replace it',
+      }
+    }
+
     const ttl = clampTtl(parsed.data.ttl_seconds)
     const expires_at = new Date(now.getTime() + ttl * 1000).toISOString()
-    this.repo.deleteExpired(now.toISOString())
+    this.repo.deleteExpired(nowIso)
     this.repo.upsert({
       pane_id: parsed.data.pane_id,
       xats_agent_id: parsed.data.xats_agent_id,

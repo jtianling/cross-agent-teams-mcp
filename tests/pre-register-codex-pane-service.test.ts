@@ -116,9 +116,15 @@ describe('PreRegisterCodexPaneService', () => {
     expect(repo.listUnexpired(new Date().toISOString())).toHaveLength(0)
   })
 
-  it('overwrite without identity_key clears the stored key', () => {
+  it('overwrite without identity_key clears the stored key once the carrier is gone', () => {
+    // The probe is injected rather than defaulted: the real one shells out to
+    // tmux, and a unit test must never reach the machine's tmux server.  Gone
+    // carrier is also the case this assertion has always been about — a live
+    // one now refuses the overwrite, covered separately.
     const fixed = new Date('2026-01-01T00:00:00.000Z')
-    const svc = new PreRegisterCodexPaneService(repo, () => fixed)
+    const svc = new PreRegisterCodexPaneService(
+      repo, () => fixed, undefined, undefined, () => false
+    )
     svc.register({ pane_id: '%10', xats_agent_id: 'A', identity_key: 'K1' })
     svc.register({ pane_id: '%10', xats_agent_id: 'B' })
     const row = repo.getByPaneId('%10')
@@ -132,7 +138,9 @@ describe('PreRegisterCodexPaneService', () => {
     const svc = new PreRegisterCodexPaneService(
       repo,
       () => fixed,
-      row => { accepted.push(row) }
+      row => { accepted.push(row) },
+      undefined,
+      () => false
     )
     svc.register({ pane_id: '%10', xats_agent_id: 'U1', identity_key: 'K1' })
     svc.register({ pane_id: '%10', xats_agent_id: 'U2' })
@@ -198,5 +206,83 @@ describe('PreRegisterCodexPaneService', () => {
     svc.register({ pane_id: '%NEW', xats_agent_id: 'Y' })
     const rows = repo.listUnexpired(new Date(t).toISOString())
     expect(rows.map(r => r.pane_id).sort()).toEqual(['%NEW'])
+  })
+
+  // S9: measured, a stranger overwriting another pane's row destroyed the
+  // victim's identity_key, made the victim fail to bind against the stranger's
+  // uuid, and blocked the victim's own pane for the stranger's chosen TTL —
+  // while the victim's register_agent still returned success.
+  describe('a live keyed row is only replaceable by something holding its key', () => {
+    const fixed = new Date('2026-01-01T00:00:00.000Z')
+    function svcWith(alive: boolean): PreRegisterCodexPaneService {
+      return new PreRegisterCodexPaneService(
+        repo, () => fixed, undefined, undefined, () => alive
+      )
+    }
+    function seedVictim(): void {
+      new PreRegisterCodexPaneService(
+        repo, () => fixed, undefined, undefined, () => false
+      ).register({ pane_id: '%10', xats_agent_id: 'U_VICTIM', identity_key: 'K_V' })
+    }
+
+    it('refuses a keyless overwrite and leaves the row untouched', () => {
+      seedVictim()
+      const res = svcWith(true).register({ pane_id: '%10', xats_agent_id: 'U_X' })
+      expect(res).toMatchObject({ error: 'pane_claimed' })
+      const row = repo.getByPaneId('%10')
+      expect(row?.xats_agent_id).toBe('U_VICTIM')
+      expect(row?.identity_key).toBe('K_V')
+    })
+
+    it('refuses an overwrite carrying a DIFFERENT key', () => {
+      // Holding *a* key is not the credential: a different one overwrote just
+      // as freely, and keys do leak through the shared app-server environment.
+      seedVictim()
+      const res = svcWith(true).register({
+        pane_id: '%10', xats_agent_id: 'U_X', identity_key: 'K_OTHER',
+      })
+      expect(res).toMatchObject({ error: 'pane_claimed' })
+      expect(repo.getByPaneId('%10')?.identity_key).toBe('K_V')
+    })
+
+    it('accepts the rightful launcher re-announcing with the same key', () => {
+      seedVictim()
+      const res = svcWith(true).register({
+        pane_id: '%10', xats_agent_id: 'U_NEW', identity_key: 'K_V',
+      })
+      expect(res).toMatchObject({ ok: true })
+      expect(repo.getByPaneId('%10')?.xats_agent_id).toBe('U_NEW')
+    })
+
+    it('stops protecting once the row\'s own carrier is gone', () => {
+      // A tmux server restart reissues pane ids from %0 while old rows linger
+      // for their TTL; protecting them would refuse a whole batch of legitimate
+      // relaunches right after an incident.
+      seedVictim()
+      const res = svcWith(false).register({ pane_id: '%10', xats_agent_id: 'U_X' })
+      expect(res).toMatchObject({ ok: true })
+      expect(repo.getByPaneId('%10')?.xats_agent_id).toBe('U_X')
+    })
+
+    it('does not protect a keyless row, nor consult the probe for one', () => {
+      let probed = 0
+      new PreRegisterCodexPaneService(
+        repo, () => fixed, undefined, undefined, () => false
+      ).register({ pane_id: '%10', xats_agent_id: 'U_A' })
+      const svc = new PreRegisterCodexPaneService(
+        repo, () => fixed, undefined, undefined, () => { probed += 1; return true }
+      )
+      expect(svc.register({ pane_id: '%10', xats_agent_id: 'U_B' })).toMatchObject({ ok: true })
+      expect(probed).toBe(0)
+    })
+
+    it('does not protect an expired row', () => {
+      seedVictim()
+      const later = new Date('2026-01-01T01:00:00.000Z')
+      const svc = new PreRegisterCodexPaneService(
+        repo, () => later, undefined, undefined, () => true
+      )
+      expect(svc.register({ pane_id: '%10', xats_agent_id: 'U_X' })).toMatchObject({ ok: true })
+    })
   })
 })

@@ -77,3 +77,44 @@ The daemon SHALL log the correlation outcome for every codex registration that r
 #### Scenario: A resolved correlation leaves a trace
 - **WHEN** a registration's correlation resolves and its row is consumed
 - **THEN** the decision log records that the row was chosen by correlation, with the caller id and the chosen pane — never any key value
+
+### Requirement: A live keyed pre-registration is only replaceable by its own key
+
+`pre_register_codex_pane` SHALL refuse a write that would replace an existing
+pre-registration row when ALL of the following hold: the row is UNEXPIRED, it
+carries an `identity_key`, the incoming call does not carry that same key, and
+the row's own launch is still present on that pane (a `codex --remote` process
+on the pane's tty whose argv carries the ROW's stored uuid).  The refusal SHALL
+leave the stored row completely untouched and SHALL be reported as
+`pane_claimed` with a detail naming no key value.
+
+Holding SOME key SHALL NOT suffice — only the row's own key.  A key is
+obtainable from the shared app-server environment, so "carries a key" would
+admit exactly the caller this rule exists to exclude, while the launcher for
+that pane always has the matching one.
+
+Protection SHALL end when the row's own launch is gone.  Liveness for this
+purpose SHALL NOT require the foreground-carrier proof: that proof answers
+whether it is safe to paste into the pane, and a suspended codex is still the
+same launch.  A probe that cannot be completed SHALL read as NOT protected —
+uniquely among this system's liveness rules — because a refusal here blocks a
+launcher immediately before `exec codex`, so a transient tmux or ps failure
+would break agent startup, a likelier and worse outcome than the overwrite
+being guarded against.
+
+A row carrying NO key, an expired row, and a pane with no row SHALL all remain
+freely writable, and the liveness probe SHALL NOT be consulted for them.
+
+#### Scenario: A stranger cannot destroy a live identity's handle
+- **GIVEN** a pane whose unexpired pre-registration carries an identity key and whose original codex process is still running
+- **WHEN** another caller pre-registers that pane with no key, or with a different key
+- **THEN** the call is refused with `pane_claimed`, and the stored uuid, key and expiry are unchanged
+
+#### Scenario: The rightful launcher replaces its own row
+- **WHEN** a caller pre-registers that pane supplying the row's own identity key
+- **THEN** the write is accepted and the row takes the new uuid
+
+#### Scenario: A vacated pane is free again
+- **GIVEN** the row's stored uuid no longer matches any process on that pane
+- **WHEN** any caller pre-registers that pane
+- **THEN** the write is accepted, so a tmux server restart that reissues pane ids never leaves a batch of panes locked for the remainder of their TTL
