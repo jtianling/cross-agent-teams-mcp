@@ -223,6 +223,21 @@ DB 与 `daemon.log`, cleanup 会 `lab_tmux_kill_server`.  这套口径在**独�
    拼话术"推出来的不算观察.  必须带 `-J` 合并折行: 恢复话术是一条约 350 字符的
    长行, 窄 pane 下 `name="x"` 会被折断, 不带 `-J` 会产生偶发假 FAIL.
 
+### 未偿的夹具债: 九个场景复刻的是**手工/resume** 形态, 不是生产形态
+
+每个场景头部的 `CARRIER SHAPE` 注释都写明了这一条, 这里给出**什么时候必须还**:
+
+- 生产日志出现 **`reason=no_foreground_leader`** —— 说明载体折叠在真实形态上失败了; 或者
+- **要动 `collapseCarrierMatches`** —— 改之前必须先有一个复刻生产启动形态的场景, 否则改的是
+  一条没有真实覆盖的逻辑.
+
+**验收判据**: 载体由**非交互 `sh -c` + `exec`** 拉起, 且断言 `ps` 里那条 codex 行满足
+**`pid === pgid`**.  不满足即说明夹具又漂回手工形态了.
+
+为什么现有夹具验不到: aoe 的 bootstrap 是非交互 `sh -c`, **没有 job control**, 靠 `exec` 让
+codex 顶替 shell 从而成为进程组组长; 而 `send-keys` 打进**交互式** shell, job control 会给每个
+job 自己的进程组, **于是夹具永远有组长, 换真身也一样** —— 不忠实的是**启动方式**, 不是载体.
+
 ### 真实 codex 必须带 `--remote` 才会被认领
 
 daemon 识别 codex 载体的判据里**硬性要求 argv 含 `--remote`**
