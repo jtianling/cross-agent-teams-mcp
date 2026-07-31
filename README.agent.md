@@ -577,6 +577,14 @@ Key points (understand before changing anything):
   restarts, picks up upgrades), while `pre-register-codex-pane` in the
   launcher uses the bare package name so every codex launch hits the npx
   cache instead of a registry round-trip.
+- **`start-xats` restarts the codex app-server too, which ends every `--remote`
+  conversation on the machine.**  Measured 2026-08-01: the daemon (9100) and the
+  codex app-server (8799) start 45s apart from the SAME parent shell.  Under
+  `--remote` a codex session lives inside the app-server, so restarting drops
+  them all — each pane reports `WebSocket protocol error: Connection reset
+  without closing handshake` and the user must `codex resume <id>` by hand.
+  **MCP sessions self-heal; conversations do not.**  So "restart the daemon"
+  is never just an agent-plumbing cost, and it must not be proposed as one.
 - **Publishing a release breaks every `--no-install` consumer of `@latest`
   until the npx cache is warmed.**  `npm` resolves `latest` against the
   REGISTRY, so the moment a new version is published the spec points at a
