@@ -135,6 +135,47 @@ app-server 继承下来 —— **只跑一个会话就会把它当成 codex 的�
 **单入口闭环的行为侧确认**: 同一轮里注册成功、takeover 成功、`agents` 行存在, 而 `identity_key`
 仍是 `-`.  与代码侧的结论一致 —— **注册这条路自己不会给 agents 行装上 key**.
 
+## 影响面比"双 pane 会话"大: 无关会话之间会互相挡 (行为证明, 2026-07-31)
+
+实验室真链路测到: **一个完全无关的单 pane 会话 (cellA) 的恢复, 被另一个会话 (cellB) 的待定行
+挡掉了**.
+
+```
+auto-bind skip: pane=%95 reason=identity_key_contradiction caller=<cellA>
+auto-bind skip: reason=candidate_count caller=<cellA> candidates=2 pending=3 panes=%96,%94
+```
+
+`%95` 因 key 对不上被**正确**排除 (那道守卫是好的), 但 `%96` 与 `%94` 凑成两个候选 → 整体放弃.
+**清掉 cellB 之后同一条路立刻成功** —— 这是行为证明, 不是读日志推断.
+
+**准确的触发条件** (这一条容易被说大, 已纠正过一次): 候选来自**未过期的行**, 不是活着的载体,
+长期挂着的 codex **不贡献候选**.  所以条件是 **"同一个 600s TTL 窗口内发生过 ≥2 次 codex pane
+启动"**, 不是"机器上有几个 codex 会话".  在一台会重启 pane 的机器上这很常见, 但它**不是稳态**:
+十分钟内没有新启动, 行全部过期, 下一次单独启动就正常.
+
+尽管如此, 影响面确实比原先记的大: 原文记的是"带右 pane 的会话每次 Shift+C 必然产出两行",
+而实际是 **"任何一次恢复, 只要 10 分钟内这台机器上另起过 codex pane, 就可能失败"** —— 而且
+现象**静默**: 用户只看到"重启后没接回来", 没有任何东西指向那个不相干的会话.
+
+## 恢复链路本身已被证明是好的 (带反向对照)
+
+同一轮实验室真链路:
+
+```
+codex-recovery scheduled / detected: pid=70807 / resume(guard_failed) / delivered
+→ cella | pane=%94 | pid=70807 (新载体, 重启前 52282) | key=4325f955…(同一把)
+```
+
+**反向对照**: 把 `agents.identity_key` 抹成 NULL 再走同一条路 → `codex-recovery scheduled`
+计数 **2 → 2, 一条都没新增**, 而 pane 确实换了进程.  所以"接回来了"确实是 key 起的作用.
+
+**结论: 恢复不通不是因为恢复坏了, 是因为入口 (行被消费 → key 附到 agents 行) 被 candidate_count
+关掉了.**  M9 因此不需要动 recovery 侧任何东西.
+
+**一条要算进"闭环"定义的**: 恢复**不是全自动的** —— poke 送达后 codex 调 `register_agent` 会
+撞上审批对话框 (生产形态无 bypass flag), 实验室里是人工按的允许.  用户未预授权时, 恢复会停在
+那里等人.  所以"自动恢复"准确说是"**自动引导到一次需要用户确认的注册**".
+
 ## 信任分析 (这一节决定选型, 不只是取舍)
 
 **caller 报什么都可伪造; 真正的问题是 daemon 能验证什么.**
