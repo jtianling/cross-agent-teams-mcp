@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **codex 重注册按恢复 poke 携带的一次性 nonce 认领自己那一行.**  预注册扫描此前唯一的关联手段是"全机恰好一个候选" —— 那不是关联, 是在没有关联时对唯一性的碰运气.  两个 codex pane 的预注册窗口一重叠 (一次 Shift+C 前后脚起两个 pane 即必然如此), 候选数为 2, **两边都绑不上**; 而绑不上就消费不了行, 消费不了行 `agents.identity_key` 就永远拿不到 key (那是它**唯一**的入口), 于是下次重启 `findByIdentityKey` 返回空、**恢复 poke 从不调度** —— 生产实测 `reason=candidate_count candidates=2 pending=2 panes=%82,%83`, 两个 caller 双双被挡.  影响面还跨会话: 实验室实测一个**完全无关**的单 pane 会话的恢复被另一会话的待定行挡掉 (`candidates=2 pending=3`), 清掉那个会话后同一条路立刻成功.  四轮判定实验 (模型能否读自己的 `-c xats.agent_id` / rollout 是否含配置覆盖 / app-server 是否暴露每会话配置 / pane 载体是否持有本会话 rollout 的 fd) **全否** —— 模型可读的会话级值只有 `CODEX_THREAD_ID` 一个, rollout 的 fd 全在 app-server 手里 (唯一分不清 pane 的那个进程).  因此改为**不再推导**: daemon 发恢复 poke 时对**目标 pane** 铸一个一次性 nonce 并写进话术, codex 重注册时原样带回 (`register_agent` 新增可选 `recovery_nonce`), daemon 据此**定向**到那一行 —— 该对应关系是 daemon 自己发出去的, 不是推断.  定向在**逐行评估之前**收窄待选行, 所以无关 pane 的行既不会被探测也不会被计数; 定向**只负责选行**, 前台载体证明、identity_key 归属仲裁、快照一致、事务内重仲裁一道不豁免.  nonce 每次**发送**时铸 (重试会作废上一枚, 只有真正躺在 pane 里的那条话术能被引用)、扫描开始即消费 (失败的 bind 不得留下一枚还能定向后续注册的令牌)、随调度取消 (行被消费/覆盖/过期) 一并作废、只在内存中 (发它的 daemon 一没它就无意义).  **不带或带一个不认识的 nonce 时行为与现状逐字一致** —— 今天已实测模型会跳过文档规定的步骤, 所以照做则严格更好、不照做不比现在差.  话术仍然决不含 identity_key.
+
 ## 0.8.0
 
 ### Fixed
