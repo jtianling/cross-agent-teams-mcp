@@ -204,6 +204,16 @@ DB 与 `daemon.log`, cleanup 会 `lab_tmux_kill_server`.  这套口径在**独�
 | `seat-follow ...` | 改名跟随的迁移 / 跳过 / 冲突 |
 | `codex-recovery ...` | 恢复 poke 的调度 / 探测 / 发送 / 取消 (带 ISO 时间戳, 供 S4 分段计时).  **连字符**, 代码里就是 `codex-recovery`; 写成空格会静默漏掉全部恢复日志 |
 
+**逐 pane 的拒绝 reason 依赖 tmux server 的生态, 不要拿它当稳定断言.**  实测 (2026-07-31,
+因果实验: 建一个无关的 codex 形状 pane → 该行消失 → 拆掉 → 该行回来): **同一台 tmux server
+上多一个无关的 codex 载体, 会让 detect fallback 提前收手, 少写一条 per-pane 拒绝日志**
+(例如 `pane_has_pending_prereg`).  结论不变, 但**证据链变薄**.  所以:
+
+- 断言"**某件事没发生**"时, 挑那些不随旁边有几个 pane 而变的 reason (例如
+  `identity_key_*` 那一族);
+- 真要断言逐 pane 的 reason, 场景必须**独占 tmux server** (像 S5 那样自己重启一台);
+- 在忙机器上看到这类断言红掉, **先怀疑生态, 别先怀疑代码**.
+
 4. **投递内容 (仅投递类场景)**: `lab_tmux capture-pane -pJ -t <pane>` 抓到的
    pane 文字.  日志只证明 daemon 把 holder 解析对了, **话术里写的是谁**只有
    pane 内容能证 —— 那是重启后的 codex 真正读到的东西, 从"代码用同一个 holder
