@@ -5,7 +5,7 @@
 #   lab/s9-prereg-overwrite.sh            # attack order:  launcher first, stranger second
 #   lab/s9-prereg-overwrite.sh --reverse  # healing order: stranger first, launcher second
 #   lab/s9-prereg-overwrite.sh --keep-key # the state a COALESCE fix would leave
-#   lab/s9-prereg-overwrite.sh --drop-key # same sequence under TODAY's behaviour
+#   lab/s9-prereg-overwrite.sh --drop-key # an UNPROTECTED row is still freely overwritable
 #   lab/s9-prereg-overwrite.sh --other-key # stranger writes carrying a key of its own
 #
 # Why this scenario exists.  S8 measured that a `--remote` codex reads its
@@ -30,6 +30,13 @@
 # The assertions below encode what MUST hold for the victim, so a red here is a
 # product finding, not a broken fixture.  Do not weaken them to make it green.
 #
+# One assertion was retired rather than weakened when the guard landed:
+# --drop-key used to assert "today's behaviour clears the key", which recorded
+# the PRE-FIX state and could only go red once fixed.  It now asserts the half
+# of the rule that survives — an unprotected row is still freely overwritable —
+# because a fixture that encodes a defect has nothing left to guard once the
+# defect is gone.
+#
 # All stubs: the question is entirely daemon-side, so no real codex is needed.
 # Stub carrier shape and the "key only via env, never argv" rule are S1's.
 
@@ -49,6 +56,10 @@ KEY_B="99999999-0000-4000-8000-0000000000B9"
 KEY_X="99999999-0000-4000-8000-0000000000X9"
 UUID_B="9B9B9B9B-9999-4999-8999-99999999999B"
 UUID_A="9A9A9A9A-9999-4999-8999-99999999999A"
+# A uuid no process on the pane carries: it makes the row UNPROTECTED without
+# having to kill the carrier, which would also change what the pane looks like
+# to every other probe.
+UUID_GHOST="9C9C9C9C-9999-4999-8999-99999999999C"
 TEAM="lab"
 NAME_B="agent-victim"
 
@@ -77,7 +88,7 @@ row_key()  { sqlite3 "$db" "SELECT COALESCE(identity_key,'-') FROM codex_pane_pr
 # The victim's launcher call: key travels in the environment, never in argv.
 launcher_prereg() {
   XATS_IDENTITY_KEY="$KEY_B" node "$LAB_REPO/dist/cli.js" pre-register-codex-pane \
-    --pane "$PANE" --agent-id "$UUID_B" --identity-key-env XATS_IDENTITY_KEY \
+    --pane "$PANE" --agent-id "${1:-$UUID_B}" --identity-key-env XATS_IDENTITY_KEY \
     --ttl 600 --port "$LAB_PORT" --token "$LAB_TOKEN" >/dev/null \
     || fail "victim's launcher pre-registration failed"
 }
@@ -111,6 +122,17 @@ lab_tmux send-keys -t "$PANE" \
 sleep 1
 note "victim pane $PANE ($TTY) hosting the victim's carrier"
 
+# The lab tmux server hands out pane ids from %0 again after every rebuild, while
+# pre-reg rows are keyed by pane id in a database that outlives it — so a row
+# left by the PREVIOUS run lands on THIS run's pane.  Every mode below reasons
+# about "the row on this pane", and starting on somebody else's leftovers makes
+# them measure an overwrite of that leftover instead of the path under test.
+# The failure presents as a FALSE RED, which is harder to notice than a false
+# green: red looks like the fixture working.
+[ "$(row_uuid)" = "-" ] \
+  || fail "pane $PANE already carries a pre-reg row (uuid: $(row_uuid)) before this run wrote anything — \
+stale row from an earlier run on a rebuilt tmux server; clear codex_pane_pre_registrations and retry"
+
 # --- what a COALESCE fix would leave behind, and what today leaves behind ----
 # The proposed fix ("a keyless upsert must not clear an existing key") turns the
 # stranger's row into (stranger's uuid, VICTIM's key).  Nothing today produces
@@ -135,7 +157,9 @@ note "victim pane $PANE ($TTY) hosting the victim's carrier"
 # which pane is whose (recycled pane ids, or the app-server's one fixed value)
 # produce exactly this write.
 if [ "$MODE" = "--keep-key" ] || [ "$MODE" = "--drop-key" ] || [ "$MODE" = "--other-key" ]; then
-  launcher_prereg
+  # --drop-key deliberately seeds a uuid with no process behind it, so the row
+  # is UNPROTECTED; the other two seed the live victim so the row IS protected.
+  if [ "$MODE" = "--drop-key" ]; then launcher_prereg "$UUID_GHOST"; else launcher_prereg; fi
   [ "$(row_key)" = "$KEY_B" ] || fail "precondition: victim's key not on the row (key: $(row_key))"
 
   if [ "$MODE" = "--other-key" ]; then
@@ -148,19 +172,48 @@ if [ "$MODE" = "--keep-key" ] || [ "$MODE" = "--drop-key" ] || [ "$MODE" = "--ot
     [ "$(row_key)" = "$KEY_B" ] \
       || fail "a write carrying a DIFFERENT key overwrote the victim's row (key is now $(row_key)) — \
 holding some key is not evidence of holding this pane's key, so 'must carry a key' cannot be the whole rule"
+    [ "$(row_uuid)" = "$UUID_B" ] \
+      || fail "the row's uuid changed to $(row_uuid); a refused write must leave the row untouched"
+    # The refusal IS the result.  Everything past this point (pane changes
+    # hands, stranger registers) only exists to show where a row that DID get
+    # overwritten ends up, so running it after a refusal would assert on a
+    # setup step rather than on behaviour.
+    note "PASS($MODE): the write was refused and the row is byte-identical (uuid=$(row_uuid) key=$(row_key))"
+    echo "S9 $MODE PASS"
+    exit 0
   elif [ "$MODE" = "--keep-key" ]; then
     node "$LAB_REPO/lab/lab-mcp.mjs" pre_register_codex_pane \
       "{\"pane_id\":\"$PANE\",\"xats_agent_id\":\"$UUID_A\",\"identity_key\":\"$KEY_B\",\"ttl_seconds\":600}" \
       > "$OUT" 2>&1
+    # REACHABILITY, so this mode is not mistaken for a stale assertion: a write
+    # carrying the row's OWN key is accepted by design, so the question this
+    # mode asks is who else can hold that key.  Answer, from two measured
+    # facts: a --remote model reads the app-server's environment, which carries
+    # ONE $TMUX_PANE and ONE $XATS_IDENTITY_KEY, both inherited from the shell
+    # that started it — i.e. naming the SAME pane.  An app-server started from a
+    # keyed codex pane therefore hands every session through it that pane's id
+    # AND its key.  Production does not satisfy that today (its app-server
+    # environment has TMUX_PANE but no identity key), so this is a guard with a
+    # stated precondition, not a scenario that already happens.
     note "stranger's call (key preserved, simulating the COALESCE fix): $(cat "$OUT")"
     [ "$(row_key)" = "$KEY_B" ] \
       || fail "could not construct the post-fix state: key is $(row_key), wanted the victim's key"
   else
+    # Protection is not unconditional, and this mode guards the other side of
+    # it: a row whose OWN launch is gone stops protecting the pane, or a tmux
+    # server restart — which reissues pane ids while rows live out their TTL —
+    # would refuse a batch of legitimate relaunches right after an incident.
+    # Here the row names a uuid no process carries, so the pane is unprotected
+    # and a keyless write still overwrites and clears the key, as before.
+    note "unprotected=carrier_absent (row uuid $UUID_GHOST has no process on this pane)"
     note "$(stranger_prereg)"
     [ "$(row_key)" = "-" ] \
-      || fail "expected today's behaviour to clear the key, but the row still carries $(row_key)"
+      || fail "an UNPROTECTED row (its own carrier absent) refused a keyless overwrite: key is still $(row_key) — \
+protection must end with the row's launch, or a tmux restart locks panes for the rest of their TTL"
   fi
-  [ "$(row_uuid)" = "$UUID_A" ] || fail "the row does not carry the stranger's uuid (got: $(row_uuid))"
+  [ "$(row_uuid)" = "$UUID_A" ] \
+    || fail "the row does not carry the stranger's uuid (got: $(row_uuid)) — \
+this is a SETUP step for the downstream half, not a product assertion"
   note "row is now uuid=$(row_uuid) key=$(row_key)"
 
   # the pane changes hands: it now hosts the STRANGER's carrier
