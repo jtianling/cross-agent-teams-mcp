@@ -193,7 +193,8 @@ aoe 的 `find_rollout` 判据只有三条: rollout 文件名时间戳 ≥ pane �
 
 它今天已被实测证明会**给出错误映射**: 一次 Shift+C 后 `%13` 的 slot 认领到了 `%12` 重启后新开
 的会话 (aoe 侧一个陈旧 `pane_live` 行导致的洞, 窗口 15 分钟).  该洞归 aoe 修, 但**修好之后
-判据本身仍是 cwd + 时间序**.
+判据本身仍是 cwd + 时间序**.  限定 (aoe 后续更正): 陈旧 `pane_live` 行**只在原地 respawn
+那条重启路径上出现**; 冷启动恢复走的是新建 pane, 拿到新 pane id, 没有陈旧行.
 
 采纳延迟实测 **44s / 77s** (轮询节拍, 可改成目录监视压到秒级, 但那只改延迟不改强度).
 
@@ -227,6 +228,17 @@ codex 在 `register_agent` 时回带 —— 于是 **daemon 对 nonce↔pane 的
 - **不需要 aoe 任何配合**, 也不依赖 codex 任何未文档化结构;
 - 覆盖的正是最要紧的那一类: **重启恢复** (poke 存在的场景), 也就是一次 Shift+C 两个 pane 同时
   回来的情形.
+
+**aoe 指出的前置, 核代码后确认已经存在**: Shift+C 有两条路 —— 会话还活着走
+`respawn-pane -k` (**pane id 不变**), 会话的 tmux 没了走 `recover_from_slots` (**重建会话,
+新 pane id**).  第二条路上 pane id 计数器已随 server 清空重置, 所以记录里的 `%5` 可能已经是
+**另一个会话的活 pane**, 那时 poke 不是打空而是**把 nonce paste 进别人的 agent**.
+
+该风险由**已有**的 ownership 确认挡住, 不需要新增: `codex-recovery-poke.ts` 的
+`confirmOwnership` 要求 `classifyCodexCarrier({ …, uuid: row.xats_agent_id })` 返回
+`foreground` —— 也就是**该 pane 上的载体 argv 必须仍带这一行存的 uuid**; 探测阶段
+(`argvContainsUuid(entry.command, row.xats_agent_id)`) 同样要求.  换了主人的 pane 上是**别的
+uuid**, 判定为 `absent`, 不发.  nonce 因此只会进入仍属于该行的那个 pane.
 
 **两条如实的弱点**:
 
