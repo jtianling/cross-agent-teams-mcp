@@ -109,13 +109,21 @@ describe('autoBindCodexPane', () => {
     expect(bindSvc.verify).not.toHaveBeenCalled()
   })
 
-  it('returns false on multi-match without consuming any row', async () => {
+  it('returns false on multi-match without consuming any row, and says why', async () => {
+    // Two codex panes each correctly pre-registered and each hosting their own
+    // carrier is the ORDINARY configuration, not an anomaly — and it makes the
+    // scan fail closed, because "exactly one machine-wide candidate" is its
+    // only correlation.  Failing closed is right; failing SILENTLY is not:
+    // with no line of its own, the only trace was the fallback's later
+    // pane_has_pending_prereg, which names a pane and hides the count that
+    // actually decided it.
+    const log = vi.fn()
     seedCaller(db, 'caller-1')
     repo.upsert({ pane_id: '%10', xats_agent_id: 'U1', expires_at: '2999-01-01T00:00:00Z' })
     repo.upsert({ pane_id: '%20', xats_agent_id: 'U2', expires_at: '2999-01-01T00:00:00Z' })
     const bindSvc = makeBindSvc({ ok: true })
     const ok = await autoBindCodexPane(
-      { callerAgentId: 'caller-1', expectedRegisterGeneration: 1, repo,
+      { callerAgentId: 'caller-1', expectedRegisterGeneration: 1, repo, log,
         runAtomic: fn => db.transaction(fn)(), bindRuntimeIdentitySvc: bindSvc as never },
       {
         listPanes: async () => [
@@ -132,6 +140,10 @@ describe('autoBindCodexPane', () => {
     expect(ok).toBe(false)
     expect(bindSvc.verify).not.toHaveBeenCalled()
     expect(repo.listUnexpired('2100-01-01T00:00:00Z')).toHaveLength(2)
+    expect(log).toHaveBeenCalledWith(expect.stringContaining(
+      'reason=candidate_count caller=caller-1 candidates=2 pending=2'
+    ))
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('panes=%10,%20'))
   })
 
   it('returns false without consuming when argv UUID does not match', async () => {

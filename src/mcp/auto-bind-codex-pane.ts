@@ -337,7 +337,22 @@ export async function autoBindCodexPane(
     if (pending.length === 0) return false
 
     const candidates = await collectCandidates(input, deps, pending)
-    if (candidates.length !== 1) return false
+    if (candidates.length !== 1) {
+      // The ONLY correlation this scan has is "exactly one machine-wide
+      // candidate", so anything else must fail closed.  Say so: every OTHER
+      // refusal here logs its reason, and staying silent on the one that
+      // fires whenever two codex panes have overlapping pre-reg windows made
+      // it indistinguishable from "the scan never ran" — the fallback's
+      // pane_has_pending_prereg line was the only trace, which points at the
+      // pane rather than at the count that actually decided it.
+      input.log?.(
+        `auto-bind skip (debug): reason=candidate_count caller=` +
+        `${input.callerAgentId} candidates=${candidates.length} ` +
+        `pending=${pending.length} ` +
+        `panes=${candidates.map(c => c.pane_id).join(',') || '-'}`
+      )
+      return false
+    }
 
     const chosen = candidates[0]
     // The candidate snapshot predates the awaits above; a launcher overwrite
