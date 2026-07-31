@@ -40,7 +40,9 @@
 ## 5. 回归与实验室
 
 - [x] 5.1 全量单测与类型检查; 全量场景重扫 9/9 表逐格对比, 只有目标格变化
-- [ ] 5.2 新增场景: 两个 pane 的 pre-reg 窗口重叠 → **两条都能被各自的 caller 消费** (今天的红基线是"两条都消费不掉")
+- [x] 5.2 真身复核 (2026-07-31, 私有实验室): N3 红证 (`candidate_count candidates=2`) → N1 绿 (`targeted … rows=1 pending_total=2`, 两条各被各自 caller 消费) → N2 绿 (无关行原样保留).  红证取自**同一份夹具去掉 nonce 那一臂** —— 新代码里 N1/N2 的红已产不出来
+- [x] 5.5 真身**原样带回 nonce, 三次全中**, 模型自读话术无提示; 规则: **要模型"取"值容易出事, 直接给值不会** —— 话术不需更强硬, 但 `outcome=unknown` 日志必须保留 (静默回落的唯一信号)
+- [ ] 5.6 **未验边界**: "aoe 的 Shift+C 能否把双 pane 送进待恢复状态"未验 (该实验室会话 extra pane 无 slot key; 且 daemon 正确拒绝为存活 holder 调度恢复).  归 aoe 查; **本 change 不得宣称"一次 Shift+C 两个 pane 都能自动恢复"**
 - [ ] 5.3 该场景必须复刻**生产启动形态** (非交互 `sh -c` + `exec`, 断言 `pid === pgid`) —— 现有九个夹具复刻的是手工/resume 形态, 是**已知未覆盖**, 而本变更要动的正是载体选择路径
 - [ ] 5.4 spec delta / design / CHANGELOG 更新; 与 `add-codex-prereg-identity-recovery` 的发版顺序写清 (三件一起到位才有正收益)
 
