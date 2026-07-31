@@ -27,6 +27,14 @@ if (candidates.length !== 1) return false   // 唯一的"关联"就在这一行
   这是今天唯一不依赖 caller 自述的证据, 而它证明的是 pane 的身份, 不是 caller 的.
 - **C5 — `thread_id` 在投递路径上已经是承重的.**  codex 的消息投递就是按 thread 经 app-server
   路由的.
+- **C6 — uuid 标识的是"这一次启动", 不是"这个 pane"** (aoe 确认, 此前无处成文): aoe 每次
+  bootstrap 都 `xats_agent_id="$(uuidgen)"` **新铸**, 不按 pane 存下复用.  这与预注册行的主体
+  定义 (pane + uuid = 这一次启动) **是同一个语义**, 两边自洽.
+  推论: 原地 respawn 路径上 pane id 不变而 **uuid 变**, 所以 `confirmOwnership` 的
+  `argvContainsUuid(cmd, row.xats_agent_id)` 能通过, **只因为重启的 pane 先用新 uuid 覆盖了
+  那一行**.  由此存在一个窗口 —— poke 落在"pane 已重启、新预注册尚未写入"之间时, 行里是旧
+  uuid 而 pane 上是新 uuid → 判 `absent` → 不发 → 回落现状.  **失败方向安全, 不需要处理**,
+  但要写下来, 否则日后会被当成缺陷去"修".
 
 ## Goals / Non-Goals
 
