@@ -86,10 +86,17 @@ curl -fsS "http://127.0.0.1:$LAB_PORT/health" >/dev/null 2>&1 \
 # lab took this port and every call in this scenario went to its daemon.
 lab_guard_port_owner
 
-# No `exec`: codex runs as a CHILD of the pane shell, the production shape
-# (ui_pid != pane_pid).  It also makes the restart below faithful — killing the
-# child leaves the shell, the pane AND its pty in place, which is what a codex
-# restart looks like in production.
+# CARRIER SHAPE — this is the HAND-LAUNCHED class, not aoe's.  An interactive
+# shell plus `send-keys` leaves the shell in place with codex as its CHILD
+# (ui_pid != pane_pid); that is how a human, or a `resume`, starts one.  aoe's
+# production bootstrap is a NON-INTERACTIVE `sh -c ... exec codex`: the shell is
+# replaced, so codex itself is the process-group leader (pid === pgid) and there
+# is no shell in between.  Carrier collapse requires one of the matches to BE
+# that leader, and an interactive shell hands every job its own process group —
+# so this fixture always has a leader, whatever it launches.  The production
+# bootstrap is therefore KNOWN-UNCOVERED here, not verified-equivalent.
+# Killing the child also leaves the shell, the pane and its pty in place, which
+# is what the in-pane restart below needs.
 carrier_cmd() {
   echo "node -e 'setInterval(()=>{},1e9)' -- codex --remote $WS -C /lab -c 'xats.agent_id=\"$UUID\"'"
 }
@@ -122,11 +129,11 @@ read -r PANE TTY < <(
 [ -n "$PANE" ] || fail "no lab pane created"
 TTY_NORM="${TTY#/dev/}"
 
-# The carrier pid is resolved from the TTY, never from `#{pane_pid}`.  This
-# fixture uses `exec`, so the two happen to be equal here — but that is a
-# LAB-ONLY identity: in production the shell stays and codex runs as its CHILD,
-# so ui_pid != pane_pid.  Expecting pane_pid would pass here and quietly stop
-# covering the production shape.
+# The carrier pid is resolved from the TTY, never from `#{pane_pid}`.  Neither
+# shape makes those interchangeable: here the shell stays and codex is its
+# child, so ui_pid != pane_pid; under aoe's `exec` bootstrap they coincide only
+# because codex replaced the shell.  Expecting `#{pane_pid}` would encode one
+# launch path's accident as the rule.
 # `|| true`: with `set -e -o pipefail` a no-match grep aborts the script with no
 # message, which reads as a mysterious silent failure instead of the caller's
 # assertion reporting what was actually missing.

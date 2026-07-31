@@ -67,12 +67,15 @@ read -r PANE TTY PANE_PID < <(
 TTY_NORM="${TTY#/dev/}"
 note "pane: $PANE ($TTY) pane_pid=$PANE_PID"
 
-# CARRIER SHAPE: no `exec`, so codex runs as a CHILD of the pane shell — the
-# production shape, where ui_pid != pane_pid (aoe sample: pane_pid=75561 shell,
-# codex child 83254, and the agents row records 83254).  An `exec`-ed carrier
-# replaces the shell and makes pane_pid == ui_pid, an equality that holds ONLY
-# in the lab; a fixture shaped that way lets pane_pid masquerade as the
-# expected ui_pid and quietly stops covering how production actually runs.
+# CARRIER SHAPE — this is the HAND-LAUNCHED class, not aoe's.  An interactive
+# shell plus `send-keys` leaves the shell in place with codex as its CHILD
+# (ui_pid != pane_pid); that is how a human, or a `resume`, starts one.  aoe's
+# production bootstrap is a NON-INTERACTIVE `sh -c ... exec codex`: the shell is
+# replaced, so codex itself is the process-group leader (pid === pgid) and there
+# is no shell in between.  Carrier collapse requires one of the matches to BE
+# that leader, and an interactive shell hands every job its own process group —
+# so this fixture always has a leader, whatever it launches.  The production
+# bootstrap is therefore KNOWN-UNCOVERED here, not verified-equivalent.
 lab_tmux send-keys -t "$PANE" \
   "node -e 'setInterval(()=>{},1e9)' -- codex --remote ws://127.0.0.1:8799 -C /lab -c 'xats.agent_id=\"$UUID\"'" Enter
 sleep 1

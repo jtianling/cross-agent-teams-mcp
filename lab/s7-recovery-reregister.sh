@@ -78,8 +78,17 @@ curl -fsS "http://127.0.0.1:$LAB_PORT/health" >/dev/null 2>&1 \
 # lab took this port and every call in this scenario went to its daemon.
 lab_guard_port_owner
 
-# No `exec`: codex is a CHILD of the pane shell (production shape), which also
-# lets the carrier be replaced without disturbing the pane.
+# CARRIER SHAPE — this is the HAND-LAUNCHED class, not aoe's.  An interactive
+# shell plus `send-keys` leaves the shell in place with codex as its CHILD
+# (ui_pid != pane_pid); that is how a human, or a `resume`, starts one.  aoe's
+# production bootstrap is a NON-INTERACTIVE `sh -c ... exec codex`: the shell is
+# replaced, so codex itself is the process-group leader (pid === pgid) and there
+# is no shell in between.  Carrier collapse requires one of the matches to BE
+# that leader, and an interactive shell hands every job its own process group —
+# so this fixture always has a leader, whatever it launches.  The production
+# bootstrap is therefore KNOWN-UNCOVERED here, not verified-equivalent.
+# Keeping the shell also lets the carrier be replaced without disturbing the
+# pane, which the restart below relies on.
 carrier_cmd() {
   echo "node -e 'setInterval(()=>{},1e9)' -- codex --remote $WS -C /lab -c 'xats.agent_id=\"$UUID\"'"
 }

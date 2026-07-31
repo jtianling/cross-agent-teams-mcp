@@ -18,13 +18,15 @@
 # every scenario still needs one real-codex confirmation run; this script is
 # the high-frequency regression, not the whole verdict.
 #
-# The carrier is started WITHOUT `exec`, so codex runs as a CHILD of the pane
-# shell and ui_pid != pane_pid — the production shape (aoe sample: pane_pid
-# 75561 is the shell, codex is child 83254, and the agents row records 83254).
-# An `exec`-ed carrier replaces the shell and makes pane_pid == ui_pid, an
-# equality that holds ONLY in the lab.  Fixtures shaped that way are how a
-# whole family of gaps got in: the fixture is a little simpler than production
-# and the simplification lands exactly where the decision is made.
+# CARRIER SHAPE — this is the HAND-LAUNCHED class, not aoe's.  An interactive
+# shell plus `send-keys` leaves the shell in place with codex as its CHILD
+# (ui_pid != pane_pid); that is how a human, or a `resume`, starts one.  aoe's
+# production bootstrap is a NON-INTERACTIVE `sh -c ... exec codex`: the shell is
+# replaced, so codex itself is the process-group leader (pid === pgid) and there
+# is no shell in between.  Carrier collapse requires one of the matches to BE
+# that leader, and an interactive shell hands every job its own process group —
+# so this fixture always has a leader, whatever it launches.  The production
+# bootstrap is therefore KNOWN-UNCOVERED here, not verified-equivalent.
 
 source "$(dirname "${BASH_SOURCE[0]}")/lab-env.sh"
 lab_guard_isolation
