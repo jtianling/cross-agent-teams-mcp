@@ -102,6 +102,10 @@ describe('opencode harness via custom + agent_type_name (tmux fallback path)', (
       callerAgentId: expect.any(String),
       agent: 'opencode',
       ui_pid: UI_PID,
+      ui_tty: undefined,
+      tmux_pane_id: undefined,
+      process_pattern: undefined,
+      captureCurrentGeneration: true,
     })
 
     const db = openDb(dbPath)

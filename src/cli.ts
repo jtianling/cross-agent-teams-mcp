@@ -102,16 +102,50 @@ function resolveDaemonPort(explicit: string | undefined): number | undefined {
   return undefined
 }
 
+const IDENTITY_KEY_ENV_DEFAULT = 'XATS_IDENTITY_KEY'
+
+// The key must never appear on any argv (process-visible), so the flag names
+// an environment variable instead of carrying the value. A following token
+// starting with `--` is the next flag, not a variable name.
+function parseIdentityKeyEnvFlag(
+  argv: readonly string[]
+): { present: false } | { present: true; varName: string } {
+  const i = argv.indexOf('--identity-key-env')
+  if (i < 0) return { present: false }
+  const next = argv[i + 1]
+  if (next === undefined || next.startsWith('--')) {
+    return { present: true, varName: IDENTITY_KEY_ENV_DEFAULT }
+  }
+  return { present: true, varName: next }
+}
+
 async function runPreRegisterCodexPane(): Promise<void> {
   const pane = parseArg('--pane')
   const agentId = parseArg('--agent-id')
   const ttlRaw = parseArg('--ttl')
+  const keyEnvFlag = parseIdentityKeyEnvFlag(process.argv)
   const tokenExplicit = parseArg('--token')
   const portExplicit = parseArg('--port')
 
   if (!pane || !agentId) {
-    console.error('usage: cross-agent-teams-mcp pre-register-codex-pane --pane <pane_id> --agent-id <uuid> [--ttl <seconds>] [--port <n>] [--token <t>]')
+    console.error('usage: cross-agent-teams-mcp pre-register-codex-pane --pane <pane_id> --agent-id <uuid> [--identity-key-env [VAR]] [--ttl <seconds>] [--port <n>] [--token <t>]')
     process.exit(2)
+  }
+
+  // Fail fast locally: a missing or empty env value with the flag present is
+  // always invalid, so the daemon is never contacted for it.
+  let identityKey: string | undefined
+  if (keyEnvFlag.present) {
+    const value = process.env[keyEnvFlag.varName]
+    if (value === undefined || value.trim().length === 0) {
+      console.error(JSON.stringify({
+        ok: false,
+        error: 'invalid_arguments',
+        detail: `identity_key env ${keyEnvFlag.varName} is missing or empty`,
+      }))
+      process.exit(2)
+    }
+    identityKey = value
   }
 
   const port = resolveDaemonPort(portExplicit)
@@ -138,6 +172,9 @@ async function runPreRegisterCodexPane(): Promise<void> {
     const args: Record<string, unknown> = {
       pane_id: pane,
       xats_agent_id: agentId,
+    }
+    if (identityKey !== undefined) {
+      args.identity_key = identityKey
     }
     if (ttlRaw !== undefined) {
       const ttl = Number(ttlRaw)

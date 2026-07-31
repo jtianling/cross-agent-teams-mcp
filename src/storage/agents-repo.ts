@@ -67,6 +67,54 @@ export interface IdentityKeyMatch extends RuntimeUiPidMatch {
   runtime_ui_pid: number | null
 }
 
+/** Same-thread evidence row: carries every surviving physical-seat field
+ *  (pid / tty / pane) plus runtime_bound_at so rows left behind by a rename
+ *  chain can collapse to the last-writer-wins owner of one seat. */
+export interface ThreadRuntimeRow extends IdentityKeyMatch {
+  runtime_tty: string | null
+  tmux_pane_id: string | null
+  runtime_bound_at: string | null
+}
+
+/** CAS snapshot of a (device, team, name) row: the stored codex-appserver
+ *  thread plus every physical-seat field.  Captured once before the async
+ *  register probe and again ATOMICALLY inside the upsert transaction; a
+ *  mismatch proves a concurrent registration rewrote the row during the
+ *  probe window.  Deliberately excludes identity_key so the snapshot can
+ *  never leak a key into logs. */
+export interface IdentityRowSnapshot {
+  agent_id: string
+  codex_thread_id: string | null
+  runtime_ui_pid: number | null
+  runtime_tty: string | null
+  tmux_pane_id: string | null
+  runtime_bound_at: string | null
+}
+
+export function sameIdentityRowSnapshot(
+  a: IdentityRowSnapshot | null,
+  b: IdentityRowSnapshot | null
+): boolean {
+  if (a === null || b === null) return a === b
+  return (
+    a.agent_id === b.agent_id &&
+    a.codex_thread_id === b.codex_thread_id &&
+    a.runtime_ui_pid === b.runtime_ui_pid &&
+    a.runtime_tty === b.runtime_tty &&
+    a.tmux_pane_id === b.tmux_pane_id &&
+    a.runtime_bound_at === b.runtime_bound_at
+  )
+}
+
+/** Seat-follow holder row: carries the key value itself because the caller
+ *  row must be bound to exactly the key the holder is giving up, and the
+ *  holder's codex-appserver thread id because thread equality is the only
+ *  authorization that lets an ALIVE holder lose its key. */
+export interface SeatKeyHolder extends IdentityKeyMatch {
+  identity_key: string
+  codex_thread_id: string | null
+}
+
 export const REACHABLE_MS = 4 * 24 * 60 * 60 * 1000
 
 type DbAgentRow = {
@@ -135,6 +183,28 @@ export class AgentsRepo {
     ).get(args.device, args.team, args.name) as { agent_id: string } | undefined
   }
 
+  /**
+   * CAS snapshot read for the register flow.  The same query runs at the
+   * pre-probe capture point and inside the upsert transaction so the two
+   * snapshots are field-for-field comparable.
+   */
+  readIdentityRowSnapshot(args: {
+    device: string
+    team: string
+    name: string
+  }): IdentityRowSnapshot | undefined {
+    return this.db.prepare(
+      `SELECT agent_id,
+              CASE
+                WHEN delivery_kind = 'codex-appserver'
+                 AND json_valid(delivery_payload)
+                THEN json_extract(delivery_payload, '$.thread_id')
+              END AS codex_thread_id,
+              runtime_ui_pid, runtime_tty, tmux_pane_id, runtime_bound_at
+       FROM agents WHERE device=? AND team=? AND name=?`
+    ).get(args.device, args.team, args.name) as IdentityRowSnapshot | undefined
+  }
+
   findByRuntimeUiPid(ui_pid: number, localDevice: string): RuntimeUiPidMatch[] {
     return this.db.prepare(
       `SELECT agent_id, device, team, name, role, last_seen_at
@@ -170,6 +240,82 @@ export class AgentsRepo {
     this.db.prepare(
       `UPDATE agents SET identity_key = NULL WHERE agent_id = ?`
     ).run(agent_id)
+  }
+
+  bindIdentityKey(agent_id: string, identity_key: string): void {
+    this.db.prepare(
+      `UPDATE agents SET identity_key = ? WHERE agent_id = ?`
+    ).run(identity_key, agent_id)
+  }
+
+  /**
+   * Seat-follow holder lookup: OTHER rows on the caller's device that still
+   * hold an identity_key and whose runtime binding places them on the seat
+   * the caller just bound.  After a same-pane rebind the incumbent row's
+   * tmux_pane_id is already cleared (last-writer-wins pane binding), so the
+   * match runs only on the fields that survive it: runtime_ui_pid, and
+   * runtime_tty for the tty-verified bind path that records no pid.
+   */
+  findKeyHoldersBySeat(
+    caller_agent_id: string,
+    localDevice: string
+  ): SeatKeyHolder[] {
+    return this.db.prepare(
+      `SELECT h.agent_id, h.device, h.team, h.name, h.role,
+              h.runtime_ui_pid, h.identity_key, h.last_seen_at,
+              CASE
+                WHEN h.delivery_kind = 'codex-appserver'
+                 AND json_valid(h.delivery_payload)
+                THEN json_extract(h.delivery_payload, '$.thread_id')
+              END AS codex_thread_id
+       FROM agents h
+       JOIN agents c ON c.agent_id = ?
+       WHERE h.agent_id != c.agent_id
+         AND h.device = c.device
+         AND h.device = ?
+         AND h.role != '__channel_proxy__'
+         AND h.identity_key IS NOT NULL
+         AND (
+           (c.runtime_ui_pid IS NOT NULL
+            AND h.runtime_ui_pid = c.runtime_ui_pid)
+           OR (c.runtime_tty IS NOT NULL
+               AND h.runtime_tty = c.runtime_tty)
+         )
+       ORDER BY h.last_seen_at DESC`
+    ).all(caller_agent_id, localDevice) as SeatKeyHolder[]
+  }
+
+  /**
+   * Same-thread evidence lookup: rows on the caller's device whose
+   * codex-appserver thread equals the caller's AND that still carry a bound
+   * runtime (runtime_ui_pid or runtime_tty).  A codex registration with such
+   * evidence is a same-conversation re-registration: it must inherit the
+   * collapsed physical seat and never scan foreign pre-reg rows.
+   * `excludeAgentId` is optional so the register flow can include the
+   * caller's own upsert-reused row (its preserved runtime is same-session
+   * evidence when its pre-upsert stored thread equals the registering one).
+   */
+  findRuntimeByThread(
+    thread_id: string,
+    localDevice: string,
+    excludeAgentId?: string
+  ): ThreadRuntimeRow[] {
+    // '' is never a real agent_id, so an omitted exclusion excludes nothing.
+    return this.db.prepare(
+      `SELECT agent_id, device, team, name, role, runtime_ui_pid,
+              runtime_tty, tmux_pane_id, runtime_bound_at, last_seen_at
+       FROM agents
+       WHERE device = ?
+         AND agent_id != ?
+         AND role != '__channel_proxy__'
+         AND delivery_kind = 'codex-appserver'
+         AND CASE
+           WHEN json_valid(delivery_payload)
+           THEN json_extract(delivery_payload, '$.thread_id')
+         END = ?
+         AND (runtime_ui_pid IS NOT NULL OR runtime_tty IS NOT NULL)
+       ORDER BY last_seen_at DESC`
+    ).all(localDevice, excludeAgentId ?? '', thread_id) as ThreadRuntimeRow[]
   }
 
   findByCodexThreadId(
@@ -312,6 +458,8 @@ export class AgentsRepo {
   register(input: RegisterInput): {
     agent_id: string
     team: string
+    prior_snapshot: IdentityRowSnapshot | null
+    register_generation: number
   } {
     const team = input.team ?? 'default'
     const device = input.device ?? 'local'
@@ -322,7 +470,16 @@ export class AgentsRepo {
     const delivery = input.delivery ?? { kind: 'none' }
     const serialized = serializeDelivery(delivery)
     const preserveExistingDelivery = input.delivery === undefined ? 1 : 0
+    // SELECT prior → upsert inside ONE synchronous transaction: the returned
+    // prior state is the row's ACTUAL pre-write content, immune to the async
+    // probe window that makes any earlier capture potentially stale.  The
+    // register_generation the upsert minted is read inside the same
+    // transaction so a register-time bind can make its final write
+    // conditional on exactly this registration.
+    let priorSnapshot: IdentityRowSnapshot | null = null
     const tx = this.db.transaction(() => {
+      priorSnapshot =
+        this.readIdentityRowSnapshot({ device, team, name }) ?? null
       this.writeAgentRow({
         newId,
         input,
@@ -348,18 +505,25 @@ export class AgentsRepo {
           new_csid: rebindCsid,
         })
       }
+      const written = this.db.prepare(
+        `SELECT agent_id, register_generation
+         FROM agents WHERE device=? AND team=? AND name=?`
+      ).get(device, team, name) as {
+        agent_id: string
+        register_generation: number
+      }
       if (input.tmux_pane_id) {
-        const written = this.db.prepare(
-          `SELECT agent_id FROM agents WHERE device=? AND team=? AND name=?`
-        ).get(device, team, name) as { agent_id: string }
         this.clearPaneBinding(device, input.tmux_pane_id, written.agent_id)
       }
+      return written
     })
-    tx()
-    const row = this.db.prepare(
-      `SELECT agent_id FROM agents WHERE device=? AND team=? AND name=?`
-    ).get(device, team, name) as { agent_id: string }
-    return { agent_id: row.agent_id, team }
+    const written = tx()
+    return {
+      agent_id: written.agent_id,
+      team,
+      prior_snapshot: priorSnapshot,
+      register_generation: written.register_generation,
+    }
   }
 
   private writeAgentRow(args: {
@@ -384,9 +548,9 @@ export class AgentsRepo {
       `INSERT INTO agents (
          agent_id, agent_type, agent_type_name, device, team, role, name, model, registered_at, last_seen_at,
          tmux_pane_id, claude_ui_pid, runtime_ui_pid, delivery_kind, delivery_payload, remote_addr,
-         identity_key, last_processed_event_id
+         identity_key, register_generation, last_processed_event_id
        )
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1,
                COALESCE((SELECT MAX(event_id) FROM events), 0))
        ON CONFLICT (device, team, name) DO UPDATE SET
          agent_type = excluded.agent_type,
@@ -399,6 +563,7 @@ export class AgentsRepo {
          runtime_ui_pid = COALESCE(excluded.runtime_ui_pid, runtime_ui_pid),
          remote_addr = excluded.remote_addr,
          identity_key = COALESCE(excluded.identity_key, identity_key),
+         register_generation = register_generation + 1,
          delivery_kind = CASE
            WHEN ? THEN delivery_kind
            ELSE excluded.delivery_kind
@@ -484,6 +649,15 @@ export class AgentsRepo {
     ).run(agent_type, agent_type_name ?? null, agent_id)
   }
 
+  /**
+   * Persists a runtime binding.  When `expected_register_generation` is set
+   * (every register-time bind path passes the generation its OWN
+   * registration minted), the UPDATE is conditional on the row still
+   * carrying that generation: a bind whose verification await outlived a
+   * newer same-(device, team, name) registration changes ZERO rows, and the
+   * incumbent pane eviction is skipped too — a stale bind must not touch
+   * any row.  Callers observe `changes === 0` and fail the bind closed.
+   */
   setRuntimeBinding(
     agent_id: string,
     args: {
@@ -492,31 +666,67 @@ export class AgentsRepo {
       runtime_tty: string
       runtime_verification_mode: string
       runtime_bound_at?: string
+      expected_register_generation?: number
     }
-  ): void {
+  ): { changes: number } {
     const tx = this.db.transaction(() => {
-      this.db.prepare(
+      const conditional = args.expected_register_generation !== undefined
+      const result = this.db.prepare(
         `UPDATE agents
          SET tmux_pane_id=?,
              runtime_ui_pid=?,
              runtime_tty=?,
              runtime_verification_mode=?,
              runtime_bound_at=?
-         WHERE agent_id=?`
+         WHERE agent_id=?` +
+        (conditional ? ` AND register_generation=?` : ``)
       ).run(
         args.tmux_pane_id,
         args.runtime_ui_pid,
         args.runtime_tty,
         args.runtime_verification_mode,
         args.runtime_bound_at ?? new Date().toISOString(),
-        agent_id
+        agent_id,
+        ...(conditional ? [args.expected_register_generation] : [])
       )
+      if (result.changes === 0) return { changes: 0 }
       const row = this.db.prepare(
         `SELECT device FROM agents WHERE agent_id=?`
       ).get(agent_id) as { device: string } | undefined
       if (row) this.clearPaneBinding(row.device, args.tmux_pane_id, agent_id)
+      return { changes: result.changes }
     })
-    tx()
+    return tx()
+  }
+
+  /**
+   * Clears every runtime-seat field, conditional on the row still carrying
+   * the given generation.  The register upsert preserves the prior seat via
+   * COALESCE, so a CAS-drift registration must wipe the residue it inherited
+   * — but only while its own registration is still the newest one; a later
+   * registration's freshly bound seat changes ZERO rows here.
+   */
+  clearRuntimeBinding(
+    agent_id: string,
+    args: { expected_register_generation: number }
+  ): { changes: number } {
+    const result = this.db.prepare(
+      `UPDATE agents
+       SET tmux_pane_id=NULL,
+           runtime_ui_pid=NULL,
+           runtime_tty=NULL,
+           runtime_verification_mode=NULL,
+           runtime_bound_at=NULL
+       WHERE agent_id=? AND register_generation=?`
+    ).run(agent_id, args.expected_register_generation)
+    return { changes: result.changes }
+  }
+
+  getRegisterGeneration(agent_id: string): number | undefined {
+    const row = this.db.prepare(
+      `SELECT register_generation FROM agents WHERE agent_id=?`
+    ).get(agent_id) as { register_generation: number } | undefined
+    return row?.register_generation
   }
 
   list(args: {

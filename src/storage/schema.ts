@@ -34,7 +34,8 @@ const DDL = [
     delivery_kind TEXT NOT NULL DEFAULT 'none',
     delivery_payload TEXT,
     remote_addr TEXT,
-    identity_key TEXT
+    identity_key TEXT,
+    register_generation INTEGER NOT NULL DEFAULT 0
   )`,
   `CREATE UNIQUE INDEX IF NOT EXISTS agents_identity_idx ON agents(device, team, name)`,
   `CREATE TABLE IF NOT EXISTS messages (
@@ -64,7 +65,8 @@ const DDL = [
   `CREATE TABLE IF NOT EXISTS codex_pane_pre_registrations (
     pane_id TEXT PRIMARY KEY,
     xats_agent_id TEXT NOT NULL,
-    expires_at TEXT NOT NULL
+    expires_at TEXT NOT NULL,
+    identity_key TEXT
   )`
 ]
 
@@ -238,6 +240,35 @@ function migrateAgentsIdentityKeyColumn(db: Database.Database): void {
   tx()
 }
 
+// Registration-generation column: every register upsert increments it inside
+// the upsert transaction, and register-time runtime binds persist only when
+// the row still carries the generation their own registration minted.
+function migrateAgentsRegisterGenerationColumn(db: Database.Database): void {
+  const tableExists = db
+    .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='agents'`)
+    .get() as { name: string } | undefined
+  if (!tableExists) return
+  const cols = db.pragma('table_info(agents)') as Array<{ name: string }>
+  if (cols.some(c => c.name === 'register_generation')) return
+  db.exec(
+    `ALTER TABLE agents ADD COLUMN register_generation INTEGER NOT NULL DEFAULT 0`
+  )
+}
+
+function migrateCodexPreRegIdentityKeyColumn(db: Database.Database): void {
+  const tableExists = db
+    .prepare(
+      `SELECT name FROM sqlite_master WHERE type='table' AND name='codex_pane_pre_registrations'`
+    )
+    .get() as { name: string } | undefined
+  if (!tableExists) return
+  const cols = db.pragma(
+    'table_info(codex_pane_pre_registrations)'
+  ) as Array<{ name: string }>
+  if (cols.some(c => c.name === 'identity_key')) return
+  db.exec(`ALTER TABLE codex_pane_pre_registrations ADD COLUMN identity_key TEXT`)
+}
+
 function migrateMessagesNeedReplyColumn(db: Database.Database): void {
   const tableExists = db
     .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='messages'`)
@@ -278,6 +309,8 @@ export function applySchema(
   migrateAgentsDeliveryColumns(db)
   migrateAgentsDeviceColumns(db, opts.localDevice ?? 'local')
   migrateAgentsIdentityKeyColumn(db)
+  migrateAgentsRegisterGenerationColumn(db)
+  migrateCodexPreRegIdentityKeyColumn(db)
   migrateMessagesNeedReplyColumn(db)
   migrateAgentsCursorWatermark(db)
 }

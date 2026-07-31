@@ -187,6 +187,37 @@ describe('dispatchPoke', () => {
     })
   })
 
+  it('codex dispatcher failure with NO pane returns the appserver error and never touches tmux (cleared CAS-drift residue)', async () => {
+    const fanout = new ChannelWakeFanout()
+    const tmux = stubTmux({ ok: true, pane_tail_before: '', pane_tail_after: '' })
+    const res = await dispatchPoke(
+      {
+        channelWakeFanout: fanout,
+        tmuxPoke: tmux.fn,
+        codexAppserverDispatch: async () => ({
+          error: 'codex_connect_failed',
+          detail: 'ECONNREFUSED',
+          transport_used: 'codex-appserver',
+        }),
+      },
+      {
+        agent_id: 'target', device: 'local', runtime_ui_pid: null, agent_type: 'codex',
+        delivery: {
+          kind: 'codex-appserver',
+          thread_id: '11111111-1111-4111-8111-111111111111',
+          ws_url: 'wss://example.test/ws',
+        },
+        tmux_pane_id: null,
+      },
+      { content: 'hi', meta: {} }
+    )
+    expect(res).toMatchObject({
+      error: 'codex_connect_failed',
+      transport_used: 'codex-appserver',
+    })
+    expect(tmux.calls).toHaveLength(0)
+  })
+
   it('does not fall back to tmux after Codex accepted input but wake confirmation timed out', async () => {
     const tmux = stubTmux({ ok: true, pane_tail_before: '', pane_tail_after: '' })
     const res = await dispatchPoke(

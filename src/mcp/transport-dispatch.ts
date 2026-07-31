@@ -109,7 +109,9 @@ export async function dispatchPoke(
   return dispatchUnknown(deps, target, input)
 }
 
-function resolveAgentType(target: TargetRow): AgentType | null {
+// Exported so the poke-side codex carrier gate keys off the same effective
+// type this dispatcher routes by (legacy rows may have agent_type=NULL).
+export function resolveAgentType(target: TargetRow): AgentType | null {
   if (target.agent_type) return target.agent_type
   if (target.delivery.kind === 'claude-channel') return 'claude-code'
   if (target.delivery.kind === 'codex-appserver') return 'codex'

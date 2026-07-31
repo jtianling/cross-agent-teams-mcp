@@ -1,10 +1,15 @@
 import type Database from 'better-sqlite3'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
-import { AgentsRepo } from '../storage/agents-repo.js'
+import {
+  AgentsRepo,
+  sameIdentityRowSnapshot,
+  type IdentityRowSnapshot,
+} from '../storage/agents-repo.js'
 import { EventsOutbox } from '../storage/events-outbox.js'
 import {
   RegisterAgentService,
+  deriveDefaultTeam,
   resolveEffectiveDevice,
 } from './register-agent.js'
 import { SendMessageService } from './send-message.js'
@@ -19,7 +24,10 @@ import type { ChannelWakeFanout } from '../daemon/channel-wake-fanout.js'
 import { SubscribeChannelWakeService } from './subscribe-channel-wake.js'
 import { BindChannelService } from './bind-channel.js'
 import { AutoBindChannelService } from './auto-bind-channel.js'
-import { BindRuntimeIdentityService } from './bind-runtime-identity.js'
+import {
+  BindRuntimeIdentityService,
+  type VerifiedRuntimeIdentity,
+} from './bind-runtime-identity.js'
 import { RegisterCodexSelfService } from './register-codex-self.js'
 import { RegisterOpencodeSelfService } from './register-opencode-self.js'
 import {
@@ -44,7 +52,24 @@ import {
   PreRegisterCodexPaneService,
   preRegisterCodexPaneInputSchema,
 } from './pre-register-codex-pane.js'
-import { autoBindCodexPane } from './auto-bind-codex-pane.js'
+import {
+  autoBindCodexPane,
+  detectForegroundCodexCarrierPid,
+} from './auto-bind-codex-pane.js'
+import {
+  followSeatIdentityKey,
+  type SeatFollowDeps,
+} from './codex-seat-follow.js'
+import {
+  collapseSameThreadRows,
+  type InheritSeat,
+  type SameThreadCollapse,
+} from './same-thread-seat.js'
+import {
+  cancelCodexRecoverySchedule,
+  evaluateCodexRecoveryOnPreRegister,
+  type CodexRecoveryDeps,
+} from './codex-recovery-poke.js'
 import type { SessionOriginInfo } from '../daemon/network-origin.js'
 import type { DaemonContext } from '../daemon/server.js'
 
@@ -390,7 +415,8 @@ export function registerBusinessTools(
   getSessionOriginInfo?: () => SessionOriginInfo | undefined,
   context?: DaemonContext,
   onUnregisterSuccess?: UnregisterSuccessHook,
-  injectedRegisterSvc?: RegisterAgentService
+  injectedRegisterSvc?: RegisterAgentService,
+  log?: (line: string) => void
 ): void {
   const agents = new AgentsRepo(db)
   const events = new EventsOutbox(db)
@@ -398,7 +424,7 @@ export function registerBusinessTools(
     localDevice: context?.localDevice,
     getSessionOrigin: () => getSessionOriginInfo?.(),
   })
-  const bindRuntimeIdentitySvc = new BindRuntimeIdentityService(db)
+  const bindRuntimeIdentitySvc = new BindRuntimeIdentityService(db, log)
   const registerCodexSelfSvc = new RegisterCodexSelfService(registerSvc)
   const registerOpencodeSelfSvc = new RegisterOpencodeSelfService(registerSvc)
   const unregisterSelfSvc = new UnregisterSelfService(db, agents)
@@ -411,7 +437,59 @@ export function registerBusinessTools(
   const inboxSvc = new GetInboxService(db, agents)
   const deliveryStatusSvc = new GetDeliveryStatusService(db)
   const codexPanePreRegRepo = new CodexPanePreRegRepo(db)
-  const preRegisterCodexPaneSvc = new PreRegisterCodexPaneService(codexPanePreRegRepo)
+  const recoveryLocalDevice = context?.localDevice ?? 'local'
+  const codexRecoveryDeps: CodexRecoveryDeps = {
+    repo: codexPanePreRegRepo,
+    findByIdentityKey: key =>
+      agents.findByIdentityKey(key, recoveryLocalDevice),
+    localDevice: recoveryLocalDevice,
+    log,
+  }
+  const preRegisterCodexPaneSvc = new PreRegisterCodexPaneService(
+    codexPanePreRegRepo,
+    undefined,
+    row => evaluateCodexRecoveryOnPreRegister(row, codexRecoveryDeps),
+    log
+  )
+  const seatFollowDeps: SeatFollowDeps = {
+    findCaller: agentId => {
+      const row = agents.findById(agentId)
+      if (!row) return undefined
+      return {
+        team: row.team,
+        name: row.name,
+        identity_key: row.identity_key,
+        codex_thread_id:
+          row.delivery.kind === 'codex-appserver'
+            ? row.delivery.thread_id
+            : null,
+      }
+    },
+    findKeyHoldersBySeat: agentId =>
+      agents.findKeyHoldersBySeat(agentId, recoveryLocalDevice),
+    applyPlan: (plan, attachAgentId, key) => {
+      // Same transactional shape as register_agent: the old row must not
+      // lose the key unless the caller row gets it.
+      const tx = db.transaction(() => {
+        if (plan.kind === 'migrate') {
+          agents.clearIdentityKey(plan.from_agent_id)
+        }
+        agents.bindIdentityKey(attachAgentId, key)
+      })
+      tx()
+    },
+    log,
+  }
+
+  // SEAT-FOLLOW hook: runs after a codex registration's runtime bind settles
+  // so a key still attached to the seat's previous row follows the seat.
+  // followSeatIdentityKey catches internally; this guard only covers a
+  // throwing log sink, keeping register_agent results uncorrupted.
+  function runCodexSeatFollow(callerAgentId: string): void {
+    try {
+      followSeatIdentityKey({ callerAgentId, deps: seatFollowDeps })
+    } catch { /* best-effort */ }
+  }
 
   function caller(): string | undefined { return getCallerAgentId() }
 
@@ -437,6 +515,276 @@ export function registerBusinessTools(
     return c
   }
 
+  /**
+   * SAME-THREAD EVIDENCE (unified semantics): once ANY row on this device
+   * proves the registering codex-appserver thread already had a bound
+   * runtime, the registration is a same-conversation re-registration.  It
+   * must NEVER scan foreign pre-reg rows and NEVER run unrestricted global
+   * pane detection — the only correlation either has is "unique machine-wide
+   * candidate", which is no caller association at all.  Evidence rows
+   * collapse by PHYSICAL seat (a rename chain A→B→C leaves old rows with
+   * pid/tty intact, only the pane LWW-cleared): a unique seat is inherited
+   * exactly; distinct seats fail closed.  The caller's own upsert-reused row
+   * counts as evidence only when its PRE-UPSERT stored thread equals the
+   * registering thread (same-name re-register); a NEW thread (restart
+   * recovery) contributes nothing, keeping the pre-reg scan reachable.
+   */
+  function resolveSameThreadSeat(
+    callerAgentId: string,
+    preUpsertThreadId: string | undefined
+  ): SameThreadCollapse {
+    const callerRow = agents.findById(callerAgentId)
+    if (!callerRow || callerRow.delivery.kind !== 'codex-appserver') {
+      return { kind: 'none', rowCount: 0, seatCount: 0 }
+    }
+    const thread = callerRow.delivery.thread_id
+    const rows = agents
+      .findRuntimeByThread(thread, recoveryLocalDevice)
+      .filter(row =>
+        row.agent_id !== callerAgentId || preUpsertThreadId === thread)
+    return collapseSameThreadRows(rows)
+  }
+
+  /**
+   * ONE decision point for the same-thread resolution: EVERY outcome (none /
+   * inherit success & failure / ambiguous / CAS drift) logs through here with
+   * row count, seat count, and involved agent ids — never key values.
+   */
+  function logSameThreadDecision(args: {
+    callerAgentId: string
+    outcome:
+      | 'none'
+      | 'inherit'
+      | 'inherit_fail_closed'
+      | 'ambiguous'
+      | 'cas_drift'
+    rowCount: number
+    seatCount: number
+    agentIds: string[]
+    reason?: string
+  }): void {
+    const tail =
+      args.outcome === 'inherit'
+        ? '; pre-reg scan skipped'
+        : args.outcome === 'none'
+          ? '; proceeding to pre-reg scan'
+          : '; fail closed — no pre-reg scan, no pane detection, no runtime bind'
+    log?.(
+      `same-thread decision (debug): caller=${args.callerAgentId} ` +
+      `outcome=${args.outcome} rows=${args.rowCount} ` +
+      `seats=${args.seatCount} ` +
+      `agents=${args.agentIds.length > 0 ? args.agentIds.join(',') : '-'}` +
+      (args.reason === undefined ? '' : ` reason=${args.reason}`) +
+      tail
+    )
+  }
+
+  /**
+   * Inherit EXACTLY the collapsed seat: a positive pid re-verifies live via
+   * the pid bind path; a pid-less seat binds its recorded tty/pane with no
+   * detection.  Bind failure, or a seat with no bindable runtime info,
+   * fails closed — never the global detect path, never the pre-reg scan.
+   */
+  async function inheritSameThreadSeat(
+    callerAgentId: string,
+    seat: InheritSeat,
+    expectedRegisterGeneration: number
+  ): Promise<{ ok: true } | { ok: false; reason: string }> {
+    const pid = seat.runtime_ui_pid
+    const bound = pid !== null && pid > 0
+      ? await bindRuntimeIdentitySvc.bind({
+          callerAgentId,
+          agent: 'codex',
+          ui_pid: pid,
+          expectedRegisterGeneration,
+        })
+      : seat.runtime_tty !== null && seat.tmux_pane_id !== null
+        ? await bindRuntimeIdentitySvc.bind({
+            callerAgentId,
+            agent: 'codex',
+            ui_tty: seat.runtime_tty,
+            tmux_pane_id: seat.tmux_pane_id,
+            expectedRegisterGeneration,
+          })
+        : undefined
+    if (bound !== undefined && 'ok' in bound && bound.ok) {
+      runCodexSeatFollow(callerAgentId)
+      return { ok: true }
+    }
+    return {
+      ok: false,
+      reason: bound === undefined ? 'no_bindable_runtime_info' : 'bind_failed',
+    }
+  }
+
+  async function tryCodexPreRegScan(
+    callerAgentId: string,
+    expectedRegisterGeneration: number
+  ): Promise<boolean> {
+    const auto = await autoBindCodexPane({
+      callerAgentId,
+      repo: codexPanePreRegRepo,
+      bindRuntimeIdentitySvc,
+      expectedRegisterGeneration,
+      // One synchronous transaction for "re-arbitrate the key → write the
+      // runtime binding (with its incumbent-pane eviction) → consume the row
+      // → attach the key"; better-sqlite3 nests via savepoints, so the
+      // attach's own transaction composes inside this one.  Rollback is the
+      // complete undo — nothing to compensate for afterwards.
+      runAtomic: fn => db.transaction(fn)(),
+      identityKeyAttach: {
+        findCaller: agentId => {
+          const row = agents.findById(agentId)
+          if (!row) return undefined
+          return {
+            team: row.team,
+            name: row.name,
+            identity_key: row.identity_key,
+          }
+        },
+        findByIdentityKey: key =>
+          agents.findByIdentityKey(key, recoveryLocalDevice),
+        applyPlan: (plan, attachAgentId, key) => {
+          // Same transactional shape as register_agent: the old row must
+          // not lose the key unless the caller row gets it.
+          const tx = db.transaction(() => {
+            if (plan.kind === 'migrate') {
+              agents.clearIdentityKey(plan.from_agent_id)
+            }
+            agents.bindIdentityKey(attachAgentId, key)
+          })
+          tx()
+        },
+        log,
+      },
+      onConsumed: paneId =>
+        cancelCodexRecoverySchedule(paneId, { reason: 'row_consumed', log }),
+      log,
+    })
+    if (auto === false) return false
+    // Seat-follow only after a CONSUMED row: a stale outcome means the
+    // pre-reg row was overwritten during the bind, and re-attaching the
+    // seat key here would bypass the full-snapshot consume protection.
+    if (auto === 'bound_consumed') runCodexSeatFollow(callerAgentId)
+    return true
+  }
+
+  function paneHasPendingPreReg(paneId: string): boolean {
+    const pending = codexPanePreRegRepo.getByPaneId(paneId)
+    return pending !== undefined
+      && pending.expires_at > new Date().toISOString()
+  }
+
+  /**
+   * A pane with a PENDING pre-reg row is a pane some launcher announced for a
+   * codex that has not registered yet.  Had the caller been that codex, the
+   * pre-reg scan would have consumed the row (uuid + foreground carrier
+   * proof); it did not, so this pane belongs to another identity — and
+   * `detect_tmux_pane` scores panes machine-wide with NO caller correlation at
+   * all, so it is exactly the wrong tool to overrule that.
+   *
+   * The check sits in the SAME synchronous commit as the runtime write: every
+   * fallback shape still awaits probes before committing, and a launcher
+   * announcing that pane inside that window would otherwise be overruled by a
+   * bind with no caller correlation whatsoever.
+   */
+  function commitFallbackBind(
+    verified: VerifiedRuntimeIdentity,
+    paneId: string,
+    callerAgentId: string
+  ): boolean {
+    return db.transaction(() => {
+      if (paneHasPendingPreReg(paneId)) {
+        log?.(
+          `auto-bind skip (debug): pane=${paneId} ` +
+          `reason=pane_has_pending_prereg caller=${callerAgentId}`
+        )
+        return false
+      }
+      const written = bindRuntimeIdentitySvc.commit(callerAgentId, verified)
+      return !('error' in written)
+    })()
+  }
+
+  /**
+   * Codex prefers a pid bind: when the detected pane's tty hosts exactly one
+   * foreground codex carrier, bind with its REAL pid so the caller row records
+   * runtime_ui_pid (used by liveness and poke carrier confirms).  The pid is
+   * heuristically chosen — detectTmuxPane scores ALL panes and the probe only
+   * proves "unique foreground codex on that tty" — so it is NOT caller
+   * association: seat-follow authorizes alive-holder migration by
+   * codex-appserver thread equality only.  A failed pid verify is terminal for
+   * this bind; it does not fall through to the tty shape.
+   */
+  async function verifyFallbackIdentity(
+    inferredAgent: DetectAgentKind,
+    callerAgentId: string,
+    pane: { pane_id: string; tty: string },
+    expectedRegisterGeneration: number
+  ): Promise<VerifiedRuntimeIdentity | undefined> {
+    if (inferredAgent === 'codex') {
+      const carrierPid = await detectForegroundCodexCarrierPid(pane.tty)
+      if (carrierPid !== undefined) {
+        const byPid = await bindRuntimeIdentitySvc.verify({
+          callerAgentId,
+          agent: inferredAgent,
+          ui_pid: carrierPid,
+          tmux_pane_id: pane.pane_id,
+          expectedRegisterGeneration,
+        })
+        return 'error' in byPid ? undefined : byPid
+      }
+    }
+    const byTty = await bindRuntimeIdentitySvc.verify({
+      callerAgentId,
+      agent: inferredAgent,
+      ui_tty: pane.tty,
+      tmux_pane_id: pane.pane_id,
+      expectedRegisterGeneration,
+    })
+    return 'error' in byTty ? undefined : byTty
+  }
+
+  async function tryDetectFallbackBind(
+    inferredAgent: DetectAgentKind,
+    callerAgentId: string,
+    expectedRegisterGeneration: number
+  ): Promise<boolean> {
+    const detected = await detectTmuxPane({ agent: inferredAgent })
+    if (!('ok' in detected) || !detected.ok) return false
+    const pane = detected.pane
+
+    if (paneHasPendingPreReg(pane.pane_id)) {
+      // Early exit purely to skip the probes below; the authoritative check is
+      // the one inside commitFallbackBind's transaction.
+      log?.(
+        `auto-bind skip (debug): pane=${pane.pane_id} ` +
+        `reason=pane_has_pending_prereg caller=${callerAgentId}`
+      )
+      return false
+    }
+
+    const verified = await verifyFallbackIdentity(
+      inferredAgent,
+      callerAgentId,
+      pane,
+      expectedRegisterGeneration
+    )
+    if (verified === undefined) return false
+    if (!commitFallbackBind(verified, pane.pane_id, callerAgentId)) return false
+    // The fallback bind is the path a same-pane re-registration actually
+    // takes (its pre-reg row was consumed at seeding), so the seat-follow
+    // hook must fire here too.  Alive holders migrate only on codex thread
+    // equality; without it seat-follow fails closed.
+    if (inferredAgent === 'codex') runCodexSeatFollow(callerAgentId)
+    return true
+  }
+
+  // Every register-time bind below carries expectedRegisterGeneration so its
+  // final write is conditional on the registration that requested it; a
+  // stale bind (a newer same-name registration re-minted the generation
+  // while this bind awaited verification) fails closed with no runtime
+  // write and no seat-follow.
   async function autoBindRuntimeIdentity(
     args: {
       agent_type?: AgentType
@@ -444,7 +792,9 @@ export function registerBusinessTools(
       delivery?: { kind?: string }
       ui_pid?: number
     },
-    callerAgentId: string
+    callerAgentId: string,
+    priorCodexThreadId: string | undefined,
+    expectedRegisterGeneration: number
   ): Promise<boolean> {
     const inferredAgent = inferRuntimeAgentKind(args, getSessionClientInfo?.())
     if (!inferredAgent) return false
@@ -454,29 +804,62 @@ export function registerBusinessTools(
         callerAgentId,
         agent: inferredAgent,
         ui_pid: args.ui_pid,
+        expectedRegisterGeneration,
       })
       return 'ok' in boundByPid && boundByPid.ok
     }
 
     if (inferredAgent === 'codex') {
-      const auto = await autoBindCodexPane({
+      // Same-thread evidence is TERMINAL: inherit the unique seat or fail
+      // closed.  Neither outcome may reach the pre-reg scan or the global
+      // pane detection below.  Only a registration with NO evidence (a
+      // genuinely new thread, e.g. post-restart recovery) keeps them.
+      // priorCodexThreadId is the TRANSACTION-returned pre-upsert thread
+      // (already CAS-verified against the pre-probe capture by the caller).
+      const evidence = resolveSameThreadSeat(callerAgentId, priorCodexThreadId)
+      if (evidence.kind === 'seat') {
+        const inherit = await inheritSameThreadSeat(
+          callerAgentId,
+          evidence.seat,
+          expectedRegisterGeneration
+        )
+        logSameThreadDecision({
+          callerAgentId,
+          outcome: inherit.ok ? 'inherit' : 'inherit_fail_closed',
+          rowCount: evidence.rowCount,
+          seatCount: evidence.seatCount,
+          agentIds: [evidence.seat.agent_id],
+          ...(inherit.ok ? {} : { reason: inherit.reason }),
+        })
+        return inherit.ok
+      }
+      if (evidence.kind === 'ambiguous') {
+        logSameThreadDecision({
+          callerAgentId,
+          outcome: 'ambiguous',
+          rowCount: evidence.rowCount,
+          seatCount: evidence.seatCount,
+          agentIds: evidence.agentIds,
+        })
+        return false
+      }
+      logSameThreadDecision({
         callerAgentId,
-        repo: codexPanePreRegRepo,
-        bindRuntimeIdentitySvc,
+        outcome: 'none',
+        rowCount: evidence.rowCount,
+        seatCount: evidence.seatCount,
+        agentIds: [],
       })
-      if (auto) return true
+      if (await tryCodexPreRegScan(callerAgentId, expectedRegisterGeneration)) {
+        return true
+      }
     }
 
-    const detected = await detectTmuxPane({ agent: inferredAgent })
-    if (!('ok' in detected) || !detected.ok) return false
-
-    const bound = await bindRuntimeIdentitySvc.bind({
+    return tryDetectFallbackBind(
+      inferredAgent,
       callerAgentId,
-      agent: inferredAgent,
-      ui_tty: detected.pane.tty,
-      tmux_pane_id: detected.pane.pane_id,
-    })
-    return 'ok' in bound && bound.ok
+      expectedRegisterGeneration
+    )
   }
 
   async function preflightUiPidClient(
@@ -686,6 +1069,43 @@ export function registerBusinessTools(
     }
   })
 
+  /**
+   * C2 evidence capture, CAS leg 1 of 2: the (device, team, name) upsert
+   * reuses the caller's own row, preserves its bound runtime, and OVERWRITES
+   * its stored delivery thread — so "did this row already carry the
+   * registering thread?" is only answerable BEFORE the upsert.  The codex
+   * register path awaits an async WS probe between this capture and the
+   * persist, so the capture alone is NOT trustworthy: the persist
+   * transaction re-reads the row atomically (leg 2) and the two snapshots
+   * must match, otherwise the runtime auto-bind fails closed (CAS drift).
+   * Returns undefined for non-codex registrations (no CAS applies); null
+   * for a codex registration with no resolvable prior row.
+   */
+  function captureCodexPreUpsertSnapshot(args: {
+    agent_type?: AgentType
+    device?: string
+    name: string
+    team?: string
+    project_dir?: string
+  }): IdentityRowSnapshot | null | undefined {
+    if (args.agent_type !== 'codex') return undefined
+    const device = resolveEffectiveDevice({
+      requestedDevice: args.device,
+      originInfo: getSessionOriginInfo?.(),
+      localDevice: context?.localDevice ?? 'local',
+    })
+    if ('error' in device) return null
+    const team = deriveDefaultTeam({
+      team: args.team,
+      project_dir: args.project_dir,
+    })
+    return agents.readIdentityRowSnapshot({
+      device: device.ok,
+      team,
+      name: args.name,
+    }) ?? null
+  }
+
   async function executeRegister(
     args: {
       agent_type?: AgentType
@@ -793,8 +1213,15 @@ export function registerBusinessTools(
         } else if (fanout) {
           try { fanout.rebind(kimiRes.agent_id, kimiRes.team) } catch { /* best-effort */ }
         }
+        // prior_snapshot and register_generation are register-internal
+        // state; never expose them.
+        const {
+          prior_snapshot: _priorSnapshot,
+          register_generation: _registerGeneration,
+          ...publicKimiRes
+        } = kimiRes
         return {
-          ...kimiRes,
+          ...publicKimiRes,
           session_id: args.session_id,
           base_url: kimiBaseUrl,
         }
@@ -834,6 +1261,7 @@ export function registerBusinessTools(
       args.thread_id !== undefined ||
       args.ws_url !== undefined ||
       args.auth_token_ref !== undefined
+    const preUpsertSnapshot = captureCodexPreUpsertSnapshot(args)
     const res =
       args.agent_type === 'codex' &&
       args.delivery === undefined &&
@@ -871,6 +1299,14 @@ export function registerBusinessTools(
       nativeDeliveryBound = true
     }
     if ('agent_id' in res) {
+      // CAS leg 2: the persist transaction returned the row's ACTUAL prior
+      // state.  prior_snapshot and register_generation are register-internal
+      // — strip them from every client-facing envelope below.
+      const {
+        prior_snapshot: actualPriorSnapshot,
+        register_generation: registerGeneration,
+        ...publicRes
+      } = res
       if (onRegisterSuccess) {
         try { onRegisterSuccess(res.agent_id, res.team) } catch { /* best-effort */ }
       } else if (fanout) {
@@ -906,11 +1342,115 @@ export function registerBusinessTools(
           nativeDeliveryBound = true
         }
       }
-      const autoBound = await autoBindRuntimeIdentity(args, res.agent_id)
+      // CAS/version check: a codex registration whose row changed between
+      // the pre-probe capture and the persist transaction was raced by a
+      // concurrent same-(device, team, name) registration.  Fail the runtime
+      // auto-bind closed: no caller-row evidence, no pre-reg scan, no global
+      // detection, no runtime bind — register still succeeds unbound.
+      // The success result must carry the generation the upsert minted as a
+      // positive safe integer; a malformed internal result (an injected
+      // register service that lost or corrupted the field — NaN/Infinity/
+      // negatives make every conditional write silently change zero rows)
+      // must not degrade the conditional final writes below into
+      // unconditional or no-op ones — fail the runtime auto-bind closed.
+      const registerGenerationValid =
+        typeof registerGeneration === 'number' &&
+        Number.isSafeInteger(registerGeneration) &&
+        registerGeneration >= 1
+      if (!registerGenerationValid) {
+        log?.(
+          `register invariant error: register result carries no valid ` +
+          `register_generation agent=${res.agent_id}; runtime auto-bind ` +
+          `fails closed`
+        )
+      }
+      // The prior snapshot is the CAS input; a codex result missing the
+      // FIELD (not a null prior — fresh rows legitimately have none) would
+      // fake a CAS match against a null pre-upsert capture.  Treat the
+      // missing field as drift so the auto-bind never proceeds on it.
+      const priorSnapshotMissing =
+        args.agent_type === 'codex' && actualPriorSnapshot === undefined
+      if (priorSnapshotMissing) {
+        log?.(
+          `register invariant error: codex register result carries no ` +
+          `prior_snapshot field agent=${res.agent_id}; treated as CAS drift`
+        )
+      }
+      const casDrift =
+        args.agent_type === 'codex' &&
+        (priorSnapshotMissing ||
+          !sameIdentityRowSnapshot(
+            preUpsertSnapshot ?? null,
+            actualPriorSnapshot ?? null
+          ))
+      if (casDrift) {
+        logSameThreadDecision({
+          callerAgentId: res.agent_id,
+          outcome: 'cas_drift',
+          rowCount: 0,
+          seatCount: 0,
+          agentIds: [...new Set([
+            ...(preUpsertSnapshot ? [preUpsertSnapshot.agent_id] : []),
+            ...(actualPriorSnapshot ? [actualPriorSnapshot.agent_id] : []),
+          ])],
+          reason: 'row_changed_during_register_probe',
+        })
+        // The upsert COALESCE-preserved whatever seat the raced row carried,
+        // leaving "this registration's thread + the raced session's seat" —
+        // reachable via the tmux fallback.  Clear it, conditional on THIS
+        // registration's generation so an even newer registration's freshly
+        // bound seat is never touched.
+        if (registerGenerationValid) {
+          const cleared = agents.clearRuntimeBinding(res.agent_id, {
+            expected_register_generation: registerGeneration,
+          })
+          log?.(
+            `cas drift runtime clear (debug): agent=${res.agent_id} ` +
+            `changes=${cleared.changes}` +
+            (cleared.changes === 0 ? ' reason=generation_advanced' : '')
+          )
+        } else {
+          // Without a valid minted generation the residue cannot be cleared
+          // safely (an unconditional clear could wipe a newer registration's
+          // seat) — say so instead of silently claiming the unbound end
+          // state was reached.
+          log?.(
+            `cas drift runtime clear skipped: agent=${res.agent_id} ` +
+            `reason=invalid_register_generation; residual seat may remain`
+          )
+        }
+      }
+      // On a CAS match the TRANSACTION-returned prior thread (not the early
+      // capture) is the trustworthy caller-row evidence input.
+      const priorCodexThreadId =
+        args.agent_type === 'codex'
+          ? actualPriorSnapshot?.codex_thread_id ?? undefined
+          : undefined
+      const autoBound = casDrift || !registerGenerationValid
+        ? false
+        : await autoBindRuntimeIdentity(
+            args,
+            res.agent_id,
+            priorCodexThreadId,
+            registerGeneration
+          )
       const envelope = autoBoundChannelCsid !== undefined
-        ? { ...res, channel_session_id: autoBoundChannelCsid }
-        : res
+        ? { ...publicRes, channel_session_id: autoBoundChannelCsid }
+        : publicRes
       if (autoBound) return envelope
+      if (casDrift && !registerGenerationValid) {
+        // The residue of the raced session's seat could NOT be cleared (no
+        // valid minted generation), so the standard no-pane hint would be a
+        // lie — a stale tmux binding may still be attached to this row.
+        return {
+          ...envelope,
+          hint: 'Runtime auto-bind failed closed on a registration ' +
+            'invariant error (invalid register_generation) after a ' +
+            'concurrent-registration conflict; a residual tmux pane ' +
+            'binding from the raced session may remain on this row. Call ' +
+            '`bind_runtime_identity(...)` to repair the binding explicitly.',
+        }
+      }
       if (!nativeDeliveryBound) {
         return {
           ...envelope,
@@ -944,6 +1484,8 @@ export function registerBusinessTools(
         'The launcher should call this with `$TMUX_PANE` and a freshly generated UUID, then `exec codex --remote ... -c xats.agent_id="\\"<uuid>\\""`.',
         'When the codex agent later calls `register_agent({agent_type:"codex"})` without `ui_pid`, the daemon uses the pending row to resolve the correct UI pid and auto-bind the pane.',
         'Callable without a prior `register_agent` — launchers have no agent identity yet.',
+        'Optional `identity_key` is the launcher-minted restart-stable identity handle. It MUST NEVER appear on any process argv and never in model context; the CLI reads the launcher-exported environment variable and forwards it only over the authenticated HTTP channel.',
+        'When the key matches a known identity whose runtime process is dead, the daemon schedules a recovery poke: once a codex `--remote` process with the pre-registered uuid appears on the pane, it guides the agent to re-register under the recovered (team, name). The poke text never contains the key.',
         'TTL defaults to 120 seconds and is capped at 600; pending rows are garbage-collected opportunistically.',
       ].join(' '),
       inputSchema: preRegisterCodexPaneInputSchema,
@@ -1845,6 +2387,13 @@ export function registerBusinessTools(
       }
       const who = requireAgent()
       if (typeof who !== 'string') return toText(who)
+      // Explicit repair-rebind mode: the service captures the row's CURRENT
+      // generation at call start, so registrations that completed before
+      // this call never block an explicit repair rebind, while one landing
+      // during the verification await fails it closed
+      // (stale_registration_bind) instead of stomping the newer session's
+      // seat.  Register-time paths pass their own minted generation via
+      // autoBindRuntimeIdentity instead.
       return run(() => bindRuntimeIdentitySvc.bind({
         callerAgentId: who,
         agent: parsed.data.agent,
@@ -1852,6 +2401,7 @@ export function registerBusinessTools(
         ui_tty: parsed.data.ui_tty,
         tmux_pane_id: parsed.data.tmux_pane_id,
         process_pattern: parsed.data.process_pattern,
+        captureCurrentGeneration: true,
       }))
     }
   )

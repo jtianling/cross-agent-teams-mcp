@@ -7,7 +7,11 @@ import {
 import type { AgentType } from '../lib/agent-type.js'
 import { deriveDefaultTeam } from '../lib/default-team.js'
 import { canonicalKimiBaseUrl } from './kimi-session-state.js'
-import { AgentsRepo, type IdentityKeyMatch } from '../storage/agents-repo.js'
+import {
+  AgentsRepo,
+  type IdentityKeyMatch,
+  type IdentityRowSnapshot,
+} from '../storage/agents-repo.js'
 import type { SessionOriginInfo } from '../daemon/network-origin.js'
 import { isAlive } from '../daemon/pid.js'
 
@@ -36,7 +40,18 @@ export type IdentityKeyConflict = {
 }
 
 export type RegisterResult =
-  | { agent_id: string; team: string }
+  // prior_snapshot is the caller row's ACTUAL pre-upsert state, read inside
+  // the same transaction as the upsert (CAS input for the codex same-thread
+  // evidence path).  register_generation is the counter that upsert minted;
+  // register-time runtime binds condition their final write on it.  Both are
+  // internal only: the MCP tool layer strips them from every client-facing
+  // envelope.
+  | {
+      agent_id: string
+      team: string
+      prior_snapshot: IdentityRowSnapshot | null
+      register_generation: number
+    }
   | { error: 'agent_id_collision' }
   | { error: 'invalid_delivery'; reason: DeliveryValidationReason }
   | { error: 'claude_ui_pid_requires_channel_proxy' }

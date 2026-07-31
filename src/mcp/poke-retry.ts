@@ -80,6 +80,14 @@ function enqueueNext(key: string): void {
   entry.timer = setTimeout(() => { void tick(key) }, delay)
 }
 
+// A tick may be superseded while suspended in an await: cancellation or a
+// re-schedule can remove/replace its map entry. After every await the tick
+// must re-verify it still owns the key before any mutation or status write;
+// a failed identity check means a newer owner exists and the tick goes silent.
+function superseded(key: string, entry: RetryEntry): boolean {
+  return retryMap.get(key) !== entry
+}
+
 async function tick(key: string): Promise<void> {
   const entry = retryMap.get(key)
   if (!entry) return
@@ -107,6 +115,7 @@ async function tick(key: string): Promise<void> {
       return
     }
     const guard = await ctx.paneGuardFn(agent.tmux_pane_id)
+    if (superseded(key, entry)) return
     if (guard === 'pass') {
       const outcome = await ctx.pokeFn({
         team: ctx.team,
@@ -115,6 +124,7 @@ async function tick(key: string): Promise<void> {
         paneId: agent.tmux_pane_id,
         body: ctx.body
       })
+      if (superseded(key, entry)) return
       // Only an explicit success — or a legacy `void` caller — means the pane
       // was written to. Every `ok:false` injected nothing and must never be
       // recorded as delivered, whatever the reason.
@@ -164,6 +174,7 @@ async function tick(key: string): Promise<void> {
     })
     enqueueNext(key)
   } catch {
+    if (superseded(key, entry)) return
     ctx.updateStatusFn?.({
       agentId: ctx.agentId,
       wake_status: 'failed',

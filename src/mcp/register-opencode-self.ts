@@ -118,8 +118,15 @@ export class RegisterOpencodeSelfService {
       },
     })
     if ('error' in result) return result
+    // prior_snapshot and register_generation are register-internal state;
+    // never expose them here.
+    const {
+      prior_snapshot: _priorSnapshot,
+      register_generation: _registerGeneration,
+      ...publicResult
+    } = result
     return {
-      ...result,
+      ...publicResult,
       session_id: sessionId,
       base_url: input.base_url,
     }

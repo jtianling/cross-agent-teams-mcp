@@ -84,6 +84,7 @@ describe('bind_runtime_identity tool', () => {
       ui_tty: undefined,
       tmux_pane_id: undefined,
       process_pattern: undefined,
+      captureCurrentGeneration: true,
     })
 
     const db = openDb(dbPath)

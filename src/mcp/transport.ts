@@ -314,7 +314,8 @@ export function mountMcp(
       },
       context,
       onUnregisterSuccess,
-      registerSvc
+      registerSvc,
+      log
     )
     server.connect(transport)
     const now = Date.now()

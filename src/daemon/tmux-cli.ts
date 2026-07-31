@@ -52,6 +52,10 @@ export async function sendEnter(paneId: string): Promise<void> {
   await pExecFile('tmux', ['send-keys', '-t', paneId, 'Enter'])
 }
 
+export async function deleteBuffer(bufferName: string): Promise<void> {
+  await pExecFile('tmux', ['delete-buffer', '-b', bufferName])
+}
+
 export function _resetTmuxAvailableCache(): void {
   _isTmuxAvailable = null
 }

@@ -42,6 +42,194 @@ describe('agents repo', () => {
     db.close()
   })
 
+  it('register returns the row ACTUAL prior state from the upsert transaction', () => {
+    const dir = tmp(); cleanups.push(dir)
+    const db = openDb(join(dir, 'data.db')); applySchema(db)
+    const repo = new AgentsRepo(db)
+    const first = repo.register({
+      name: 'codex-a',
+      agent_type: 'codex',
+      delivery: {
+        kind: 'codex-appserver',
+        thread_id: 'T1',
+        ws_url: 'ws://127.0.0.1:8799',
+      },
+    })
+    expect(first.prior_snapshot).toBeNull()
+    db.prepare(
+      `UPDATE agents SET runtime_ui_pid=?, runtime_tty=?, tmux_pane_id=?,
+         runtime_bound_at=? WHERE agent_id=?`
+    ).run(4242, 'ttys055', '%55', '2026-01-05T00:00:00Z', first.agent_id)
+
+    const second = repo.register({
+      name: 'codex-a',
+      agent_type: 'codex',
+      delivery: {
+        kind: 'codex-appserver',
+        thread_id: 'T2',
+        ws_url: 'ws://127.0.0.1:8799',
+      },
+    })
+    // The prior stored thread and the full physical seat, captured inside
+    // the same transaction that overwrote the thread with T2.
+    expect(second.prior_snapshot).toEqual({
+      agent_id: first.agent_id,
+      codex_thread_id: 'T1',
+      runtime_ui_pid: 4242,
+      runtime_tty: 'ttys055',
+      tmux_pane_id: '%55',
+      runtime_bound_at: '2026-01-05T00:00:00Z',
+    })
+    db.close()
+  })
+
+  it('register mints a per-row register_generation that every upsert increments', () => {
+    const dir = tmp(); cleanups.push(dir)
+    const db = openDb(join(dir, 'data.db')); applySchema(db)
+    const repo = new AgentsRepo(db)
+    const r1 = repo.register({ name: 'alice' })
+    expect(r1.register_generation).toBe(1)
+    const r2 = repo.register({ name: 'alice' })
+    expect(r2.agent_id).toBe(r1.agent_id)
+    expect(r2.register_generation).toBe(2)
+    // Another identity keeps its own counter.
+    const other = repo.register({ name: 'bob' })
+    expect(other.register_generation).toBe(1)
+    db.close()
+  })
+
+  it('setRuntimeBinding with a stale register_generation changes zero rows and touches nothing', () => {
+    const dir = tmp(); cleanups.push(dir)
+    const db = openDb(join(dir, 'data.db')); applySchema(db)
+    const repo = new AgentsRepo(db)
+    const first = repo.register({ name: 'codex-a' })
+    // A bystander row bound to the seat the stale write would claim: a
+    // stale bind must not evict its pane either.
+    const bystander = repo.register({ name: 'codex-b' })
+    repo.setRuntimeBinding(bystander.agent_id, {
+      tmux_pane_id: '%67',
+      runtime_ui_pid: 101,
+      runtime_tty: 'ttys010',
+      runtime_verification_mode: 'verified_pid_tty_pane',
+    })
+
+    // The newer registration (generation 2) binds seat %20.
+    const second = repo.register({ name: 'codex-a' })
+    const fresh = repo.setRuntimeBinding(second.agent_id, {
+      tmux_pane_id: '%20',
+      runtime_ui_pid: 202,
+      runtime_tty: 'ttys021',
+      runtime_verification_mode: 'verified_pid_tty_pane',
+      expected_register_generation: second.register_generation,
+    })
+    expect(fresh.changes).toBe(1)
+
+    // The FIRST registration's late bind write carries the stale generation.
+    const stale = repo.setRuntimeBinding(first.agent_id, {
+      tmux_pane_id: '%67',
+      runtime_ui_pid: 4242,
+      runtime_tty: 'ttys010',
+      runtime_verification_mode: 'verified_pid_tty_pane',
+      expected_register_generation: first.register_generation,
+    })
+    expect(stale.changes).toBe(0)
+
+    const row = db.prepare(
+      `SELECT tmux_pane_id, runtime_ui_pid, runtime_tty FROM agents WHERE agent_id=?`
+    ).get(first.agent_id) as {
+      tmux_pane_id: string | null
+      runtime_ui_pid: number | null
+      runtime_tty: string | null
+    }
+    expect(row).toEqual({
+      tmux_pane_id: '%20',
+      runtime_ui_pid: 202,
+      runtime_tty: 'ttys021',
+    })
+    // The bystander's pane binding survived: the stale write skipped the
+    // incumbent-pane eviction along with the row write.
+    const bystanderRow = db.prepare(
+      `SELECT tmux_pane_id FROM agents WHERE agent_id=?`
+    ).get(bystander.agent_id) as { tmux_pane_id: string | null }
+    expect(bystanderRow.tmux_pane_id).toBe('%67')
+    db.close()
+  })
+
+  it('setRuntimeBinding without an expected generation stays unconditional (repo primitive; service callers default to call-start capture)', () => {
+    const dir = tmp(); cleanups.push(dir)
+    const db = openDb(join(dir, 'data.db')); applySchema(db)
+    const repo = new AgentsRepo(db)
+    const r = repo.register({ name: 'codex-a' })
+    repo.register({ name: 'codex-a' })
+    repo.register({ name: 'codex-a' })
+    const written = repo.setRuntimeBinding(r.agent_id, {
+      tmux_pane_id: '%5',
+      runtime_ui_pid: 55,
+      runtime_tty: 'ttys005',
+      runtime_verification_mode: 'verified_pid_tty_pane',
+    })
+    expect(written.changes).toBe(1)
+    const row = db.prepare(
+      `SELECT tmux_pane_id FROM agents WHERE agent_id=?`
+    ).get(r.agent_id) as { tmux_pane_id: string | null }
+    expect(row.tmux_pane_id).toBe('%5')
+    db.close()
+  })
+
+  it('clearRuntimeBinding wipes every runtime-seat field while the generation matches', () => {
+    const dir = tmp(); cleanups.push(dir)
+    const db = openDb(join(dir, 'data.db')); applySchema(db)
+    const repo = new AgentsRepo(db)
+    const r = repo.register({ name: 'codex-a' })
+    repo.setRuntimeBinding(r.agent_id, {
+      tmux_pane_id: '%20',
+      runtime_ui_pid: 202,
+      runtime_tty: 'ttys021',
+      runtime_verification_mode: 'verified_pid_tty_pane',
+    })
+    const cleared = repo.clearRuntimeBinding(r.agent_id, {
+      expected_register_generation: r.register_generation,
+    })
+    expect(cleared.changes).toBe(1)
+    const row = db.prepare(
+      `SELECT tmux_pane_id, runtime_ui_pid, runtime_tty,
+              runtime_verification_mode, runtime_bound_at
+       FROM agents WHERE agent_id=?`
+    ).get(r.agent_id)
+    expect(row).toEqual({
+      tmux_pane_id: null,
+      runtime_ui_pid: null,
+      runtime_tty: null,
+      runtime_verification_mode: null,
+      runtime_bound_at: null,
+    })
+    db.close()
+  })
+
+  it('clearRuntimeBinding with a stale generation changes nothing — a newer registration keeps its seat', () => {
+    const dir = tmp(); cleanups.push(dir)
+    const db = openDb(join(dir, 'data.db')); applySchema(db)
+    const repo = new AgentsRepo(db)
+    const first = repo.register({ name: 'codex-a' })
+    const second = repo.register({ name: 'codex-a' })
+    repo.setRuntimeBinding(first.agent_id, {
+      tmux_pane_id: '%20',
+      runtime_ui_pid: 202,
+      runtime_tty: 'ttys021',
+      runtime_verification_mode: 'verified_pid_tty_pane',
+      expected_register_generation: second.register_generation,
+    })
+    const cleared = repo.clearRuntimeBinding(first.agent_id, {
+      expected_register_generation: first.register_generation,
+    })
+    expect(cleared.changes).toBe(0)
+    const row = db.prepare(
+      `SELECT tmux_pane_id, runtime_ui_pid FROM agents WHERE agent_id=?`
+    ).get(first.agent_id)
+    expect(row).toEqual({ tmux_pane_id: '%20', runtime_ui_pid: 202 })
+    db.close()
+  })
+
   it('list_agents returns only caller team', () => {
     const dir = tmp(); cleanups.push(dir)
     const db = openDb(join(dir, 'data.db')); applySchema(db)

@@ -6,6 +6,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { openDb } from '../src/storage/db.js'
 import { applySchema } from '../src/storage/schema.js'
+import { __testOverrides as autoBindOverrides } from '../src/mcp/auto-bind-codex-pane.js'
 
 const detectTmuxPaneMock = vi.fn()
 const bindRuntimeIdentityMock = vi.fn()
@@ -77,9 +78,15 @@ describe('register_agent auto runtime binding', () => {
     cleanups.length = 0
     detectTmuxPaneMock.mockReset()
     bindRuntimeIdentityMock.mockReset()
+    delete autoBindOverrides.listPanes
+    delete autoBindOverrides.ttyProcesses
+    delete autoBindOverrides.now
   })
 
   it('best-effort binds a recognized Codex client during registration', async () => {
+    // No foreground codex carrier on the detected tty: the fallback keeps
+    // the tty/pane bind (the seam blocks the real ps probe).
+    autoBindOverrides.ttyProcesses = async () => ['555 555 555 S+ -zsh']
     detectTmuxPaneMock.mockResolvedValue({
       ok: true,
       pane: {
@@ -128,6 +135,8 @@ describe('register_agent auto runtime binding', () => {
       agent: 'codex',
       ui_tty: 'ttys026',
       tmux_pane_id: '%1902',
+      // Register-time binds carry the generation their registration minted.
+      expectedRegisterGeneration: 1,
     })
 
     const db = openDb(dbPath)
@@ -182,6 +191,8 @@ describe('register_agent auto runtime binding', () => {
       callerAgentId: expect.any(String),
       agent: 'codex',
       ui_pid: 25079,
+      // Register-time binds carry the generation their registration minted.
+      expectedRegisterGeneration: 1,
     })
     expect(detectTmuxPaneMock).not.toHaveBeenCalled()
 

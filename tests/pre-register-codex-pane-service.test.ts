@@ -85,6 +85,110 @@ describe('PreRegisterCodexPaneService', () => {
     expect(rows[0].xats_agent_id).toBe('B')
   })
 
+  it('stores identity_key when supplied', () => {
+    const fixed = new Date('2026-01-01T00:00:00.000Z')
+    const svc = new PreRegisterCodexPaneService(repo, () => fixed)
+    const res = svc.register({ pane_id: '%10', xats_agent_id: 'U1', identity_key: 'K1' })
+    expect(res).toEqual({ ok: true, expires_at: '2026-01-01T00:02:00.000Z' })
+    const rows = repo.listUnexpired('2026-01-01T00:00:00.000Z')
+    expect(rows[0].identity_key).toBe('K1')
+  })
+
+  it('stores NULL identity_key when omitted', () => {
+    const svc = new PreRegisterCodexPaneService(repo)
+    svc.register({ pane_id: '%10', xats_agent_id: 'U1' })
+    expect(repo.getByPaneId('%10')?.identity_key).toBeNull()
+  })
+
+  it('rejects an empty identity_key without writing state', () => {
+    const svc = new PreRegisterCodexPaneService(repo)
+    const res = svc.register({ pane_id: '%10', xats_agent_id: 'U1', identity_key: '' })
+    expect(res).toMatchObject({ error: 'invalid_arguments' })
+    expect((res as { detail: string }).detail).toMatch(/identity_key/i)
+    expect(repo.listUnexpired(new Date().toISOString())).toHaveLength(0)
+  })
+
+  it('rejects a whitespace-only identity_key without writing state', () => {
+    const svc = new PreRegisterCodexPaneService(repo)
+    const res = svc.register({ pane_id: '%10', xats_agent_id: 'U1', identity_key: '   ' })
+    expect(res).toMatchObject({ error: 'invalid_arguments' })
+    expect((res as { detail: string }).detail).toMatch(/identity_key/i)
+    expect(repo.listUnexpired(new Date().toISOString())).toHaveLength(0)
+  })
+
+  it('overwrite without identity_key clears the stored key', () => {
+    const fixed = new Date('2026-01-01T00:00:00.000Z')
+    const svc = new PreRegisterCodexPaneService(repo, () => fixed)
+    svc.register({ pane_id: '%10', xats_agent_id: 'A', identity_key: 'K1' })
+    svc.register({ pane_id: '%10', xats_agent_id: 'B' })
+    const row = repo.getByPaneId('%10')
+    expect(row?.xats_agent_id).toBe('B')
+    expect(row?.identity_key).toBeNull()
+  })
+
+  it('fires onAccepted with the accepted row, and never on rejection', () => {
+    const fixed = new Date('2026-01-01T00:00:00.000Z')
+    const accepted: unknown[] = []
+    const svc = new PreRegisterCodexPaneService(
+      repo,
+      () => fixed,
+      row => { accepted.push(row) }
+    )
+    svc.register({ pane_id: '%10', xats_agent_id: 'U1', identity_key: 'K1' })
+    svc.register({ pane_id: '%10', xats_agent_id: 'U2' })
+    svc.register({ pane_id: '%11', xats_agent_id: '' })
+    expect(accepted).toEqual([
+      {
+        pane_id: '%10',
+        xats_agent_id: 'U1',
+        identity_key: 'K1',
+        expires_at: '2026-01-01T00:02:00.000Z',
+      },
+      {
+        pane_id: '%10',
+        xats_agent_id: 'U2',
+        identity_key: null,
+        expires_at: '2026-01-01T00:02:00.000Z',
+      },
+    ])
+  })
+
+  it('an onAccepted failure does not corrupt the ok envelope, and is logged', () => {
+    const fixed = new Date('2026-01-01T00:00:00.000Z')
+    const logged: string[] = []
+    const svc = new PreRegisterCodexPaneService(
+      repo,
+      () => fixed,
+      () => { throw new Error('boom') },
+      line => { logged.push(line) }
+    )
+    const res = svc.register({ pane_id: '%10', xats_agent_id: 'U1', identity_key: 'K1' })
+    expect(res).toEqual({ ok: true, expires_at: '2026-01-01T00:02:00.000Z' })
+    expect(repo.getByPaneId('%10')?.identity_key).toBe('K1')
+    expect(logged).toHaveLength(1)
+    expect(logged[0]).toContain('stage=onAccepted')
+    expect(logged[0]).toContain('%10')
+    expect(logged[0]).toContain('boom')
+    expect(logged[0]).not.toContain('K1')
+  })
+
+  it('an onAccepted error embedding the key value is redacted in the log', () => {
+    const fixed = new Date('2026-01-01T00:00:00.000Z')
+    const logged: string[] = []
+    const svc = new PreRegisterCodexPaneService(
+      repo,
+      () => fixed,
+      () => { throw new Error('lookup failed for K1') },
+      line => { logged.push(line) }
+    )
+    const res = svc.register({ pane_id: '%10', xats_agent_id: 'U1', identity_key: 'K1' })
+    expect(res).toEqual({ ok: true, expires_at: '2026-01-01T00:02:00.000Z' })
+    expect(logged).toHaveLength(1)
+    expect(logged[0]).toContain('Error')
+    expect(logged[0]).toContain('[redacted]')
+    expect(logged[0]).not.toContain('K1')
+  })
+
   it('deleteExpired runs on write and removes stale rows', () => {
     let t = new Date('2026-01-01T00:00:00.000Z').getTime()
     const svc = new PreRegisterCodexPaneService(repo, () => new Date(t))

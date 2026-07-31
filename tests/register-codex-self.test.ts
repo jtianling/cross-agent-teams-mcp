@@ -145,6 +145,8 @@ describe('RegisterCodexSelfService', () => {
       team: 'default',
       thread_id: '11111111-1111-4111-8111-111111111111',
       ws_url: 'ws://127.0.0.1:8799',
+      prior_snapshot: null,
+      register_generation: 1,
     })
     const row = db.prepare(
       'SELECT delivery_kind, delivery_payload, tmux_pane_id FROM agents WHERE team=? AND name=?'
@@ -225,6 +227,8 @@ describe('RegisterCodexSelfService', () => {
       team: 'default',
       thread_id: '11111111-1111-4111-8111-111111111111',
       ws_url: 'ws://127.0.0.1:8799',
+      prior_snapshot: null,
+      register_generation: 1,
     })
     const row = db.prepare(
       'SELECT tmux_pane_id FROM agents WHERE team=? AND name=?'
@@ -529,6 +533,8 @@ describe('RegisterCodexSelfService', () => {
       team: 'default',
       thread_id: '11111111-1111-4111-8111-111111111111',
       ws_url: 'ws://127.0.0.1:8800',
+      prior_snapshot: null,
+      register_generation: 1,
     })
     expect(harness.calls.map(call => call.url)).toEqual([
       'ws://127.0.0.1:8799',

@@ -6,10 +6,21 @@ import {
   capturePaneTail,
   loadBuffer,
   pasteBuffer,
-  sendEnter
+  sendEnter,
+  deleteBuffer
 } from '../daemon/tmux-cli.js'
+import {
+  defaultForegroundProbeSync,
+  defaultPaneTtySync,
+  isForegroundCodexCarrier,
+} from './auto-bind-codex-pane.js'
 import type { ChannelWakeFanout } from '../daemon/channel-wake-fanout.js'
-import { dispatchPoke, type TargetRow as DispatchTargetRow, type TmuxPokeResult } from './transport-dispatch.js'
+import {
+  dispatchPoke,
+  resolveAgentType,
+  type TargetRow as DispatchTargetRow,
+  type TmuxPokeResult,
+} from './transport-dispatch.js'
 import { runQuietGuard } from './poke-guard.js'
 import {
   memoizePaneSnapshot,
@@ -28,6 +39,11 @@ export interface PokeDeps {
   localDevice?: string
   // Supplied by fan-out so one tmux snapshot serves the whole round.
   paneSnapshot?: PaneSnapshotLoader
+  /** Sync seams for the codex foreground-carrier confirm at the tmux write
+   *  checkpoints.  Tests MUST inject both: the defaults shell out to real
+   *  tmux/ps. */
+  paneTtySync?: (paneId: string) => string | undefined
+  foregroundProbeSync?: (tty: string) => string[]
 }
 
 export interface PokeInput {
@@ -125,7 +141,34 @@ async function runStage<T>(stage: TmuxStage, fn: () => Promise<T>): Promise<T> {
   }
 }
 
-async function tmuxPokeImpl(args: {
+// paste-buffer -d is the only deletion on the success path; an abort after a
+// successful load must not leave the message body parked in a named buffer.
+// Returns false when the delete itself failed so the caller can surface the
+// leaked buffer without masking the abort being reported.
+async function discardBuffer(bufName: string): Promise<boolean> {
+  try {
+    await deleteBuffer(bufName)
+    return true
+  } catch {
+    return false
+  }
+}
+
+// The primary abort keeps its error; the failed cleanup rides along as a
+// detail naming the buffer that may still hold the message body.  The body
+// itself is never included.
+function noteCleanupFailure(
+  result: { error: string; detail?: unknown },
+  bufName: string
+): { error: string; detail?: unknown } {
+  const detail: Record<string, unknown> = { buffer_cleanup_failed: bufName }
+  if (result.detail !== undefined) detail.cause = result.detail
+  return { ...result, detail }
+}
+
+// Exported for the codex recovery poke, which pastes into a pre-registered
+// pane through the same guard + ownership-recheck primitive.
+export async function tmuxPokeImpl(args: {
   pane_id: string
   content: string
   skipGuard?: boolean
@@ -135,6 +178,9 @@ async function tmuxPokeImpl(args: {
     return { error: 'tmux_unavailable', detail: 'tmux binary not available on PATH' }
   }
   const bufName = `poke-${randomBytes(3).toString('hex')}`
+  // True from a successful load-buffer until paste-buffer -d consumes it;
+  // any abort in that window must best-effort delete the named buffer.
+  let bufferPending = false
   try {
     if (!args.skipGuard) {
       // Guard inside the try so a pane that dies mid-window is classified
@@ -151,14 +197,37 @@ async function tmuxPokeImpl(args: {
     }
     const pane_tail_before = await runStage('capture_before', () => capturePaneTail(args.pane_id, TAIL_LINES))
     await runStage('load_buffer', () => loadBuffer(bufName, args.content))
+    bufferPending = true
+    // Final ownership read: capture/load above awaited, so the earlier check no
+    // longer immediately precedes the write. This one is synchronous with no
+    // await between it and the paste.
+    if (args.confirmOwnership && !args.confirmOwnership()) {
+      if (!(await discardBuffer(bufName))) {
+        return noteCleanupFailure({ error: 'pane_reassigned' }, bufName)
+      }
+      return { error: 'pane_reassigned' }
+    }
     await runStage('paste_buffer', () => pasteBuffer(bufName, args.pane_id))
+    bufferPending = false
     await delay(PASTE_SETTLE_MS)
+    // Ownership can move during the paste settle window. Pasted-but-unexecuted
+    // text is recoverable; an executed Enter is not — so one more synchronous
+    // read aborts here rather than sending the keypress. Distinct error so
+    // callers can tell "nothing written" (pane_reassigned) from "pasted but
+    // never executed" (ownership_lost).
+    if (args.confirmOwnership && !args.confirmOwnership()) {
+      return { error: 'ownership_lost' }
+    }
     await runStage('send_keys', () => sendEnter(args.pane_id))
     await delay(PASTE_SETTLE_MS)
     const pane_tail_after = await runStage('capture_after', () => capturePaneTail(args.pane_id, TAIL_LINES))
     return { ok: true, pane_tail_before, pane_tail_after }
   } catch (e) {
-    return classifyTmuxError(e as StageError)
+    const classified = classifyTmuxError(e as StageError)
+    if (bufferPending && !(await discardBuffer(bufName))) {
+      return noteCleanupFailure(classified, bufName)
+    }
+    return classified
   }
 }
 
@@ -212,7 +281,9 @@ export async function poke(deps: PokeDeps, input: PokeInput): Promise<PokeResult
   }
   const verify = createPaneHostVerifier(deps)
   const confirmOwn = ({ row, paneId }: { row: DispatchTargetRow; paneId: string }): boolean =>
-    row.device !== (deps.localDevice ?? 'local') || stillOwnsPane(deps.db, row.agent_id, paneId)
+    row.device !== (deps.localDevice ?? 'local')
+    || (stillOwnsPane(deps.db, row.agent_id, paneId)
+      && confirmCodexForegroundCarrier(deps, row, paneId))
   if (!fanout) {
     if (delivery.kind === 'codex-appserver' || delivery.kind === 'opencode-server' || delivery.kind === 'kimi-server') {
       return dispatchPoke(
@@ -251,6 +322,38 @@ function findPaneClaimants(
        WHERE device = ? AND tmux_pane_id = ? AND agent_id != ?`
     )
     .all(args.device, args.paneId, args.excludeAgentId) as PaneHostRow[]
+}
+
+/**
+ * TARGET-side carrier proof for codex tmux fallbacks, run at every write
+ * checkpoint of the shared tmux primitive: the DB ownership read above cannot
+ * see a SIGSTOP-ed or backgrounded codex whose shell owns the tty again
+ * (kill(pid, 0) stays true), so a codex target with a bound runtime_ui_pid
+ * must also prove that pid is the pane tty's foreground codex --remote
+ * process.  The stored uuid is unavailable on this path; the command-level
+ * match suffices.  Fail-closed: a missing tty or any probe error reads as
+ * unsafe.  The gate keys off the EFFECTIVE agent type (the dispatcher's
+ * resolveAgentType), so a legacy row with agent_type=NULL and a
+ * codex-appserver delivery cannot bypass the proof on its tmux fallback.
+ * The same latent hazard exists for claude/other TUI targets;
+ * deliberately NOT widened to them in this change (tracked as a follow-up).
+ */
+function confirmCodexForegroundCarrier(
+  deps: PokeDeps,
+  row: DispatchTargetRow,
+  paneId: string
+): boolean {
+  if (resolveAgentType(row) !== 'codex') return true
+  const pid = row.runtime_ui_pid
+  if (pid === null || pid <= 0) return true
+  try {
+    const tty = (deps.paneTtySync ?? defaultPaneTtySync)(paneId)
+    if (!tty) return false
+    const probe = deps.foregroundProbeSync ?? defaultForegroundProbeSync
+    return isForegroundCodexCarrier({ lines: probe(tty), pid })
+  } catch {
+    return false
+  }
 }
 
 function stillOwnsPane(

@@ -106,7 +106,7 @@ describe('register_agent codex pre-reg auto-bind', () => {
     })
     autoBindOverrides.listPanes = async () => [{ pane_id: '%1972', tty: 'ttys001' }]
     autoBindOverrides.ttyProcesses = async () =>
-      ['91131 1 Ss codex --remote ws://127.0.0.1:8799 -c xats.agent_id="U1"']
+      ['91131 91131 91131 Ss codex --remote ws://127.0.0.1:8799 -c xats.agent_id="U1"']
 
     const { startServer } = await import('../src/daemon/server.js')
     const dir = tmp()
@@ -159,7 +159,7 @@ describe('register_agent codex pre-reg auto-bind', () => {
   it('ignores an expired pre-reg and GCs it; register falls back to no-pane hint', async () => {
     autoBindOverrides.listPanes = async () => [{ pane_id: '%1972', tty: 'ttys001' }]
     autoBindOverrides.ttyProcesses = async () =>
-      ['91131 1 Ss codex --remote -c xats.agent_id="U1"']
+      ['91131 91131 91131 Ss codex --remote -c xats.agent_id="U1"']
 
     const { startServer } = await import('../src/daemon/server.js')
     const dir = tmp()
@@ -208,7 +208,7 @@ describe('register_agent codex pre-reg auto-bind', () => {
     bindRuntimeIdentityMock.mockResolvedValue({ error: 'pid_has_no_tty' })
     autoBindOverrides.listPanes = async () => [{ pane_id: '%1972', tty: 'ttys001' }]
     autoBindOverrides.ttyProcesses = async () =>
-      ['91131 1 Ss codex --remote -c xats.agent_id="U1"']
+      ['91131 91131 91131 Ss codex --remote -c xats.agent_id="U1"']
 
     const { startServer } = await import('../src/daemon/server.js')
     const dir = tmp()
@@ -253,4 +253,186 @@ describe('register_agent codex pre-reg auto-bind', () => {
     await c.close()
     await app.close()
   })
+
+  it('LAB S1: the detect fallback never binds a pane that still has a pending pre-reg row', async () => {
+    // The scan refused the row (it is another identity's), so the fallback
+    // must not overrule that with a machine-wide heuristic: detect_tmux_pane
+    // has no caller correlation at all, and the pane it scores highest here
+    // is exactly the pane the refused row belongs to.
+    detectTmuxPaneMock.mockResolvedValue({
+      ok: true,
+      pane: { pane_id: '%1972', tty: 'ttys001' },
+    })
+    autoBindOverrides.listPanes = async () => [{ pane_id: '%1972', tty: 'ttys001' }]
+    // No carrier for the stored uuid: the scan finds no candidate at all.
+    autoBindOverrides.ttyProcesses = async () => ['4242 4242 4242 Ss -zsh']
+
+    const { startServer } = await import('../src/daemon/server.js')
+    const dir = tmp()
+    cleanups.push(dir)
+    const dbPath = join(dir, 'data.db')
+    const logLines: string[] = []
+    const { app, port, host } = await startServer({
+      dbPath, port: 0, mcpLog: line => { logLines.push(line) },
+    })
+    const url = new URL(`http://${host}:${port}/mcp`)
+    const t = new StreamableHTTPClientTransport(url)
+    const c = new Client({ name: 'codex-cli', version: '0.0.0' })
+    await c.connect(t)
+
+    const preReg = await c.callTool({
+      name: 'pre_register_codex_pane',
+      arguments: { pane_id: '%1972', xats_agent_id: 'U_OTHER' },
+    })
+    expect(await parseTool(preReg)).toMatchObject({ ok: true })
+
+    const resp = await c.callTool({
+      name: 'register_agent',
+      arguments: { agent_type: 'codex', model: 'gpt-5', role: 'worker', name: 'new-gpt', thread_id: VALID_THREAD_ID },
+    })
+    const obj = await parseTool(resp)
+    expect(obj.agent_id).toBeDefined()
+
+    expect(bindRuntimeIdentityMock).not.toHaveBeenCalled()
+    expect(logLines).toContainEqual(
+      expect.stringContaining('reason=pane_has_pending_prereg')
+    )
+
+    const db = openDb(dbPath)
+    applySchema(db)
+    const agentRow = db
+      .prepare('SELECT tmux_pane_id FROM agents WHERE team=? AND name=?')
+      .get('default', 'new-gpt') as { tmux_pane_id: string | null } | undefined
+    expect(agentRow?.tmux_pane_id).toBeNull()
+    const preregLeft = db
+      .prepare('SELECT COUNT(*) AS n FROM codex_pane_pre_registrations')
+      .get() as { n: number }
+    expect(preregLeft.n).toBe(1)
+    db.close()
+
+    await t.close()
+    await c.close()
+    await app.close()
+  })
+
+  // The test above seeds the row BEFORE registration, so it only proves the
+  // early gate works.  These drive the actual race the in-transaction check
+  // exists for: a launcher announces the pane WHILE the fallback is awaiting
+  // its runtime probes.  Deleting the authoritative check inside
+  // commitFallbackBind keeps the test above green and turns these red.
+  // expectedBind pins WHICH bind shape each row drives: without it both rows
+  // could silently take the same path and still pass.
+  const FALLBACK_SHAPES = [
+    {
+      label: 'pid shape: a foreground carrier is on the tty',
+      ttyProcesses: async (): Promise<string[]> =>
+        ['4242 4242 4242 Ss+ codex --remote ws://127.0.0.1:8799'],
+      expectedBind: { ui_pid: 4242, ui_tty: undefined },
+    },
+    {
+      label: 'tty shape: no foreground carrier, bind falls back to the tty',
+      ttyProcesses: async (): Promise<string[]> => ['4242 4242 4242 Ss -zsh'],
+      expectedBind: { ui_pid: undefined, ui_tty: 'ttys001' },
+    },
+  ]
+
+  for (const shape of FALLBACK_SHAPES) {
+    it(`the detect fallback refuses a pre-reg row that lands DURING verification (${shape.label})`, async () => {
+      detectTmuxPaneMock.mockResolvedValue({
+        ok: true,
+        pane: { pane_id: '%1972', tty: 'ttys001' },
+      })
+      autoBindOverrides.listPanes = async () => [{ pane_id: '%1972', tty: 'ttys001' }]
+      autoBindOverrides.ttyProcesses = shape.ttyProcesses
+
+      const { startServer } = await import('../src/daemon/server.js')
+      const dir = tmp()
+      cleanups.push(dir)
+      const dbPath = join(dir, 'data.db')
+      const logLines: string[] = []
+      const { app, port, host } = await startServer({
+        dbPath, port: 0, mcpLog: line => { logLines.push(line) },
+      })
+
+      const url = new URL(`http://${host}:${port}/mcp`)
+      const t = new StreamableHTTPClientTransport(url)
+      const c = new Client({ name: 'codex-cli', version: '0.0.0' })
+      await c.connect(t)
+      // A second client stands in for the launcher announcing the pane.
+      const launcherT = new StreamableHTTPClientTransport(url)
+      const launcher = new Client({ name: 'launcher', version: '0.0.0' })
+      await launcher.connect(launcherT)
+
+      // The injection: the runtime probe is the fallback's only await between
+      // the early gate and the commit, so announcing the pane here reproduces
+      // the launcher-lands-mid-verification window exactly.
+      let injected = false
+      bindRuntimeIdentityMock.mockImplementation(async () => {
+        if (!injected) {
+          injected = true
+          await launcher.callTool({
+            name: 'pre_register_codex_pane',
+            arguments: {
+              pane_id: '%1972', xats_agent_id: 'U_LATE', identity_key: 'K_LATE',
+            },
+          })
+        }
+        return {
+          ok: true,
+          tmux_pane_id: '%1972',
+          verification_mode: 'verified_pid_tty_pane',
+          tty: 'ttys001',
+          ui_pid: 4242,
+        }
+      })
+
+      const resp = await c.callTool({
+        name: 'register_agent',
+        arguments: { agent_type: 'codex', model: 'gpt-5', role: 'worker', name: 'new-gpt', thread_id: VALID_THREAD_ID },
+      })
+      expect((await parseTool(resp)).agent_id).toBeDefined()
+
+      // Distinguishes this from the early-gate test: verification really ran.
+      expect(injected).toBe(true)
+      // ...and ran in THIS row's shape, so the two rows cannot collapse into
+      // one path and still both pass.
+      const bindArgs = bindRuntimeIdentityMock.mock.calls[0][0] as {
+        ui_pid?: number
+        ui_tty?: string
+        tmux_pane_id?: string
+      }
+      expect(bindArgs.ui_pid).toBe(shape.expectedBind.ui_pid)
+      expect(bindArgs.ui_tty).toBe(shape.expectedBind.ui_tty)
+      expect(bindArgs.tmux_pane_id).toBe('%1972')
+      expect(logLines).toContainEqual(
+        expect.stringContaining('reason=pane_has_pending_prereg')
+      )
+
+      const db = openDb(dbPath)
+      applySchema(db)
+      const agentRow = db
+        .prepare('SELECT tmux_pane_id, runtime_ui_pid, runtime_tty FROM agents WHERE team=? AND name=?')
+        .get('default', 'new-gpt') as {
+          tmux_pane_id: string | null
+          runtime_ui_pid: number | null
+          runtime_tty: string | null
+        } | undefined
+      expect(agentRow?.tmux_pane_id).toBeNull()
+      expect(agentRow?.runtime_ui_pid).toBeNull()
+      expect(agentRow?.runtime_tty).toBeNull()
+      const left = db
+        .prepare('SELECT pane_id, xats_agent_id, identity_key FROM codex_pane_pre_registrations')
+        .all() as Array<{ pane_id: string; xats_agent_id: string; identity_key: string | null }>
+      expect(left).toEqual([
+        { pane_id: '%1972', xats_agent_id: 'U_LATE', identity_key: 'K_LATE' },
+      ])
+      db.close()
+
+      await t.close()
+      await c.close()
+      await launcherT.close()
+      await launcher.close()
+      await app.close()
+    })
+  }
 })

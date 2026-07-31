@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import type { CodexPanePreRegRepo } from './codex-pane-pre-register-repo.js'
+import { describeRedactedError } from './log-redact.js'
 
 export const preRegisterCodexPaneInputSchema = z
   .object({
@@ -10,6 +11,9 @@ export const preRegisterCodexPaneInputSchema = z
         message: 'pane_id must be a tmux pane id starting with "%"',
       }),
     xats_agent_id: z.string().min(1),
+    identity_key: z.string().min(1).refine(v => v.trim().length > 0, {
+      message: 'identity_key must not be empty',
+    }).optional(),
     ttl_seconds: z.number().int().positive().optional(),
   })
   .strict()
@@ -31,10 +35,19 @@ function clampTtl(ttl: number | undefined): number {
   return raw
 }
 
+export interface AcceptedPreRegRow {
+  pane_id: string
+  xats_agent_id: string
+  identity_key: string | null
+  expires_at: string
+}
+
 export class PreRegisterCodexPaneService {
   constructor(
     private readonly repo: CodexPanePreRegRepo,
-    private readonly now: () => Date = () => new Date()
+    private readonly now: () => Date = () => new Date(),
+    private readonly onAccepted?: (row: AcceptedPreRegRow) => void,
+    private readonly log?: (line: string) => void
   ) {}
 
   register(args: unknown): PreRegisterCodexPaneResult {
@@ -58,8 +71,27 @@ export class PreRegisterCodexPaneService {
     this.repo.upsert({
       pane_id: parsed.data.pane_id,
       xats_agent_id: parsed.data.xats_agent_id,
+      identity_key: parsed.data.identity_key,
       expires_at,
     })
+    // Recovery scheduling is a side channel: a hook failure must not turn an
+    // accepted pre-registration into an error.
+    try {
+      this.onAccepted?.({
+        pane_id: parsed.data.pane_id,
+        xats_agent_id: parsed.data.xats_agent_id,
+        identity_key: parsed.data.identity_key ?? null,
+        expires_at,
+      })
+    } catch (error) {
+      // The hook resolves the identity key, so a thrown message may embed it;
+      // log only the error class plus a key-redacted message.
+      this.log?.(
+        `pre-register hook error: pane=${parsed.data.pane_id} ` +
+        `stage=onAccepted ` +
+        `error=${describeRedactedError(error, parsed.data.identity_key)}`
+      )
+    }
     return { ok: true, expires_at }
   }
 }

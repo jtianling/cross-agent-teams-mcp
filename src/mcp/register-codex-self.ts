@@ -2,6 +2,7 @@ import {
   RegisterAgentService,
   type IdentityKeyConflict,
 } from './register-agent.js'
+import type { IdentityRowSnapshot } from '../storage/agents-repo.js'
 import {
   JsonRpcSocketClient,
   defaultWebSocketFactory,
@@ -44,6 +45,11 @@ export type RegisterCodexSelfResult =
       team: string
       thread_id: string
       ws_url: string
+      // Actual pre-upsert row state returned by the persist transaction
+      // (CAS input; see RegisterResult) plus the generation that upsert
+      // minted.  Both stripped by the MCP tool layer.
+      prior_snapshot: IdentityRowSnapshot | null
+      register_generation: number
     }
   | { error: 'agent_id_collision' }
   | { error: 'invalid_delivery'; reason: string }
