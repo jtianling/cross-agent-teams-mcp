@@ -128,6 +128,47 @@ env -u TMUX -u TMUX_PANE TMUX_TMPDIR="$LAB/tmuxtmp" \
 `-S` 传的是解析出来的同一个绝对路径, 目的只是让"只按绝对 socket 路径杀"这条
 红线仍然成立.
 
+## 实验室是共享的 (2026-07-31 事故写出来的)
+
+`$LAB` 默认单一根目录, 而脚本的清理动作是**破坏性**的: 每个场景 `--fresh` 会清空 lab
+DB 与 `daemon.log`, cleanup 会 `lab_tmux_kill_server`.  这套口径在**独占**时正确, 它
+默认了实验室归你一个人 —— 而这个前提从来没人写下来过.  当天两个 tester 同时在
+`~/.xats-lab` 里干活, 互相把对方的 pane 杀掉 / 把对方的 daemon 停掉, 而**双方都只看到
+"东西莫名消失", 没有任何报错指向对方**.
+
+三条规矩:
+
+1. **开跑前先查占用**: `lab_tmux list-panes -a` 加 `curl $LAB_PORT/health`.  非空就先问,
+   别直接 `--fresh`.
+2. **要独占就换根**: `XATS_LAB_HOME` / `XATS_LAB_PORT` / `XATS_LAB_APPSERVER_PORT` /
+   `XATS_LAB_DEVICE` 四个都可覆盖, 且 `LAB_TMUX_TMPDIR` 是从 `$LAB` 推出来的 —— 换根
+   会**连私有 tmux server 一起换**, 于是 `lab_tmux_kill_server` 从物理上够不着别人的
+   pane, 而 `lab_guard_isolation` 四条依然全部成立.
+3. **要往 app-server 进程环境里塞东西, 必须自己起私有端口, 不许动共享的 8899.**
+   理由见下: app-server 的环境就是模型的环境, 塞进去的东西**所有**经它的会话都读得到.
+
+## 环境策略: `core` 挡不住继承来的变量 (实测)
+
+2026-07-31 实测, 私有 home + 显式 `inherit = "core"` + 生产形态 pane: 在 app-server
+环境里放的 `TMUX_PANE=%9999`、假 `XATS_IDENTITY_KEY`、marker, **工具侧全部读到**.
+
+**让这个结果有方向的是反向对照**: 只把 `inherit` 改成 `"none"`, 其余全同 → 工具侧变成
+`command not found: sh` (`PATH` 被端掉).  这证明策略**确实被读到、确实生效**.  没有这一步,
+"core 放行了一切"和"策略压根没跑"在输出上**完全一样**.
+
+两条直接后果:
+
+- **泄漏是真的, 而且静默**: app-server 的环境**冻结在它被拉起的那一刻**.  哪天它恰好从一个
+  带 key 的 pane 起来, 经它的所有会话都会看到同一把**别人的** key.  生产今天为空是运气,
+  不是结构保证.  且**堵不住**: `core` 不挡, `none` 挡得住但把 `PATH` 一起端掉, 没有中间档.
+- **任何"launcher 通过环境变量下发秘密给 pane"的方案, 在 `--remote` 形态下都不成立** ——
+  模型就在 app-server 里, 读得到它继承来的一切.  证据通道只能是**不经过 app-server 环境**
+  的那种, 例如 daemon 侧自己核 pane 的进程树.
+
+另: **`--dangerously-bypass-approvals-and-sandbox` 会让环境策略整体失效** (带它时 `core`
+与 `none` 都给满环境).  生产 pane 不带它 —— 实验室 bootstrap 若带, 环境就比生产宽,
+凡结论依赖环境可见性的场景都不可直接推到生产.
+
 ## 断言口径 (daemon 侧)
 
 `lab-facts.sh` 输出三类 **daemon 状态** 事实, 状态断言只应落在这三类上
