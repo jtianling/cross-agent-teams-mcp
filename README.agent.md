@@ -577,6 +577,30 @@ Key points (understand before changing anything):
   restarts, picks up upgrades), while `pre-register-codex-pane` in the
   launcher uses the bare package name so every codex launch hits the npx
   cache instead of a registry round-trip.
+- **Publishing a release breaks every `--no-install` consumer of `@latest`
+  until the npx cache is warmed.**  `npm` resolves `latest` against the
+  REGISTRY, so the moment a new version is published the spec points at a
+  version the cache does not have, and `npx --no-install` refuses rather than
+  fetching it.  Measured on the 0.8.0 release: agent-of-empires' codex
+  bootstrap, which runs `npx --no-install cross-agent-teams-mcp@latest
+  pre-register-codex-pane`, began failing with `npx canceled due to missing
+  packages and no YES option: ["cross-agent-teams-mcp@0.8.0"]`.  Its
+  degrade-and-retry branch reruns the SAME npx invocation, so the retry failed
+  identically and the pane exited 1 — i.e. **from the moment of publish, every
+  newly started or restarted codex pane fails to come up**.  Already-running
+  panes are untouched, so it surfaces as "the next Shift+C is broken", with
+  nothing in the failure pointing at a release having happened.
+  **After publishing, warm the cache: `npx --yes cross-agent-teams-mcp@latest`.**
+- **The daemon and the codex launcher share ONE npx cache entry**, so whoever
+  warms it also decides which version the daemon loads on its next restart.
+  On 2026-08-01 the daemon started from
+  `~/.npm/_npx/<hash>/node_modules/.bin/cross-agent-teams-mcp` — the same
+  directory the launcher resolves — and picked up 0.8.0 only because the cache
+  had been warmed shortly before.  Two consequences: `--no-install` callers
+  depend on somebody else having warmed the entry (they never create it), and
+  warming it to an OLDER version would silently downgrade the daemon at its
+  next restart.  Never conclude which build is live from a directory listing —
+  read the running process's argv (see the daemon-restart notes above).
 - `start-xats` redirects the daemon and enabled runtimes to their separate
   log files and disowns them (`&!`): no terminal spam, and they survive
   the launching terminal closing (plain `&` jobs get SIGHUP).  The token
