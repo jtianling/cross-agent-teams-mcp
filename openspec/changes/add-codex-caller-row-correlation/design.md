@@ -69,6 +69,44 @@ daemon 已经在跟 app-server 说话 (resume thread).  若 app-server 暴露每
 - 需要验证: **app-server 是否暴露** (未验证; aoe 曾提出"app-server 按会话持有 `-c xats.agent_id`"
   这个前提, 至今未证).
 
+## 实验结果 (2026-07-31, codex 0.146.0, 私有根, `inherit = "core"` 显式写死)
+
+**M1 / M2 / M3 三条全否.**  两个真身会话对照, 每条都带正向对照.
+
+- **M1 否, 而且是两个独立的理由.**  E1 铺开的结论是: **模型可读的会话级值只有
+  `CODEX_THREAD_ID` 一个**.  uuid 模型**能**说出来, 但不来自任何会话级通道 —— 会话 B 是靠
+  全机推断 (thread → rollout → `capture-pane` 在自己 pane 的回显里认出自己刚发的 prompt →
+  pane shell pid → 其 codex 子进程 → 读 argv); 会话 A 则**编了一个理由** ("this tool
+  environment explicitly identifies pane 0"), 而本轮 `TMUX_PANE` 根本没设, 该说法可证伪 ——
+  A 答对了但**理由是假的**, 两个 pane 的场子里那是 50/50.
+  所以除了信任分析里"可伪造且伪造不自败"之外, M1 还有第二条否决理由: **即使 caller 完全
+  诚实, 它自报的值也可能是错的, 而 daemon 收到的只是一个 uuid, 分不出推导与编造.**
+- **M2 否.**  rollout (`$CODEX_HOME/sessions/YYYY/MM/DD/rollout-<ISO>-<thread_id>.jsonl`) 按
+  thread 定位没问题 (正向对照通过), 但 `session_meta` 与 `turn_context` **都不含任意 `-c`
+  覆盖**, 没有 `xats.*` 命名空间.
+  **必须挡住的陷阱**: 两个 uuid **确实出现在 rollout 文件里**, 但只出现在
+  `payload.content / message / output / last_agent_message` —— 因为**模型自己把它打印出来了**,
+  而且 A 的 uuid 出现在 B 的文件里.  "grep rollout 找 uuid"会**成功**, 并且**完全是错的**.
+- **M3 就 uuid 而言否**, 但有两个有用的副产品: `thread/read {threadId}` 给出每会话记录
+  (A/B 不同, 正向对照通过) 且**直接给出该会话 rollout 的绝对路径 `path`** —— M2 的定位问题
+  由 M3 解决; `config/read` 是**全局的** (A/B 完全相同、字段全 null), 不是会话覆盖.
+  探法记一笔: 给 app-server 一个不存在的方法, 错误里会列出全部支持的方法.
+
+**E1 里的一个陷阱值得单独记**: `CODEX_COMPANION_SESSION_ID` / `CODEX_COMPANION_TRANSCRIPT_PATH`
+名字最像"每会话", 实际是**操作者自己那个 Claude Code 会话**的 id 与 transcript 路径, 被
+app-server 继承下来 —— **只跑一个会话就会把它当成 codex 的特性**.
+
+### 由此产生的两条安全观察 (超出本变更范围, 需单独处理)
+
+模型的工具 shell 读得到 app-server 的**完整**环境 (`inherit = "core"` 一个都没滤掉), 其中包括:
+
+1. **`CROSS_AGENT_TEAMS_MCP_TOKEN`** —— 生产上就是真 token;
+2. **`CODEX_COMPANION_TRANSCRIPT_PATH`** —— 操作者 Claude Code 会话 transcript 的绝对路径.
+
+第 1 条对 codex agent 本身不算提权 (它本来就用这个 token 连 xats), 但它意味着**该 token 是
+凡能读到 app-server 环境者皆可得**的.  第 2 条是实打实的信息暴露: 模型拿到了一条通往操作者
+完整对话记录的路径.  **两条都不在本变更的范围内, 但必须单独立项**, 不要夹带.
+
 ## 信任分析 (这一节决定选型, 不只是取舍)
 
 **caller 报什么都可伪造; 真正的问题是 daemon 能验证什么.**
@@ -85,6 +123,40 @@ daemon 已经在跟 app-server 说话 (resume thread).  若 app-server 暴露每
 
 优先级: **M2 ≈ M3 > M1(仅作交叉校验)**.  M2/M3 之间按实验结果与稳定性选 —— M3 若可行更干净
 (不依赖磁盘格式), M2 有 aoe 的先例.
+
+## 第二轮候选 (M1-M3 全否之后)
+
+三条原候选都在问同一件事: **codex 能不能告诉我们 launcher 铸的那个 uuid.**  答案是不能 ——
+uuid 只活在**进程的 argv** 里, codex 自己不记它.  所以第二轮换一个问法: **不要问 codex 要
+uuid, 而是把 daemon 已有的两端接起来.**
+
+daemon 手上已经有两样各自可靠、但从未被连起来的东西:
+
+- 从 caller: `thread_id`  →(M3 的 `thread/read`)→ **该会话 rollout 文件的绝对路径**;
+- 从 pane: pane → tty → 载体进程 pid → argv 里的 **uuid** (C4).
+
+缺的就是 **"这个载体进程 ↔ 这个 thread"** 这一跳.
+
+### M5 — 用载体进程打开的文件把两端接起来 (推荐先验)
+
+`thread/read` 给出的 rollout 路径是**每会话唯一**的.  若 pane 里那个 codex 进程在会话期间
+**持有该文件的打开描述符**, 那么对每个候选 pane 的载体 pid 做一次 `lsof -p <pid>`, 看它是否
+打开着 caller 那个 thread 的 rollout 文件, 就得到了缺的那一跳.
+
+- **caller 的贡献仍然只有 `thread_id`** —— 按信任分析, 不引入新假设;
+- **连接关系由 daemon 自己观测**, 不经过任何自述, 也不经过 app-server 的可写字段;
+- 不依赖 rollout 的**内容**格式 (只用路径), 因此躲开了 M2 的 grep 陷阱和格式漂移;
+- 未验证: **codex 是否长期持有该 fd** (可能是 append-then-close).  这就是 E5.
+
+### M4 — app-server 的每会话元数据通道 (未验证, 且有先后顺序问题)
+
+方法列表里有 `thread/metadata/update` / `thread/settings/update` / `thread/name/set`, 且
+`thread/read` 有对应的 `extra` / `agentNickname` / `agentRole` / `name` 空字段 —— 形状正好是
+关联需要的**可写 + 可读的每会话通道**.
+
+但它有一个结构性问题: **谁在注册之前写它.**  launcher 不跟 app-server 说话, 而且它 exec 时
+thread **还不存在**; daemon 说话, 但此刻它正是"不知道该写谁"的那一方.  所以 M4 不能独立成立,
+它更可能是 M5 成立之后**用来固化关联**的载体, 而不是建立关联的手段.
 
 ## 判定实验 (第一阶段, 先于任何实现)
 

@@ -2,17 +2,23 @@
 
 ## 1. 判定实验 (先于任何实现; 结果决定第 2 节的形态)
 
-- [ ] 1.1 E1 — 真身 `codex --remote` 能否在自己的工具里读出本会话的 `-c xats.agent_id`; 正向对照: 同会话 `$CODEX_THREAD_ID` 必须有值 (已知成立), 证明会话级元数据通道是通的; 两个会话各跑一次, 读到的值必须**不同**
-- [ ] 1.2 E2 — codex 会话的 rollout / session 记录是否同时含 thread id **与**配置覆盖; 记录路径、格式、codex 版本; 正向对照: 两个会话的记录必须给出**不同**的 uuid (只跑一个分不清"记录里有"与"读到的是全局默认")
-- [ ] 1.3 E3 — app-server 的 JSON-RPC 是否暴露每会话配置; 正向对照同 1.2
-- [ ] 1.4 三个实验一律在**私有实验室根**里做 (私有 `XATS_LAB_HOME` / 端口 / app-server / tmux socket), 报告里注明 codex 版本与 `shell_environment_policy` 取值
-- [ ] 1.5 结论落成一张表 (机制 × 可用性 × 依赖 × 信任面), 若 E1-E3 **全否**则本变更**重新提案**, 不得硬做 (见 design R1)
+- [x] 1.1 E1 — 真身 `codex --remote` 能否在自己的工具里读出本会话的 `-c xats.agent_id`; 正向对照: 同会话 `$CODEX_THREAD_ID` 必须有值 (已知成立), 证明会话级元数据通道是通的; 两个会话各跑一次, 读到的值必须**不同**
+- [x] 1.2 E2 — codex 会话的 rollout / session 记录是否同时含 thread id **与**配置覆盖; 记录路径、格式、codex 版本; 正向对照: 两个会话的记录必须给出**不同**的 uuid (只跑一个分不清"记录里有"与"读到的是全局默认")
+- [x] 1.3 E3 — app-server 的 JSON-RPC 是否暴露每会话配置; 正向对照同 1.2
+- [x] 1.4 三个实验一律在**私有实验室根**里做 (私有 `XATS_LAB_HOME` / 端口 / app-server / tmux socket), 报告里注明 codex 版本与 `shell_environment_policy` 取值
+- [x] 1.5 结论落成一张表 (机制 × 可用性 × 依赖 × 信任面), 若 E1-E3 **全否**则本变更**重新提案**, 不得硬做 (见 design R1)
+
+## 1b. 第二轮判定实验 (M1-M3 全否之后)
+
+- [ ] 1b.1 E5 — pane 里的 codex 载体进程是否**长期持有**本会话 rollout 文件的打开描述符 (`lsof -p <载体 pid>` 是否列出 `thread/read` 给的那个 `path`); 两个会话对照, 各自只应命中自己那个文件; 在会话空闲一段时间后**再测一次**, 排除 append-then-close
+- [ ] 1b.2 E5 为真即选定 M5 (第 2 节按它实现); 为假则 M4 与"launcher 侧改造"进入评估, **本变更再次重新提案**
+- [ ] 1b.3 (仅在 E5 为真后) E4 — `thread/metadata/update` 的写入权限与持久性, 仅用于评估把关联**固化**下来, 不作为建立关联的手段
 
 ## 2. 关联解析 (形态由第 1 节决定)
 
-- [ ] 2.1 新增关联解析模块: 输入 caller 的 `thread_id`, 输出该会话对应的 `xats_agent_id`; 解析失败一律 fail-closed 并记独立 reason, **决不猜**
+- [ ] 2.1 新增关联解析模块: 输入 caller 的 `thread_id`, 输出该会话对应的**载体 pid / pane** (M5 形态: `thread/read` 取 rollout 路径 → 对候选 pane 的载体 pid 验证其持有该文件); 解析失败一律 fail-closed 并记独立 reason, **决不猜**
 - [ ] 2.2 关联结果必须与 daemon 侧证据交叉校验: 解析出的 uuid 必须确实出现在某个可见 pane 的载体 argv 上 (C4); 不符即 fail-closed, **不得退回计数** (design R3)
-- [ ] 2.3 若 E1 为真, caller 自报的 `xats.agent_id` 只作**加速路径**: 必须与 2.1 的反查一致才采用, 单独出现一律忽略 (design 信任分析: M1 的伪造不自败, 且会让载体证据反过来为伪造者背书)
+- [ ] 2.3 **caller 自报的 `xats.agent_id` 一律不采用** (E1 已否): 除信任分析那条理由外, 实测显示诚实 caller 也可能靠编造的理由答出正确值, 而 daemon 分不出推导与编造
 - [ ] 2.4 关联路径的成功与失败**都**要日志, 不能只在失败时出现 (design R4: 否则 `candidate_count` 变罕见反而掩盖关联失效)
 
 ## 3. 扫描改用关联选行
@@ -24,7 +30,7 @@
 
 ## 4. 写入侧仲裁 (依赖第 2 节, 解决 S9)
 
-- [ ] 4.1 `pre_register_codex_pane` 写入加归属判定: 覆盖一行**未过期**的行时, 写入方必须能被证明是该 pane 的 launcher; 判据形态待第 1 节结论 (关联可用后可正面判定, 而不必退化为"key 当写凭证")
+- [ ] 4.1 (依赖 M5 成立) `pre_register_codex_pane` 写入加归属判定: 覆盖一行**未过期**的行时, 写入方必须能被证明是该 pane 的 launcher; 判据形态待第 1 节结论 (关联可用后可正面判定, 而不必退化为"key 当写凭证")
 - [ ] 4.2 S9 三个方向 (不带 key / 带受害者的 key / 带另一把 key) 全部转绿, 且**反向顺序仍绿** (损害自愈边界不得被破坏)
 - [ ] 4.3 明确保留冷启动语义: tmux server 清空后 pane id 从 `%0` 重发, 旧行对应的载体**确证不存在**时不得挡住新 launcher (否则事故之后成批降级)
 
@@ -34,3 +40,9 @@
 - [ ] 5.2 新增场景: 两个 pane 的 pre-reg 窗口重叠 → **两条都能被各自的 caller 消费** (今天的红基线是"两条都消费不掉")
 - [ ] 5.3 该场景必须复刻**生产启动形态** (非交互 `sh -c` + `exec`, 断言 `pid === pgid`) —— 现有九个夹具复刻的是手工/resume 形态, 是**已知未覆盖**, 而本变更要动的正是载体选择路径
 - [ ] 5.4 spec delta / design / CHANGELOG 更新; 与 `add-codex-prereg-identity-recovery` 的发版顺序写清 (三件一起到位才有正收益)
+
+## 6. 由本轮实验溢出、必须单独立项的两条 (不在本变更范围内)
+
+- [ ] 6.1 模型的工具 shell 读得到 app-server 的完整环境, 其中含 **`CROSS_AGENT_TEAMS_MCP_TOKEN`** (生产上是真 token) —— 该 token 因此是"凡能读到 app-server 环境者皆可得"
+- [ ] 6.2 同一环境里还有 **`CODEX_COMPANION_TRANSCRIPT_PATH`**, 即操作者 Claude Code 会话 transcript 的绝对路径 —— 模型拿到了一条通往操作者完整对话记录的路径
+- [ ] 6.3 若要实现 M2 类方案, 必须挡住"grep rollout 找 uuid": uuid 会因模型自己打印而出现在**别人的** rollout 里, 该做法会"成功"且完全错误
