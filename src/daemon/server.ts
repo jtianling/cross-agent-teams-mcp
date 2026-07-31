@@ -139,7 +139,15 @@ export async function startServer(opts: StartOpts): Promise<StartServerResult> {
   // the daemon log file). Leaving it unset silently discards every session
   // created/closed/takeover/reap line the transport already emits. Embedded
   // buildServer callers (library use, unit tests) stay silent by default.
-  const mcpLog = opts.mcpLog ?? ((line: string) => { console.log(line) })
+  // Stamped, because these lines are read to reconstruct what happened and
+  // when — and correlating them against another system's records is the whole
+  // point of reading them.  Only the codex-recovery module stamped its own,
+  // so an identity decision could be located no more precisely than "somewhere
+  // after the last recovery event", which on 2026-07-31 was not precise enough
+  // to answer whether a refusal predated a change in aoe.  Injected sinks
+  // (library use, tests) keep receiving the raw line.
+  const mcpLog = opts.mcpLog
+    ?? ((line: string) => { console.log(`[${new Date().toISOString()}] ${line}`) })
   const app = await buildServer({ ...opts, mcpLog })
   const host = opts.host ?? '127.0.0.1'
 
