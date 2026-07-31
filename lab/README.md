@@ -78,6 +78,13 @@ daemon, 现象是 codex 侧 `HTTP 401` 而实验室 daemon 侧毫无痕迹.
 pane 启动行上的唯一 marker 在该 pane 进程环境里确实存在, 在工具里读到 `<unset>`,
 排除了"app-server 按会话注入 pane 环境"这个例外.
 
+**已知与生产的差异**: `codex-config.toml.template` **没有设**
+`[shell_environment_policy]`, 所以实验室跑的是 codex 默认继承策略, 而生产
+`~/.codex/config.toml` 是 `inherit = "core"`.  上面那组测量因此只能证明"默认策略下
+模型看得到 app-server 的环境", 不能直接推到生产.  凡是结论依赖"模型能/不能看到某个
+环境变量"的场景, **必须在配置里显式写死该策略**并在报告里注明取值, 否则等于把一个
+未受控变量当成了常量.
+
 由此产生两条对实验室有直接后果的性质:
 
 1. **模型看到的环境是 app-server 的环境**, 不是自己 pane 的.  所以
