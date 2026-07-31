@@ -75,6 +75,23 @@ lab_tmux_kill_server() {
 
 lab_db() { echo "$LAB_HOME_DIR/data.db"; }
 
+# A healthy $LAB_PORT is NOT proof that OUR daemon owns it.  `lab_guard_isolation`
+# only keeps a lab off PRODUCTION; nothing stops a second lab from choosing the
+# same port, and every client here dials $LAB_PORT directly.  When that happens
+# the scenario talks to someone else's daemon — 2026-07-31 it did, and the only
+# thing that made it loud was the two labs' tokens happening to differ.  Compare
+# the LISTENING pid against the pid file our own start script wrote.
+lab_guard_port_owner() {
+  local listening owned
+  listening="$(lsof -nP -iTCP:"$LAB_PORT" -sTCP:LISTEN -t 2>/dev/null | head -1)"
+  [ -n "$listening" ] || lab_die "nothing is listening on $LAB_PORT; start the lab daemon"
+  owned="$(node -e 'try{process.stdout.write(String(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).pid))}catch{}' \
+    "$LAB_HOME_DIR/daemon.pid" 2>/dev/null || true)"
+  [ -n "$owned" ] || lab_die "no lab daemon pid file; something else owns $LAB_PORT"
+  [ "$listening" = "$owned" ] || lab_die \
+    "port $LAB_PORT is held by pid $listening, but our daemon is pid $owned — another lab took the port; pick a different XATS_LAB_PORT"
+}
+
 lab_env_summary() {
   cat <<EOF
 lab root   : $LAB

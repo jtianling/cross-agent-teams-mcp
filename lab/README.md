@@ -139,7 +139,10 @@ DB 与 `daemon.log`, cleanup 会 `lab_tmux_kill_server`.  这套口径在**独�
 三条规矩:
 
 1. **开跑前先查占用**: `lab_tmux list-panes -a` 加 `curl $LAB_PORT/health`.  非空就先问,
-   别直接 `--fresh`.
+   别直接 `--fresh`.  **`/health` 通过不代表那是你的 daemon** —— 场景开跑前调
+   `lab_guard_port_owner` (比对监听 pid 与自己 pid 文件里的 pid); 同一天里两个实验室
+   撞了同一个端口, 客户端全都照 `$LAB_PORT` 盲连过去敲了别人的 daemon, 当时唯一让它
+   响起来的是两边 token 恰好不同 —— 那是运气不是设计.
 2. **要独占就换根**: `XATS_LAB_HOME` / `XATS_LAB_PORT` / `XATS_LAB_APPSERVER_PORT` /
    `XATS_LAB_DEVICE` 四个都可覆盖, 且 `LAB_TMUX_TMPDIR` 是从 `$LAB` 推出来的 —— 换根
    会**连私有 tmux server 一起换**, 于是 `lab_tmux_kill_server` 从物理上够不着别人的

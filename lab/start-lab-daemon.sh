@@ -76,8 +76,21 @@ curl -fsS "http://127.0.0.1:$LAB_PORT/health" >/dev/null 2>&1 \
 # file it wrote and fail loudly on a mismatch rather than let scenarios talk
 # to whatever else is listening.
 actual_port="$(node -e 'process.stdout.write(String(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).port))' "$LAB_HOME_DIR/daemon.pid")"
-[ "$actual_port" = "$LAB_PORT" ] \
-  || lab_die "lab daemon fell back to port $actual_port (wanted $LAB_PORT); free the port and retry"
+if [ "$actual_port" != "$LAB_PORT" ]; then
+  # Aborting the SCRIPT is not enough: the daemon we just started is still
+  # running on the fallback port, while every client keeps dialling $LAB_PORT
+  # — which is now someone else's daemon.  Take our own process down first so
+  # the failure cannot be worked around by simply running a scenario anyway.
+  strays="$(node -e 'try{process.stdout.write(String(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).pid))}catch{}' \
+    "$LAB_HOME_DIR/daemon.pid" 2>/dev/null || true)"
+  [ -n "$strays" ] && kill "$strays" 2>/dev/null
+  rm -f "$LAB_HOME_DIR/daemon.pid"
+  lab_die "lab daemon fell back to port $actual_port (wanted $LAB_PORT); it has been stopped — another lab likely holds the port, pick a different XATS_LAB_PORT"
+fi
+
+# Everything above proves OUR daemon owns the port right now; the guard exists
+# so scenarios can re-assert it later, when another lab may have appeared.
+lab_guard_port_owner
 
 echo "lab daemon up:"
 lab_env_summary
