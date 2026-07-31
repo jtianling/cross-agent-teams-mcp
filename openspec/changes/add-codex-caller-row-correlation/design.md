@@ -430,3 +430,27 @@ thread **还不存在**; daemon 说话, 但此刻它正是"不知道该写谁"�
   (行对应的 pane 不在 daemon 那台 tmux server 上) —— 此前这两条路径**完全静默**;
 - daemon 默认日志汇聚点给每行打 ISO 时间戳 —— 此前只有 `codex-recovery` 模块给自己的行加,
   于是一条身份决策只能定位到"某次恢复事件之后", 精度不足以与另一个系统的记录对齐.
+
+## 已知残留: "key 对不对"的前提有一个已证的破口 (aoe tester, 2026-07-31)
+
+写入凭证规则建立在一个前提上: **只有该 pane 的 launcher 持有那把 key**.  这个前提有一条
+**完全由本轮已测事实拼成**的可达反例:
+
+1. **S8**: `--remote` codex 读到的 `$TMUX_PANE` 是 **app-server 的**, 指向启动它的那个 pane;
+2. **core 那一轮**: 模型读到的**整个环境**都是 app-server 的, 在其中放 `XATS_IDENTITY_KEY`
+   工具侧读得到, 生产口径 `inherit = "core"` 挡不住.
+
+**两条指向同一个 pane** —— app-server 的环境里只有一份 `TMUX_PANE` 和一份
+`XATS_IDENTITY_KEY`, 都来自拉起它的那个 shell.  所以**只要 app-server 曾经从一个带 key 的
+codex pane 里被拉起**, 经它的任何一个 codex 都同时读得到"那个 pane 的 id"和"那个 pane 的 key",
+于是它的写入**满足本规则** (同一把 key), 顶掉该行并接管身份.
+
+**今天是潜伏的, 不是活的**: 生产 app-server 环境里有 `TMUX_PANE=%39` 但**没有**
+`XATS_IDENTITY_KEY`, 所以走错 pane 的 codex 拿不出 key, 会被 `pane_claimed` 挡住.  它变成活的
+只需要一件事 —— **哪天 app-server 恰好从一个带 key 的 pane 里被拉起**.
+
+**这不是规则错, 是规则的前提有破口, 而破口不在这一层.**  本规则仍然消掉了两类 (不带 key /
+带另一把 key), 那两类今天就是可达的; 剩下这一类需要一个特定的启动配置才成立.  **正确的修补
+位置是 app-server 的启动卫生** (别让 key 进入 app-server 的环境), 而那属于已经移交出去的
+安全项, 不在本变更范围.  在它被处理之前, 本规则**不得被描述为"预注册写入已经安全"** ——
+准确说法是"**不再能被一个读不到该 pane key 的调用方顶掉**".

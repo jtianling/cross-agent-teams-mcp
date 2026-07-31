@@ -93,6 +93,19 @@ obtainable from the shared app-server environment, so "carries a key" would
 admit exactly the caller this rule exists to exclude, while the launcher for
 that pane always has the matching one.
 
+This rule's premise — that only that pane's launcher holds that pane's key —
+has a KNOWN reachable exception, and the requirement is stated with it rather
+than around it: a `--remote` model reads the app-server's environment, which
+carries ONE `TMUX_PANE` and ONE `XATS_IDENTITY_KEY`, both from the shell that
+started it.  Should an app-server ever be started from a keyed codex pane,
+every session through it can read that pane's id AND its key together, and its
+write would satisfy this rule.  Production does not satisfy the precondition
+today (its app-server environment carries no identity key), and the remedy
+belongs to app-server launch hygiene rather than to this rule.  Consequently
+this requirement SHALL NOT be described as making the write path safe; what it
+establishes is that a caller which cannot read the pane's key can no longer
+replace its row.
+
 Protection SHALL end when the row's own launch is gone.  Liveness for this
 purpose SHALL NOT require the foreground-carrier proof: that proof answers
 whether it is safe to paste into the pane, and a suspended codex is still the
