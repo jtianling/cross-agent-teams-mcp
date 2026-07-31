@@ -1,0 +1,37 @@
+# Lab codex config — install as $LAB/codex-home/config.toml and run codex with
+# CODEX_HOME=$LAB/codex-home so it can never read or write the production
+# ~/.codex state.
+#
+# Two substitutions before use:
+#   __LAB_PORT__   the lab daemon port (default 9199; the production port must
+#                  never appear here — and note this comment deliberately does
+#                  not spell it out, because grep-based "no production port"
+#                  guards match comments too)
+#   __LAB_DIR__    absolute lab root, used for the trust entry below
+# The bearer token is read from the environment at connect time; export it in
+# the pane that launches codex:
+#   export CROSS_AGENT_TEAMS_MCP_TOKEN="$(cat $LAB/token)"
+#
+# Misconfiguring the url is the single most damaging lab mistake: codex would
+# register into the PRODUCTION daemon and pollute jt's live identities.  The
+# lab fixture asserts the port before launching codex.
+
+# Must be TOP-LEVEL: without it codex does not load streamable-http MCP
+# servers at all (silently — the tools just never appear).
+experimental_use_rmcp_client = true
+
+[mcp_servers.cross-agent-teams-mcp]
+type = "streamable-http"
+url = "http://127.0.0.1:__LAB_PORT__/mcp"
+bearer_token_env_var = "CROSS_AGENT_TEAMS_MCP_TOKEN"
+
+# Do NOT use the legacy [mcp_servers.X.headers] form: codex 0.130+ ignores it
+# silently and the daemon answers 401.
+
+# Unattended runs need this: codex 0.146.0 stops at "Do you trust the contents
+# of this directory?" on first launch in an unknown directory, and
+# --dangerously-bypass-approvals-and-sandbox does NOT skip that prompt
+# (measured, not assumed).  Without the entry every scenario hangs waiting for
+# a keypress.
+[projects."__LAB_DIR__"]
+trust_level = "trusted"
