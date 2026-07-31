@@ -119,7 +119,34 @@ function parseIdentityKeyEnvFlag(
   return { present: true, varName: next }
 }
 
+const PRE_REGISTER_FLAGS = new Set([
+  '--pane', '--agent-id', '--ttl', '--identity-key-env', '--port', '--token',
+])
+
+/**
+ * Every flag is looked up by name, so an unrecognised one would simply never
+ * be read — the command would succeed while silently doing less than the
+ * caller asked.  That is how a launcher passing `--identity-key-env` to a
+ * daemon build that predates the flag got `{"ok":true}` with the key dropped,
+ * and why its own degrade-and-retry branch never fired: the call had not
+ * failed.  An unknown flag is therefore a hard error, so callers learn from
+ * the exit status that this build cannot do what they asked.
+ */
+function rejectUnknownPreRegisterFlags(argv: readonly string[]): void {
+  const unknown = argv
+    .slice(3)
+    .filter(arg => arg.startsWith('--') && !PRE_REGISTER_FLAGS.has(arg))
+  if (unknown.length === 0) return
+  console.error(JSON.stringify({
+    ok: false,
+    error: 'invalid_arguments',
+    detail: `unknown flag(s): ${unknown.join(', ')}`,
+  }))
+  process.exit(2)
+}
+
 async function runPreRegisterCodexPane(): Promise<void> {
+  rejectUnknownPreRegisterFlags(process.argv)
   const pane = parseArg('--pane')
   const agentId = parseArg('--agent-id')
   const ttlRaw = parseArg('--ttl')

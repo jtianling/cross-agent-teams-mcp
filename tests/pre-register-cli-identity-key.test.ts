@@ -192,4 +192,38 @@ describe('pre-register-codex-pane CLI --identity-key-env', () => {
       await app.close()
     }
   }, 30000)
+
+  it('an unknown flag fails the call instead of being silently ignored', async () => {
+    // Measured in production: a launcher passed --identity-key-env to a build
+    // that predated the flag, got {"ok":true}, and its degrade-and-retry
+    // branch never fired because nothing had failed — the key was simply
+    // dropped.  Every flag here is read by name, so silence is the DEFAULT
+    // for anything unrecognised; only an explicit rejection makes a caller
+    // able to tell "this build cannot do that" from "done".
+    // --port 1 is unreachable: reaching the daemon would yield cli_failed.
+    const result = await runCli([
+      '--pane', '%11',
+      '--agent-id', 'U1',
+      '--identity-key-of-the-future', 'X',
+      '--port', '1',
+    ])
+    expect(result.code).toBe(2)
+    expect(result.stderr).toContain('unknown flag(s)')
+    expect(result.stderr).toContain('--identity-key-of-the-future')
+    expect(result.stderr).not.toContain('cli_failed')
+  })
+
+  it('the value-less identity-key-env flag before another flag is not read as unknown', async () => {
+    // `--identity-key-env` may omit its variable name, so the NEXT token is a
+    // flag.  The unknown-flag check must not mistake that neighbour for a
+    // stray, or the optional-argument form breaks.
+    const result = await runCli([
+      '--pane', '%12',
+      '--agent-id', 'U1',
+      '--identity-key-env',
+      '--ttl', '600',
+      '--port', '1',
+    ], { XATS_IDENTITY_KEY: 'K1' })
+    expect(result.stderr).not.toContain('unknown flag(s)')
+  })
 })
