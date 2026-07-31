@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # S3 — seat follow across a rename, then recovery must poke the NEW name.
 #
-#   lab/s3-seat-follow-recovery.sh
+#   lab/s3-seat-follow-recovery.sh            # restart keeps pane id AND pty
+#   lab/s3-seat-follow-recovery.sh --respawn  # restart keeps pane id, new pty
 #
 # Shape (one pane, one physical seat, one codex thread T):
 #   1. pane P seeded from a pre-reg row carrying key K  -> registers as X
@@ -28,31 +29,34 @@
 # b) The restart kills the CARRIER, not the pane, and deliberately does NOT use
 #    `respawn-pane -k`.
 #
-#    respawn-pane looks like the obvious tool and reads as harmless, which is
-#    why this note is here rather than only at the call site: it keeps the pane
-#    id but ALLOCATES A NEW PTY.  Measured on this fixture:
+#    BOTH production restart shapes exist, so both are covered here — the
+#    scenario body is identical, only the restart differs:
 #
-#        before respawn:  %0  /dev/ttys035  pid 82236
-#        after  respawn:  %0  /dev/ttys040  pid 84114
+#    --respawn : aoe's shift+C.  Source-confirmed as `respawn-pane -k`
+#                (agent-of-empires src/tmux/session.rs:420 respawn_pane_target,
+#                argv ["respawn-pane","-k","-c",cwd,"-t",pane,command], called
+#                from src/session/instance.rs::respawn_single_pane_inner).
+#                The pane id survives, the old process is killed, and tmux
+#                ALLOCATES A NEW PTY.  Measured here: %0 /dev/ttys035 pid 82236
+#                -> %0 /dev/ttys040 pid 84114, matching a production sample
+#                where pane %73 moved from ttys035 to ttys039.
 #
-#    A production codex restart happens INSIDE the pane — the shell stays, the
-#    pty stays, only the codex process is replaced.  So a respawn-based fixture
-#    reproduces a restart shape that never actually occurs, and any green it
-#    produces is green for "pane-internal restart PLUS a pty swap", not for the
-#    thing this scenario claims to cover.  (It did pass that way; the recovery
-#    path re-reads the tty live via listPanes(), which absorbs the difference.
-#    Passing for a reason the scenario is not asserting is exactly the failure
-#    mode to avoid.)
+#    default   : jt's shell codex exiting and being started again inside the
+#                same pane.  The shell keeps the pane, so pane id AND pty
+#                survive.
 #
-#    Killing the codex child leaves the shell owning the pane, so the pane id
-#    AND the tty survive.  The tty is then asserted unchanged, so a future edit
-#    that reintroduces a pty swap fails loudly instead of silently weakening
-#    the scenario.
-#
-# Stub carrier shape and the "key only via env, never argv" rule are S1's.
+#    The tty assertion is INVERTED between the two — unchanged by default,
+#    changed under --respawn — so neither run can quietly drift into the other
+#    shape and keep passing.  Under --respawn the recovery path must still find
+#    the pane after its pty moved; it re-reads panes live via listPanes(), and
+#    that is the behaviour being asserted, not an accident being tolerated.
 
 source "$(dirname "${BASH_SOURCE[0]}")/lab-env.sh"
 lab_guard_isolation
+
+RESPAWN=0
+[ "${1:-}" = "--respawn" ] && RESPAWN=1
+SHAPE="$([ "$RESPAWN" = 1 ] && echo 'respawn: new pty' || echo 'in-pane: pty kept')"
 
 SESSION="s3"
 KEY="DDDDDDDD-0000-4000-8000-00000000000D"
@@ -181,25 +185,36 @@ note "PASS(rename): K moved X -> Y, X left keyless, seat inherited (pid $PID_1)"
 kill "$HOLD_X" 2>/dev/null || true; HOLD_X=""
 kill "$HOLD_Y" 2>/dev/null || true; HOLD_Y=""
 sleep 0.5
-# Restart the CARRIER, not the pane.  `respawn-pane -k` would be the obvious
-# tool but it allocates a NEW pty (measured: /dev/ttys035 -> /dev/ttys040) while
-# keeping the pane id — production keeps the pane's pty across a codex restart,
-# so respawn would exercise a restart shape that never actually happens.
-# Killing the child returns the pane to its shell with pane id AND tty intact.
-kill "$PID_1" 2>/dev/null || true
-for _ in $(seq 1 40); do kill -0 "$PID_1" 2>/dev/null || break; sleep 0.1; done
-kill -0 "$PID_1" 2>/dev/null && fail "old carrier $PID_1 did not die; the restart precondition (dead holder pid) does not hold"
-lab_tmux send-keys -t "$PANE" "$(carrier_cmd)" Enter
+if [ "$RESPAWN" = 1 ]; then
+  # aoe shift+C: tmux kills the pane's process and hands the pane a NEW pty.
+  lab_tmux respawn-pane -k -t "$PANE" "$(carrier_cmd)"
+else
+  # jt's shell codex: the child exits, the shell keeps the pane and its pty.
+  kill "$PID_1" 2>/dev/null || true
+  for _ in $(seq 1 40); do kill -0 "$PID_1" 2>/dev/null || break; sleep 0.1; done
+  kill -0 "$PID_1" 2>/dev/null \
+    && fail "old carrier $PID_1 did not die; the restart precondition (dead holder pid) does not hold"
+  lab_tmux send-keys -t "$PANE" "$(carrier_cmd)" Enter
+fi
 sleep 1.5
 
 now_tty="$(lab_tmux list-panes -t "$SESSION" -F '#{pane_id} #{pane_tty}' | awk -v p="$PANE" '$1==p{print $2}')"
 [ -n "$now_tty" ] || fail "pane $PANE vanished across the restart"
-[ "$now_tty" = "$TTY" ] \
-  || fail "pane tty changed across the restart ($TTY -> $now_tty); the fixture is not reproducing a production codex restart"
+# Inverted between the two shapes on purpose: neither run may drift into the
+# other's shape and keep passing.
+if [ "$RESPAWN" = 1 ]; then
+  [ "$now_tty" != "$TTY" ] \
+    || fail "respawn kept the pty ($TTY); this run is no longer reproducing aoe's shift+C shape"
+else
+  [ "$now_tty" = "$TTY" ] \
+    || fail "pane tty changed across the restart ($TTY -> $now_tty); this run is no longer reproducing an in-pane codex restart"
+fi
+# The tty may have moved, so the carrier lookup must follow it.
+TTY_NORM="${now_tty#/dev/}"
 PID_2="$(carrier_pid)"
 [ -n "$PID_2" ] || fail "no codex carrier on tty $TTY_NORM after the restart"
 [ "$PID_2" != "$PID_1" ] || fail "carrier pid unchanged ($PID_1); nothing actually restarted"
-note "restarted: carrier pid $PID_1 -> $PID_2, pane $PANE and tty $TTY kept"
+note "restarted ($SHAPE): carrier pid $PID_1 -> $PID_2, pane $PANE, tty $TTY -> $now_tty"
 
 # --- 4. the launcher pre-registers again; recovery must name Y --------------
 pre_register "recovery"
@@ -231,4 +246,4 @@ case "$pane_text" in
 esac
 note "PASS(recovery): scheduled and delivered for ($TEAM, $NAME_Y); pane wording names $NAME_Y, not $NAME_X"
 
-echo "S3 PASS"
+echo "S3$([ "$RESPAWN" = 1 ] && echo ' --respawn') PASS ($SHAPE)"
