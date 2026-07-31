@@ -7,6 +7,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { openDb } from '../src/storage/db.js'
 import { applySchema } from '../src/storage/schema.js'
 import { __testOverrides as autoBindOverrides } from '../src/mcp/auto-bind-codex-pane.js'
+import { isAlive } from '../src/daemon/pid.js'
 
 const detectTmuxPaneMock = vi.fn()
 const bindRuntimeIdentityMock = vi.fn()
@@ -865,6 +866,125 @@ describe('register_agent same-thread precedence (codex)', () => {
     ])
 
     await r2.close()
+    await app.close()
+  })
+
+  // The restart's own pre-reg row: SAME pane as the seat and SAME key as the
+  // holder, because the launcher re-registered the pane it is restarting
+  // codex in.  Nothing here is foreign — that is what separates it from the
+  // incident shapes above.
+  const RESTART_PRE_REG = {
+    pane_id: '%67',
+    uuid: 'U_RESTART',
+    identity_key: 'K1',
+  }
+  const RESTART_CARRIER_PID = 30931
+  const RESTART_CARRIER_LINE =
+    `${RESTART_CARRIER_PID} ${RESTART_CARRIER_PID} ${RESTART_CARRIER_PID} S+ ` +
+    'codex --remote ws://127.0.0.1:8799 -c xats.agent_id="U_RESTART"'
+  // A pid that cannot be running.  seatCarrierGone consults the REAL isAlive
+  // (there is no injection point on this path), so the test asserts the
+  // precondition instead of assuming it: were this pid ever live, the case
+  // would silently degrade into the still-alive branch and pass for the
+  // wrong reason.
+  const GONE_CARRIER_PID = 0x7ffffffe
+
+  it('RESTART: a seat whose carrier is provably gone reaches the pre-reg scan and rebinds', async () => {
+    // S7's shape as a unit: carrier #1 died, carrier #2 came up in the same
+    // pane, the launcher re-pre-registered with the same key.  Inheriting a
+    // dead pid is impossible; failing closed here would leave the restarted
+    // codex unbound forever with its row unconsumed — the pane would be
+    // woken by recovery and then have nowhere to land.
+    expect(isAlive(GONE_CARRIER_PID)).toBe(false)
+
+    autoBindOverrides.listPanes = async () => [
+      { pane_id: '%67', tty: 'ttys010' },
+    ]
+    autoBindOverrides.ttyProcesses = async () => [RESTART_CARRIER_LINE]
+    bindRuntimeIdentityMock.mockImplementation(
+      async (input: { ui_pid?: number }) =>
+        input.ui_pid === RESTART_CARRIER_PID
+          ? {
+              ok: true,
+              tmux_pane_id: '%67',
+              verification_mode: 'verified_pid_tty_pane',
+              tty: 'ttys010',
+              ui_pid: RESTART_CARRIER_PID,
+            }
+          : { error: 'pid_not_found' }
+    )
+
+    const { app, dbPath, url, logLines } = await startSeededServer({
+      agents: [{
+        agent_id: 'holder-a', name: 'aoe-codex', thread_id: THREAD_T,
+        pane: '%67', pid: GONE_CARRIER_PID, tty: 'ttys010', identity_key: 'K1',
+      }],
+      preRegs: [RESTART_PRE_REG],
+    })
+
+    // The notice tells it to re-register as itself: same name, same team,
+    // same thread.
+    const back = await registerCodex(url, {
+      name: 'aoe-codex', thread_id: THREAD_T,
+    })
+    expect(back.obj.agent_id).toBeDefined()
+
+    expect(logLines).toContainEqual(expect.stringContaining(
+      'outcome=inherit_seat_vacated rows=1 seats=1 agents=holder-a ' +
+      'reason=bind_failed'
+    ))
+    // Scan ONLY: the seat being gone proves nothing about which pane the
+    // caller occupies now, so global detection stays out of reach.
+    expect(detectTmuxPaneMock).not.toHaveBeenCalled()
+
+    expect(readAgents(dbPath)).toEqual([{
+      name: 'aoe-codex', tmux_pane_id: '%67',
+      runtime_ui_pid: RESTART_CARRIER_PID, identity_key: 'K1',
+    }])
+    expect(readPreRegs(dbPath)).toEqual([])
+
+    await back.close()
+    await app.close()
+  })
+
+  it('RESTART: a pid-less seat that fails to bind stays fail-closed — unknown liveness is not death', async () => {
+    // A tty/pane bind legitimately records no pid, so "not running" can never
+    // be proven for it.  The same rule the identity-key arbitration holds:
+    // unknown is not dead, and only positive proof opens the scan.
+    autoBindOverrides.listPanes = async () => [
+      { pane_id: '%67', tty: 'ttys010' },
+    ]
+    autoBindOverrides.ttyProcesses = async () => [RESTART_CARRIER_LINE]
+    // Every bind fails, including the seat's tty/pane attempt — so the ONLY
+    // thing keeping the consumable row untouched is the liveness rule.
+    bindRuntimeIdentityMock.mockResolvedValue({ error: 'pid_not_found' })
+
+    const { app, dbPath, url, logLines } = await startSeededServer({
+      agents: [{
+        agent_id: 'holder-a', name: 'aoe-codex', thread_id: THREAD_T,
+        pane: '%67', pid: null, tty: 'ttys010', identity_key: 'K1',
+      }],
+      preRegs: [RESTART_PRE_REG],
+    })
+
+    const back = await registerCodex(url, {
+      name: 'aoe-codex', thread_id: THREAD_T,
+    })
+    expect(back.obj.agent_id).toBeDefined()
+
+    expect(logLines).toContainEqual(expect.stringContaining(
+      'outcome=inherit_fail_closed'
+    ))
+    expect(detectTmuxPaneMock).not.toHaveBeenCalled()
+    // The row stays pending with its key: unconsumed is recoverable, wrongly
+    // consumed is not.
+    expect(readPreRegs(dbPath)).toEqual([{
+      pane_id: '%67',
+      xats_agent_id: 'U_RESTART',
+      identity_key: 'K1',
+    }])
+
+    await back.close()
     await app.close()
   })
 

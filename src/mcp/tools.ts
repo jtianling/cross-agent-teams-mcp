@@ -71,6 +71,7 @@ import {
   type CodexRecoveryDeps,
 } from './codex-recovery-poke.js'
 import type { SessionOriginInfo } from '../daemon/network-origin.js'
+import { isAlive } from '../daemon/pid.js'
 import type { DaemonContext } from '../daemon/server.js'
 
 export interface AgentIdHolder { current: string | undefined }
@@ -402,6 +403,40 @@ function inferRuntimeAgentKind(
   return undefined
 }
 
+type SameThreadOutcome =
+  | 'none'
+  | 'inherit'
+  | 'inherit_seat_vacated'
+  | 'inherit_fail_closed'
+  | 'ambiguous'
+  | 'cas_drift'
+
+/** What each outcome means for the paths BELOW it, spelled out in the log so
+ *  a reader never has to infer which of them was skipped. */
+const SAME_THREAD_TAIL: Record<SameThreadOutcome, string> = {
+  inherit: '; pre-reg scan skipped',
+  none: '; proceeding to pre-reg scan',
+  inherit_seat_vacated:
+    '; seat carrier gone — pre-reg scan only, no pane detection',
+  inherit_fail_closed:
+    '; fail closed — no pre-reg scan, no pane detection, no runtime bind',
+  ambiguous:
+    '; fail closed — no pre-reg scan, no pane detection, no runtime bind',
+  cas_drift:
+    '; fail closed — no pre-reg scan, no pane detection, no runtime bind',
+}
+
+/**
+ * Positive proof that the seat's carrier is GONE: a recorded positive pid
+ * that is not running.  A pid-less seat (a tty/pane bind records none) is
+ * liveness UNKNOWN, never "dead" — the same rule the identity-key
+ * arbitration and seat-follow already hold to.
+ */
+function seatCarrierGone(seat: InheritSeat): boolean {
+  const pid = seat.runtime_ui_pid
+  return pid !== null && pid > 0 && !isAlive(pid)
+}
+
 export function registerBusinessTools(
   server: McpServer,
   db: Database.Database,
@@ -552,23 +587,13 @@ export function registerBusinessTools(
    */
   function logSameThreadDecision(args: {
     callerAgentId: string
-    outcome:
-      | 'none'
-      | 'inherit'
-      | 'inherit_fail_closed'
-      | 'ambiguous'
-      | 'cas_drift'
+    outcome: SameThreadOutcome
     rowCount: number
     seatCount: number
     agentIds: string[]
     reason?: string
   }): void {
-    const tail =
-      args.outcome === 'inherit'
-        ? '; pre-reg scan skipped'
-        : args.outcome === 'none'
-          ? '; proceeding to pre-reg scan'
-          : '; fail closed — no pre-reg scan, no pane detection, no runtime bind'
+    const tail = SAME_THREAD_TAIL[args.outcome]
     log?.(
       `same-thread decision (debug): caller=${args.callerAgentId} ` +
       `outcome=${args.outcome} rows=${args.rowCount} ` +
@@ -589,7 +614,10 @@ export function registerBusinessTools(
     callerAgentId: string,
     seat: InheritSeat,
     expectedRegisterGeneration: number
-  ): Promise<{ ok: true } | { ok: false; reason: string }> {
+  ): Promise<
+    | { ok: true }
+    | { ok: false; reason: string; superseded: boolean }
+  > {
     const pid = seat.runtime_ui_pid
     const bound = pid !== null && pid > 0
       ? await bindRuntimeIdentitySvc.bind({
@@ -614,6 +642,11 @@ export function registerBusinessTools(
     return {
       ok: false,
       reason: bound === undefined ? 'no_bindable_runtime_info' : 'bind_failed',
+      // A registration the row has already moved past must act on NOTHING.
+      // Its bind failed because it was superseded, not because the seat is
+      // vacant, so no amount of liveness evidence may reopen a path for it.
+      superseded: bound !== undefined && 'error' in bound
+        && bound.error === 'stale_registration_bind',
     }
   }
 
@@ -810,10 +843,14 @@ export function registerBusinessTools(
     }
 
     if (inferredAgent === 'codex') {
-      // Same-thread evidence is TERMINAL: inherit the unique seat or fail
-      // closed.  Neither outcome may reach the pre-reg scan or the global
-      // pane detection below.  Only a registration with NO evidence (a
-      // genuinely new thread, e.g. post-restart recovery) keeps them.
+      // Same-thread evidence DIRECTS the resolution instead of ending it: a
+      // unique seat is inherited exactly, and only a registration with NO
+      // evidence reaches the global pane detection.  The one seat outcome
+      // that continues is a seat whose carrier is PROVABLY gone — inheriting
+      // a dead pid is impossible and failing closed there would strand the
+      // restart the pre-reg scan exists to recover, so that case reaches the
+      // scan (a launcher-asserted pane, with its own carrier and key proofs)
+      // and nothing else.
       // priorCodexThreadId is the TRANSACTION-returned pre-upsert thread
       // (already CAS-verified against the pre-probe capture by the caller).
       const evidence = resolveSameThreadSeat(callerAgentId, priorCodexThreadId)
@@ -823,15 +860,27 @@ export function registerBusinessTools(
           evidence.seat,
           expectedRegisterGeneration
         )
+        const vacated = !inherit.ok
+          && !inherit.superseded
+          && seatCarrierGone(evidence.seat)
         logSameThreadDecision({
           callerAgentId,
-          outcome: inherit.ok ? 'inherit' : 'inherit_fail_closed',
+          outcome: inherit.ok
+            ? 'inherit'
+            : vacated
+              ? 'inherit_seat_vacated'
+              : 'inherit_fail_closed',
           rowCount: evidence.rowCount,
           seatCount: evidence.seatCount,
           agentIds: [evidence.seat.agent_id],
           ...(inherit.ok ? {} : { reason: inherit.reason }),
         })
-        return inherit.ok
+        if (inherit.ok) return true
+        if (!vacated) return false
+        // Scan ONLY.  The seat being gone says nothing about which pane the
+        // caller occupies now, so the global detection below stays out of
+        // reach — unlike the no-evidence path, which may fall through to it.
+        return tryCodexPreRegScan(callerAgentId, expectedRegisterGeneration)
       }
       if (evidence.kind === 'ambiguous') {
         logSameThreadDecision({
