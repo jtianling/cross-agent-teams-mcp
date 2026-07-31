@@ -54,6 +54,13 @@ export interface AutoBindCodexPaneInput {
   /** Generation minted by the registration this scan serves; the pane bind's
    *  final write is conditional on it (stale registration binds fail closed). */
   expectedRegisterGeneration: number
+  /** The pane a recovery nonce named.  When set, ONLY that pane's row may be
+   *  considered: the daemon issued the token to that pane itself, so this is a
+   *  correlation rather than the "exactly one machine-wide candidate" inference
+   *  it replaces.  Targeting only chooses WHICH row is examined — every
+   *  existing proof (foreground carrier, identity-key ownership, snapshot
+   *  equality, in-transaction re-arbitration) still has to pass. */
+  targetPaneId?: string
   identityKeyAttach?: IdentityKeyAttachDeps
   onConsumed?: (pane_id: string) => void
   log?: (line: string) => void
@@ -333,7 +340,20 @@ export async function autoBindCodexPane(
     const now = deps.now ?? __testOverrides.now ?? (() => new Date())
     const nowIso = now().toISOString()
     input.repo.deleteExpired(nowIso)
-    const pending = input.repo.listUnexpired(nowIso)
+    const all = input.repo.listUnexpired(nowIso)
+    // Narrowing happens BEFORE evaluation, so an unrelated pane's row can
+    // neither be probed nor counted.  That is the whole point: the failure this
+    // replaces was another session's pending row pushing the count off one.
+    const pending = input.targetPaneId === undefined
+      ? all
+      : all.filter(row => row.pane_id === input.targetPaneId)
+    if (input.targetPaneId !== undefined) {
+      input.log?.(
+        `auto-bind targeted (debug): pane=${input.targetPaneId} ` +
+        `caller=${input.callerAgentId} rows=${pending.length} ` +
+        `pending_total=${all.length}`
+      )
+    }
     if (pending.length === 0) return false
 
     const candidates = await collectCandidates(input, deps, pending)

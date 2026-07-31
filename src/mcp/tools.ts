@@ -72,6 +72,7 @@ import {
 } from './codex-recovery-poke.js'
 import type { SessionOriginInfo } from '../daemon/network-origin.js'
 import { isAlive } from '../daemon/pid.js'
+import { consumeCodexRecoveryNonce } from './codex-recovery-nonce.js'
 import type { DaemonContext } from '../daemon/server.js'
 
 export interface AgentIdHolder { current: string | undefined }
@@ -650,15 +651,36 @@ export function registerBusinessTools(
     }
   }
 
+  /**
+   * A recovery nonce, when the caller echoes one back, names the pane the
+   * daemon itself poked — so it SELECTS the row instead of leaving the scan to
+   * infer one from "exactly one machine-wide candidate".  Spending it here
+   * (rather than after a successful bind) keeps it single-use even when the
+   * bind then fails: a token that survived a failure could re-target a later
+   * registration at a pane that has moved on.  An unknown token resolves to
+   * nothing and the scan proceeds exactly as before.
+   */
   async function tryCodexPreRegScan(
     callerAgentId: string,
-    expectedRegisterGeneration: number
+    expectedRegisterGeneration: number,
+    recoveryNonce?: string
   ): Promise<boolean> {
+    const targetPaneId = recoveryNonce === undefined
+      ? undefined
+      : consumeCodexRecoveryNonce(recoveryNonce)
+    if (recoveryNonce !== undefined) {
+      log?.(
+        `codex-recovery nonce (debug): caller=${callerAgentId} ` +
+        `outcome=${targetPaneId === undefined ? 'unknown' : 'resolved'} ` +
+        `pane=${targetPaneId ?? '-'}`
+      )
+    }
     const auto = await autoBindCodexPane({
       callerAgentId,
       repo: codexPanePreRegRepo,
       bindRuntimeIdentitySvc,
       expectedRegisterGeneration,
+      targetPaneId,
       // One synchronous transaction for "re-arbitrate the key → write the
       // runtime binding (with its incumbent-pane eviction) → consume the row
       // → attach the key"; better-sqlite3 nests via savepoints, so the
@@ -824,6 +846,7 @@ export function registerBusinessTools(
       model?: string
       delivery?: { kind?: string }
       ui_pid?: number
+      recovery_nonce?: string
     },
     callerAgentId: string,
     priorCodexThreadId: string | undefined,
@@ -880,7 +903,9 @@ export function registerBusinessTools(
         // Scan ONLY.  The seat being gone says nothing about which pane the
         // caller occupies now, so the global detection below stays out of
         // reach — unlike the no-evidence path, which may fall through to it.
-        return tryCodexPreRegScan(callerAgentId, expectedRegisterGeneration)
+        return tryCodexPreRegScan(
+          callerAgentId, expectedRegisterGeneration, args.recovery_nonce
+        )
       }
       if (evidence.kind === 'ambiguous') {
         logSameThreadDecision({
@@ -899,7 +924,9 @@ export function registerBusinessTools(
         seatCount: evidence.seatCount,
         agentIds: [],
       })
-      if (await tryCodexPreRegScan(callerAgentId, expectedRegisterGeneration)) {
+      if (await tryCodexPreRegScan(
+        callerAgentId, expectedRegisterGeneration, args.recovery_nonce
+      )) {
         return true
       }
     }
@@ -970,6 +997,9 @@ export function registerBusinessTools(
     ),
     claude_ui_pid: z.number().int().positive().optional().describe(
       "Internal field for the cross-agent-teams-mcp channel proxy.  Stores the proxy's parent Claude Code UI pid (`process.ppid`) so that Claude Code hosts registering in the same lineage can auto-bind their claude-channel delivery.  Only valid when role='__channel_proxy__'; rejected otherwise."
+    ),
+    recovery_nonce: z.string().min(1).optional().describe(
+      'One-time token quoted verbatim in a cross-agent-teams recovery notice. Pass it back EXACTLY as given when you re-register in response to that notice: the daemon sent it to one specific tmux pane, so it is what tells the daemon which pane you are. Omitting it is safe and only means the daemon falls back to guessing; inventing one has no effect.'
     ),
     delivery: deliverySchema.optional(),
   }).strict(

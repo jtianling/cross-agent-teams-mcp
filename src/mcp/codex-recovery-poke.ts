@@ -24,6 +24,10 @@ import {
   type PaneHostVerdict,
 } from './pane-host-verify.js'
 import { isAlive } from '../daemon/pid.js'
+import {
+  clearCodexRecoveryNoncesForPane,
+  mintCodexRecoveryNonce,
+} from './codex-recovery-nonce.js'
 import { describeRedactedError } from './log-redact.js'
 
 export const RECOVERY_PROBE_INTERVAL_MS = 5_000
@@ -93,7 +97,7 @@ function rlog(deps: CodexRecoveryDeps, line: string): void {
  * authenticated HTTP channel.
  */
 export function buildCodexRecoveryPokeContent(
-  args: { team: string; name: string }
+  args: { team: string; name: string; nonce?: string }
 ): string {
   return [
     '[cross-agent-teams recovery notice]',
@@ -102,7 +106,16 @@ export function buildCodexRecoveryPokeContent(
     'Please re-register now: call the cross-agent-teams MCP tool register_agent',
     `with {agent_type: "codex", name: "${args.name}", team: "${args.team}",`,
     'thread_id: <value of $CODEX_THREAD_ID>,',
-    'project_dir: <your current working directory>}.',
+    'project_dir: <your current working directory>',
+    // The daemon sent this notice to ONE pane, so quoting the token back is
+    // what tells it which pane the caller is — the caller cannot work that out
+    // for itself (its tools run in a shared app-server, where $TMUX_PANE is
+    // some other pane's id).  Kept last and phrased as a plain copy so a model
+    // that skips reasoning about it still passes it through.
+    ...(args.nonce === undefined
+      ? []
+      : [`, recovery_nonce: "${args.nonce}"} (copy that value exactly).`]),
+    ...(args.nonce === undefined ? ['}.'] : []),
   ].join(' ')
 }
 
@@ -139,6 +152,9 @@ export function cancelCodexRecoverySchedule(
   // retiring the pane's generation token makes it abort at its next
   // cancellation checkpoint (every await boundary re-checks it).
   currentGenerationMessageId.delete(paneId)
+  // The token belongs to the schedule: once the row is consumed, replaced or
+  // expired, a surviving nonce would still point at this pane.
+  clearCodexRecoveryNoncesForPane(paneId)
   // Active cancellations (consumption/overwrite/shutdown) log their terminal
   // reason here; the cancelled closure itself stays silent (generationActive
   // is already false), so exactly one line records why the generation ended.
@@ -617,9 +633,13 @@ async function sendAfterGuard(
   if (!verdict.ok) return { sent: false, reason: verdict.reason }
 
   const tmuxPoke = deps.tmuxPoke ?? tmuxPokeImpl
+  // Minted per send, not per schedule: a retry of the same generation reissues
+  // and invalidates the previous token, so only the notice actually sitting in
+  // the pane can be quoted back.
+  const nonce = mintCodexRecoveryNonce(row.pane_id)
   const result = await tmuxPoke({
     pane_id: row.pane_id,
-    content: buildCodexRecoveryPokeContent(holder),
+    content: buildCodexRecoveryPokeContent({ ...holder, nonce }),
     skipGuard: true,
     confirmOwnership,
   })
