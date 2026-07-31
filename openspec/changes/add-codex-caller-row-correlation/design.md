@@ -148,6 +148,48 @@ daemon 手上已经有两样各自可靠、但从未被连起来的东西:
 - 不依赖 rollout 的**内容**格式 (只用路径), 因此躲开了 M2 的 grep 陷阱和格式漂移;
 - 未验证: **codex 是否长期持有该 fd** (可能是 append-then-close).  这就是 E5.
 
+### M5 实测: **否**, 而且是最干净的那种否 (2026-07-31)
+
+rollout 的 fd **存在、`lsof` 抓得到、按 thread 对得上** —— 但**两个都在 app-server 手里**
+(`fd=37u` / `fd=40u`, 两个 thread 各一), 而 pane 里的载体 (shim 与 vendor 原生子进程**都查过**)
+**一个都没有**.  `--remote` 形态下会话本来就活在 app-server 里, pane 里那个 codex 只是前端.
+
+**缺的那一跳不是"没人持有", 而是"持有者恰好是唯一分不清 pane 的那个进程".**
+
+append-then-close 已用**相反方向**排除: 在 turn **活跃期间**每 2 秒采样、共 12 次, pane 载体
+恒为 0 而 app-server 恒为 2 —— 长持句柄, 不是写时短开.
+
+顺带铺开"载体到底持有什么": vendor 子进程持有 19–21 个 `$CODEX_HOME` 下的文件, 但**全是共享的**
+(`state/memories/logs/goals` 及其 wal/shm), 两个会话**逐项相同**; 唯一每进程唯一的是
+`tmp/arg0/…/.lock`, 随机后缀, 与 thread 无关.
+
+**唯一真正每会话、且两端都可见的句柄是 TCP 连接**: pane 载体的本地端口 ↔ app-server 侧看到的
+对端端口, daemon 用 `lsof -i` 从 pane 那一端就能读出来.  **但它到不了 thread** —— 缺的是
+app-server 内部"哪条连接承载哪个 thread"的映射, 而 `thread/read` 的字段里没有任何
+连接/端口/pid (E3 已列全).  **记为观察, 不作为机制**: 它离可用差的正是 E3 已证明不存在的那个字段.
+
+### M8 — 让已经知道答案的那一方直接告诉 daemon (第三轮首选)
+
+三轮实验的共同形状是: **我们一直在设法推导一个东西, 而它在 daemon 之外是已知的.**
+
+- launcher 在 `exec` 时知道 pane 与 uuid, **但那一刻 thread 还不存在**;
+- codex 之后创建 thread, **但它不记 uuid**;
+- 而 **aoe 已经在把 codex 会话按 thread 采纳进 slot** (实测见 `slot 0/1 adopt` 时间戳), 也就是说
+  **aoe 手上有 pane↔thread 的映射**, 而且它是靠自己的证据 (rollout 监视) 建立的, 不靠任何自述.
+
+所以最短的路可能是: **pane↔thread 由 aoe 在得知之后补报给 daemon** (扩展现有 pre-reg 通道,
+或新增一次"绑定 pane→thread"的调用).  caller 侧仍然只贡献 `thread_id` (投递路径已经信任它),
+而 pane↔thread 这一跳由一个**有独立证据**的本地组件提供, 不经过模型.
+
+- 待确认 (已去问 aoe): 他们**如何**建立 pane↔thread、**多快**能知道、以及愿不愿意补报;
+- 代价: 跨仓库契约, 且在 aoe 补报之前的窗口内仍然只能回落到候选唯一性;
+- 优点: 不依赖 codex 的任何未文档化内部结构, 不引入新的可伪造声明.
+
+### M6 — nonce 往返 (备选, 侵入性大)
+
+daemon 经 app-server 往该 thread 写一个 nonce, 再 `capture-pane` 看它出现在哪个 pane 里.
+daemon 侧可验证、不可伪造, 但**会在用户 pane 里留下可见文字**.  仅在 M8 与 M4 都不可行时考虑.
+
 ### M4 — app-server 的每会话元数据通道 (未验证, 且有先后顺序问题)
 
 方法列表里有 `thread/metadata/update` / `thread/settings/update` / `thread/name/set`, 且
