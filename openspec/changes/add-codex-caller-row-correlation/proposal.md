@@ -1,6 +1,27 @@
 # add-codex-caller-row-correlation
 
-## Status: 方向已定, 实现暂缓 (jt, 2026-07-31)
+## Status: 触发条件已命中, 暂缓结束 (2026-07-31T21:00Z)
+
+下面"什么时候必须捡起来"的**第 2 条已经在生产上发生**, 所以本 change 不再处于可暂缓状态,
+现等 jt 放行实现.
+
+```
+[2026-07-31T21:00:10.427Z] auto-bind skip (debug): reason=candidate_count
+    caller=bc98ce97-… candidates=2 pending=2 panes=%82,%83
+[2026-07-31T21:00:11.826Z] auto-bind skip (debug): reason=candidate_count
+    caller=3ea2618c-… candidates=2 pending=2 panes=%82,%83
+```
+
+`aoe-codex` 与 `aoe-codex-2` 双双注册、双双被挡、一个都没绑上 (0.8.0 daemon).  该日志行**昨天
+之前不存在**, 这条路径此前完全静默.
+
+**严重程度高于本文档原先的估计**: 它卡住的不是"绑定"这一件事, 而是**整条身份恢复链的入口** ——
+`agents.identity_key` 的**唯一**入口是"预注册行被消费" (`register_agent` 显式传 key 这条 codex
+拿不到 key; seat-follow 是绑定落定之后的钩子), 而消费正是被挡的那一步.  于是
+`evaluateCodexRecoveryOnPreRegister` 的 `findByIdentityKey` 永远返回空, **恢复 poke 从不调度**,
+重启后的 codex 没有任何东西提示它注册.  jt 报的"完全不自动重新注册"由此得到完整解释.
+
+## Status (历史): 方向已定, 实现暂缓 (jt, 2026-07-31)
 
 四轮判定实验已跑完 (E1/E2/E3/E5, 全否), 方向收敛到 **M9 — 恢复 poke 携带一次性 nonce, 注册时
 回带** (见 design).  **jt 决定暂不实现**, 本 change 作为文档保留.
