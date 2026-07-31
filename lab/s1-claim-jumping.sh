@@ -64,6 +64,8 @@ trap cleanup EXIT
 
 curl -fsS "http://127.0.0.1:$LAB_PORT/health" >/dev/null 2>&1 \
   || fail "lab daemon is not up; run lab/start-lab-daemon.sh --fresh first"
+# A healthy port only proves SOME daemon answers; this proves it is ours.
+lab_guard_port_owner
 
 # --- seed identities BEFORE any pane exists ---------------------------------
 # Order matters: a registration with no pending pre-reg row falls through to
