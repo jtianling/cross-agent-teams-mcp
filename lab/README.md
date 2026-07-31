@@ -13,7 +13,7 @@ bootstrap 复刻形态以那份为准), 本目录只负责 **daemon 这一侧**:
 | 端口 | 9100 | 9199 |
 | token | `xats` | `$LAB/token` (首次自动生成) |
 | device | `jt` | `jtlab` |
-| tmux socket | 共享 server | `$LAB/tmux.sock` (私有) |
+| tmux socket | 共享 server | `$LAB/tmuxtmp/tmux-$(id -u)/default` (私有) |
 | codex 配置 | `~/.codex/` | `$LAB/codex-home/` (`CODEX_HOME`) |
 
 `$LAB` 默认 `~/.xats-lab`, 可用 `XATS_LAB_HOME` 覆盖.  `lab-env.sh` 里的
@@ -66,10 +66,23 @@ key 只经环境变量, **决不落 argv** (`ps` 全机可见) — 实验室脚�
 ## tmux 红线
 
 `lab-env.sh` 提供 `lab_tmux` / `lab_tmux_kill_server`, 内部固定
-`env -u TMUX -u TMUX_PANE tmux -S $LAB/tmux.sock`.  **只用这两个包装**,
-不要裸调 tmux: 只设 `TMUX_TMPDIR` 不算隔离 (进程里 `$TMUX` 有值时客户端直连
-当前 server 并无视它), 而裸 `tmux kill-server` 会端掉 jt 全部实时 session —
-这条是被两次真实事故写出来的.
+
+```sh
+env -u TMUX -u TMUX_PANE TMUX_TMPDIR="$LAB/tmuxtmp" \
+  tmux -S "$LAB/tmuxtmp/tmux-$(id -u)/default" ...
+```
+
+**只用这两个包装**, 不要裸调 tmux: 只设 `TMUX_TMPDIR` 不算隔离 (进程里 `$TMUX`
+有值时客户端直连当前 server 并无视它), 而裸 `tmux kill-server` 会端掉 jt 全部
+实时 session — 这条是被两次真实事故写出来的.
+
+**socket 路径必须落在 `TMUX_TMPDIR` 解析得到的位置上, 不能自己另取一个**
+(例如 `$LAB/tmux.sock`).  daemon 内部是**裸调 `tmux`** 的, 没有地方传 `-S`,
+它只能靠 `TMUX_TMPDIR` 找 server; pane 若建在另一个 socket 上, daemon **看不见
+它们**, 于是所有"绑没绑对 pane"的断言都会因为候选集为空而通过 —— 而那个 socket
+文件确实存在, 所以写错**不会报错**, 只会安静地把场景建到另一台 server 上.
+`-S` 传的是解析出来的同一个绝对路径, 目的只是让"只按绝对 socket 路径杀"这条
+红线仍然成立.
 
 ## 断言口径 (daemon 侧)
 
