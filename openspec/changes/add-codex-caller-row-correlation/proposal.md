@@ -1,5 +1,25 @@
 # add-codex-caller-row-correlation
 
+## Status: 方向已定, 实现暂缓 (jt, 2026-07-31)
+
+四轮判定实验已跑完 (E1/E2/E3/E5, 全否), 方向收敛到 **M9 — 恢复 poke 携带一次性 nonce, 注册时
+回带** (见 design).  **jt 决定暂不实现**, 本 change 作为文档保留.
+
+**为什么可以暂缓**: 今天生产上的失败是 `identity_key_contradiction` (4 次) 与 `bind_failed`
+(3 次), 后者已修; **`candidate_count` 这条今天在生产上零命中** —— 因为一次 Shift+C 目前只产出
+一行预注册 (aoe 的 `extra-agent-pane-parity` 尚未与 0.7.8 一起生效).
+
+**什么时候必须捡起来 —— 两个触发条件, 任一命中即不可再缓**:
+
+1. **0.7.8 与 aoe 的 `extra-agent-pane-parity` 即将一起生效之前.**  两者到位而本条不到位时净
+   效果为负: 每次 Shift+C 稳定产出两行且都消费不掉, 比现状更差 (现状至少一半启动只产一行).
+   **这是本 change 与发版之间的硬依赖, 不是建议.**
+2. **生产日志出现 `reason=candidate_count`.**  该日志今天刚补上 (此前这条路径完全静默), 一旦
+   出现即说明并发窗口已经在真实发生.
+
+**暂缓期间不做的事**: 不实现 M9, 不改扫描的选行逻辑, 不动预注册写入路径 (S9 那条因此仍然
+是红的 —— 红基线 `lab/s9-prereg-overwrite.sh` 三个方向保留在库里, 不要为了让它绿而放松断言).
+
 ## Why
 
 codex 注册时, daemon 要在若干条待消费的 pre-reg 行里挑出**属于这个调用者**的那一条.  它现在
