@@ -6,6 +6,7 @@
 #   lab/s9-prereg-overwrite.sh --reverse  # healing order: stranger first, launcher second
 #   lab/s9-prereg-overwrite.sh --keep-key # the state a COALESCE fix would leave
 #   lab/s9-prereg-overwrite.sh --drop-key # same sequence under TODAY's behaviour
+#   lab/s9-prereg-overwrite.sh --other-key # stranger writes carrying a key of its own
 #
 # Why this scenario exists.  S8 measured that a `--remote` codex reads its
 # $TMUX_PANE from the app-server's environment, so the value it reads is a
@@ -37,7 +38,7 @@ lab_guard_isolation
 
 MODE="${1:-attack}"
 case "$MODE" in
-  attack|--reverse|--keep-key|--drop-key) ;;
+  attack|--reverse|--keep-key|--drop-key|--other-key) ;;
   *) echo "S9: unknown mode $MODE" >&2; exit 2 ;;
 esac
 REVERSE=0
@@ -45,6 +46,7 @@ REVERSE=0
 
 SESSION="s9"
 KEY_B="99999999-0000-4000-8000-0000000000B9"
+KEY_X="99999999-0000-4000-8000-0000000000X9"
 UUID_B="9B9B9B9B-9999-4999-8999-99999999999B"
 UUID_A="9A9A9A9A-9999-4999-8999-99999999999A"
 TEAM="lab"
@@ -113,11 +115,29 @@ note "victim pane $PANE ($TTY) hosting the victim's carrier"
 # different agent), and it is the one condition under which the pre-reg scan
 # will match the stranger's uuid and consume the row.  Whatever key is on that
 # row at that moment is handed to whoever matched it.
-if [ "$MODE" = "--keep-key" ] || [ "$MODE" = "--drop-key" ]; then
+#
+# --other-key is the third column: the stranger writes with a key of its OWN,
+# not the victim's.  It measures the ceiling of any "a key is the write
+# credential for this pane's row" rule — requiring *a* key is not the same as
+# requiring *the* key, and a second launcher always has one of its own.  Note
+# that this case needs no attacker at all: two launchers that disagree about
+# which pane is whose (recycled pane ids, or the app-server's one fixed value)
+# produce exactly this write.
+if [ "$MODE" = "--keep-key" ] || [ "$MODE" = "--drop-key" ] || [ "$MODE" = "--other-key" ]; then
   launcher_prereg
   [ "$(row_key)" = "$KEY_B" ] || fail "precondition: victim's key not on the row (key: $(row_key))"
 
-  if [ "$MODE" = "--keep-key" ]; then
+  if [ "$MODE" = "--other-key" ]; then
+    node "$LAB_REPO/lab/lab-mcp.mjs" pre_register_codex_pane \
+      "{\"pane_id\":\"$PANE\",\"xats_agent_id\":\"$UUID_A\",\"identity_key\":\"$KEY_X\",\"ttl_seconds\":600}" \
+      > "$OUT" 2>&1
+    note "stranger's call (carrying its OWN key): $(cat "$OUT")"
+    # A rule that only demands "the caller presented a key" would let this
+    # through; one that demands "the caller presented THIS row's key" would not.
+    [ "$(row_key)" = "$KEY_B" ] \
+      || fail "a write carrying a DIFFERENT key overwrote the victim's row (key is now $(row_key)) — \
+holding some key is not evidence of holding this pane's key, so 'must carry a key' cannot be the whole rule"
+  elif [ "$MODE" = "--keep-key" ]; then
     node "$LAB_REPO/lab/lab-mcp.mjs" pre_register_codex_pane \
       "{\"pane_id\":\"$PANE\",\"xats_agent_id\":\"$UUID_A\",\"identity_key\":\"$KEY_B\",\"ttl_seconds\":600}" \
       > "$OUT" 2>&1
