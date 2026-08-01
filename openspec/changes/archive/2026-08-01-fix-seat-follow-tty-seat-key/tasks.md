@@ -42,6 +42,12 @@
 - [x] 3c.2 Two regression cases + both mutation directions: dropping the clear turns the rebind case red; making the clear unconditional turns the no-pane case red (it would silently disable legitimate same-pane-restart migration)
 - [x] 3c.3 Root cause of the miss, recorded: the grep that found `setRuntimeBinding` also listed this line, and it was not followed up.  "Find the writers of X" is only done when every hit has been ruled in or out, not when one of them explains the bug at hand
 
+## 3d. Found by re-review (WARNING — fixed, not recorded)
+
+- [x] 3d.1 The register-time regression case gave the holder `pid: 1001` and `realDeps()` injects no `isProcessAlive`, so its mutation-killing power depended on whether that pid happened to be absent from the host's process table.  On a host where it exists the follow would take the ALIVE branch, refuse on `thread_missing`, and the case would pass **with the bug present**.  Verified: pid 1001 is absent here, so the earlier kill was luck, not coverage
+- [x] 3d.2 Made deterministic three ways: holder pid is `DEAD_PID` so the no-verification branch is genuinely reached; `prev_tmux_pane_id` is asserted directly (the mechanism, independent of any liveness classification); and `findKeyHoldersBySeat` is asserted to return no candidate at all.  The direct assertion added to the sibling stale-history case too
+- [x] 3d.3 All three mutations re-verified after hardening: upsert-no-clear → the register case only; setRuntimeBinding-no-clear → the moved-on case only; takeover-not-recorded → five cases
+
 ## 4. Regression
 
 - [x] 4.1 Existing seat-follow suites (`codex-seat-follow`, `codex-seat-follow-recovery`, `register-agent-seat-follow`) pass unchanged, or every changed expectation is justified in this file

@@ -76,6 +76,20 @@ function keyOf(repo: AgentsRepo, agent_id: string): string | null {
   return repo.findById(agent_id)?.identity_key ?? null
 }
 
+// Read straight from the column: the takeover memory is deliberately not on
+// the public row shape (it is not a binding), and asserting it directly is
+// what makes these cases independent of how liveness happens to classify a
+// pid on the machine running them.
+function prevPaneOf(
+  db: ReturnType<typeof openDb>,
+  agent_id: string
+): string | null {
+  const row = db
+    .prepare(`SELECT prev_tmux_pane_id AS p FROM agents WHERE agent_id=?`)
+    .get(agent_id) as { p: string | null } | undefined
+  return row?.p ?? null
+}
+
 describe('seat-follow seat identity is the pane, never the tty', () => {
   const cleanups: string[] = []
   afterEach(() => {
@@ -191,6 +205,7 @@ describe('seat-follow seat identity is the pane, never the tty', () => {
     bindSeat(repo, evictor.agent_id, { pane: '%1', pid: 1002, tty: 'ttys026' })
     // X lost %1, then moved to %2 and died there.
     bindSeat(repo, holder.agent_id, { pane: '%2', pid: DEAD_PID, tty: 'ttys027' })
+    expect(prevPaneOf(db, holder.agent_id)).toBeNull()
 
     const caller = repo.register({ agent_type: 'codex', name: 'Y', team: 'aoe' })
     bindSeat(repo, caller.agent_id, { pane: '%1', pid: null, tty: 'ttys055' })
@@ -213,7 +228,13 @@ describe('seat-follow seat identity is the pane, never the tty', () => {
     const holder = repo.register({
       agent_type: 'codex', name: 'X', team: 'aoe', identity_key: 'K1',
     })
-    bindSeat(repo, holder.agent_id, { pane: '%1', pid: 1001, tty: 'ttys026' })
+    // DEAD_PID, not an arbitrary live-looking one: the holder has to be
+    // classified DEAD so that dropping the fix actually reaches the
+    // no-verification migrate branch.  With a pid that merely happens to be
+    // absent on this host, the mutation would be killed by luck — on a host
+    // where that pid exists the follow would take the ALIVE branch, refuse on
+    // thread_missing, and the assertions below would pass with the bug present.
+    bindSeat(repo, holder.agent_id, { pane: '%1', pid: DEAD_PID, tty: 'ttys026' })
     const evictor = repo.register({ agent_type: 'codex', name: 'E', team: 'aoe' })
     bindSeat(repo, evictor.agent_id, { pane: '%1', pid: 1002, tty: 'ttys026' })
 
@@ -222,9 +243,12 @@ describe('seat-follow seat identity is the pane, never the tty', () => {
       agent_type: 'codex', name: 'X', team: 'aoe', tmux_pane_id: '%2',
     })
     expect(repo.findById(holder.agent_id)?.tmux_pane_id).toBe('%2')
+    // The mechanism itself, independent of any liveness classification.
+    expect(prevPaneOf(db, holder.agent_id)).toBeNull()
 
     const caller = repo.register({ agent_type: 'codex', name: 'Y', team: 'aoe' })
     bindSeat(repo, caller.agent_id, { pane: '%1', pid: null, tty: 'ttys055' })
+    expect(repo.findKeyHoldersBySeat(caller.agent_id, 'local')).toEqual([])
 
     followSeatIdentityKey({
       callerAgentId: caller.agent_id,
@@ -249,6 +273,7 @@ describe('seat-follow seat identity is the pane, never the tty', () => {
     bindSeat(repo, caller.agent_id, { pane: '%1', pid: null, tty: 'ttys055' })
     // X re-registers with no pane at all; its lost-%1 memory must survive.
     repo.register({ agent_type: 'codex', name: 'X', team: 'aoe' })
+    expect(prevPaneOf(db, holder.agent_id)).toBe('%1')
 
     followSeatIdentityKey({
       callerAgentId: caller.agent_id,
