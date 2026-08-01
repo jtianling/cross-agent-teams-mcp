@@ -92,17 +92,33 @@ export function buildStartupHint(
   // "read this env var": a first registration that forgets the key binds
   // nothing, and every later recovery then answers need_register without
   // either side reporting an error.
+  // The identity branch closes its own loop and hands off explicitly, and
+  // everything after it is gated on that hand-off. An unconditional ask sitting
+  // beside it is satisfiable with no tool call at all, which makes it the
+  // cheapest complete action in the message — measured, a restarted pane took
+  // exactly that action and never attempted recovery.
   const identityBranch = identityKey === undefined ? [] : [
-    `This pane carries an identity key: ${identityKey}. BEFORE anything below, call reconnect({identity_key: "${identityKey}", ui_pid: $PPID}) — it recovers the identity this pane had before it was restarted, which no other lookup can do once $PPID has changed. If that returns ok, you are done: state which identity you recovered. If it returns need_register, continue with the flow below, and add identity_key: "${identityKey}" verbatim to that register_agent call and to every later register_agent call — leaving it out silently disables restart recovery for this pane.`
+    `This pane carries an identity key: ${identityKey}. Start here. Call reconnect({identity_key: "${identityKey}", ui_pid: $PPID}) — it recovers the identity this pane had before it was restarted, which no other lookup can do once $PPID has changed. If it returns ok you are done: state which identity you recovered, and disregard the rest of this message. Only if it returns need_register does anything below apply, and in that case add identity_key: "${identityKey}" verbatim to that register_agent call and to every later register_agent call — leaving it out silently disables restart recovery for this pane.`
   ]
+  // Only meaningful once the identity branch exists: without it there is no
+  // earlier step for the rest of the message to be conditional on.
+  const gate = identityKey === undefined
+    ? ''
+    : 'Everything below applies only when the step above returned need_register. '
   const content = [
-    `cross-agent-teams-mcp: your channel_session_id is ${csid}.`,
+    `cross-agent-teams-mcp: your channel_session_id is ${csid}. The tools named below may not be directly callable yet — where this host defers them you receive their names without schemas, and a tool has to be loaded before it can be invoked. Load one first if a call below is not directly available.`,
     ...identityBranch,
-    `Do NOT register automatically. First ask the user (in English) to register this session so it can talk to other agents — use exactly this wording: ${ask}`,
+    `${gate}Do NOT register automatically. First ask the user (in English) to register this session so it can talk to other agents — use exactly this wording: ${ask}`,
     `Once the user provides a name (and optionally a team), call register_agent({agent_type: "claude-code", name: "<name from user>", team: "<team from user, omit if not provided>"${deviceClause}, ui_pid: $PPID, project_dir: "<current working directory>"})${deviceRegisterFragment}. Do NOT pass channel_session_id here; the daemon auto-binds via ui_pid.`,
-    `If this is a reconnect (context clear, resume, or channel re-attach), route by whether you still remember your own (team, name): if you DO remember it (for example after closing Claude Code and resuming the conversation, where your $PPID has changed but the context survived), call register_agent({agent_type: "claude-code", name: "<your remembered name>", team: "<your remembered team>"${deviceClause}, ui_pid: $PPID, project_dir: "<current working directory>"}) and then state in your reply which identity you re-registered as — do NOT call reconnect, because it would reverse-look-up the changed $PPID, find no match, and return need_register. If you do NOT remember your (team, name) (for example after a context clear), call reconnect({ui_pid: $PPID}) to recover your prior (team, name) and rebind to this new csid in one step; on a need_register result, ask the user. bind_channel({channel_session_id: "${csid}"}) only rebinds when your CURRENT MCP session is already bound to your agent; on a fresh or resumed MCP session it returns unknown_agent, so use reconnect (or register_agent with your remembered identity) instead. Neither is the primary first-time registration path.`,
+    // The preference for register_agent here is stated inside this branch's own
+    // condition. Phrased as a bare "do NOT call reconnect" it read as a global
+    // prohibition sitting a few lines under the identity branch's "call
+    // reconnect" — the keyed and unkeyed messages are not a superset relation,
+    // and a sentence that is unambiguous without the identity branch can become
+    // a contradiction once it is added above.
+    `If this is a reconnect (context clear, resume, or channel re-attach), route by whether you still remember your own (team, name): if you DO remember it (for example after closing Claude Code and resuming the conversation, where your $PPID has changed but the context survived), call register_agent({agent_type: "claude-code", name: "<your remembered name>", team: "<your remembered team>"${deviceClause}, ui_pid: $PPID, project_dir: "<current working directory>"}) and then state in your reply which identity you re-registered as — for that case register_agent is the right call rather than reconnect({ui_pid: $PPID}), because a reverse look-up on the changed $PPID would find no match and return need_register. If you do NOT remember your (team, name) (for example after a context clear), call reconnect({ui_pid: $PPID}) to recover your prior (team, name) and rebind to this new csid in one step; on a need_register result, ask the user. bind_channel({channel_session_id: "${csid}"}) only rebinds when your CURRENT MCP session is already bound to your agent; on a fresh or resumed MCP session it returns unknown_agent, so use reconnect (or register_agent with your remembered identity) instead. Neither is the primary first-time registration path.`,
     `Do not use curl or another external HTTP client for Claude registration here — that would create a different MCP session, and follow-up tools in Claude Code could still see unknown_agent.`
-  ].join(' ')
+  ].join('\n\n')
   return {
     content,
     meta: { source: 'cross_agent_teams_mcp', kind: 'startup_bind_hint' }
