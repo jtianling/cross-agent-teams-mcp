@@ -36,7 +36,7 @@ describe('AgentsRepo.findKeyHoldersBySeat', () => {
     cleanups.length = 0
   })
 
-  it('matches via surviving runtime_tty after the pane rebind cleared the old pane', () => {
+  it('matches via the pane the rebind took away, for a pid-less caller bind', () => {
     const { dir, db, repo } = freshRepo(); cleanups.push(dir)
     const x = repo.register({
       agent_type: 'codex', name: 'X', team: 'aoe', identity_key: 'K1',
@@ -46,7 +46,8 @@ describe('AgentsRepo.findKeyHoldersBySeat', () => {
     // Fallback-path shape: same pane and tty, but no pid recorded.
     bindSeat(repo, y.agent_id, { pane: '%1', pid: null, tty: 'ttys026' })
 
-    // Last-writer-wins already cleared the incumbent's pane binding.
+    // Last-writer-wins already cleared the incumbent's pane binding, and
+    // recorded the pane it took: that record, not the shared tty, is the seat.
     expect(repo.getById(x.agent_id)?.tmux_pane_id).toBeNull()
 
     const holders = repo.findKeyHoldersBySeat(y.agent_id, 'local')

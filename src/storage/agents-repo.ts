@@ -253,8 +253,15 @@ export class AgentsRepo {
    * hold an identity_key and whose runtime binding places them on the seat
    * the caller just bound.  After a same-pane rebind the incumbent row's
    * tmux_pane_id is already cleared (last-writer-wins pane binding), so the
-   * match runs only on the fields that survive it: runtime_ui_pid, and
-   * runtime_tty for the tty-verified bind path that records no pid.
+   * match runs on runtime_ui_pid and on prev_tmux_pane_id — the pane the
+   * clear took away, which is what "the caller took over this row's pane"
+   * actually means and which also covers binds that record no pid.
+   *
+   * runtime_tty is deliberately NOT a leg: a tty number is drawn from a pool
+   * and reused as soon as a pane closes, so it proves nothing about the seat.
+   * It once moved a live key onto an unrelated brand-new pane, and a recycled
+   * tty equally produces spurious candidates that suppress legitimate follows
+   * through the caller-side `holders.length !== 1` guard.
    */
   findKeyHoldersBySeat(
     caller_agent_id: string,
@@ -278,8 +285,8 @@ export class AgentsRepo {
          AND (
            (c.runtime_ui_pid IS NOT NULL
             AND h.runtime_ui_pid = c.runtime_ui_pid)
-           OR (c.runtime_tty IS NOT NULL
-               AND h.runtime_tty = c.runtime_tty)
+           OR (c.tmux_pane_id IS NOT NULL
+               AND h.prev_tmux_pane_id = c.tmux_pane_id)
          )
        ORDER BY h.last_seen_at DESC`
     ).all(caller_agent_id, localDevice) as SeatKeyHolder[]
@@ -599,13 +606,19 @@ export class AgentsRepo {
    * A tmux pane hosts one agent UI at a time, so the newest binding evicts any
    * incumbent on the same (device, pane). Only the pane column is cleared —
    * the incumbent row, its cursor, mailbox and delivery stay intact.
+   *
+   * The evicted pane is remembered in prev_tmux_pane_id by the SAME statement
+   * that clears it, so the two can never disagree: seat-follow's dead-holder
+   * branch needs "the pane this row lost", and this is the only code that
+   * knows it. prev_tmux_pane_id records a LOST pane and is never a binding.
    */
   private clearPaneBinding(device: string, pane: string, keepAgentId: string): void {
     this.db.prepare(
       `UPDATE agents
-       SET tmux_pane_id=NULL
+       SET tmux_pane_id=NULL,
+           prev_tmux_pane_id=?
        WHERE device=? AND tmux_pane_id=? AND agent_id != ?`
-    ).run(device, pane, keepAgentId)
+    ).run(pane, device, pane, keepAgentId)
   }
 
   private reactiveRebindHosts(args: {
@@ -672,8 +685,15 @@ export class AgentsRepo {
     const tx = this.db.transaction(() => {
       const conditional = args.expected_register_generation !== undefined
       const result = this.db.prepare(
+        // prev_tmux_pane_id is cleared here on purpose: it means "the pane
+        // this row lost and has not replaced".  A row that lost %10, later
+        // bound %20 and then died would otherwise still answer to %10, and
+        // seat-follow's dead-holder branch would hand its key to whoever took
+        // over %10 rather than %20 — a stale identifier authorising a key
+        // move, which is the defect this column was added to remove.
         `UPDATE agents
          SET tmux_pane_id=?,
+             prev_tmux_pane_id=NULL,
              runtime_ui_pid=?,
              runtime_tty=?,
              runtime_verification_mode=?,

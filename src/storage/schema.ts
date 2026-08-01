@@ -25,6 +25,7 @@ const DDL = [
     last_seen_at TEXT NOT NULL,
     last_processed_event_id INTEGER NOT NULL DEFAULT 0,
     tmux_pane_id TEXT,
+    prev_tmux_pane_id TEXT,
     claude_ui_pid INTEGER,
     runtime_ui_pid INTEGER,
     runtime_tty TEXT,
@@ -255,6 +256,20 @@ function migrateAgentsRegisterGenerationColumn(db: Database.Database): void {
   )
 }
 
+// Pane-takeover memory: the per-device pane-exclusivity clear records the pane
+// it takes away, so seat-follow's dead-holder branch can ask "is the pane this
+// row lost the pane the caller now holds?" instead of comparing a recycled tty.
+// It is a record of a LOST pane, never a live binding.
+function migrateAgentsPrevPaneColumn(db: Database.Database): void {
+  const tableExists = db
+    .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='agents'`)
+    .get() as { name: string } | undefined
+  if (!tableExists) return
+  const cols = db.pragma('table_info(agents)') as Array<{ name: string }>
+  if (cols.some(c => c.name === 'prev_tmux_pane_id')) return
+  db.exec(`ALTER TABLE agents ADD COLUMN prev_tmux_pane_id TEXT`)
+}
+
 function migrateCodexPreRegIdentityKeyColumn(db: Database.Database): void {
   const tableExists = db
     .prepare(
@@ -310,6 +325,7 @@ export function applySchema(
   migrateAgentsDeviceColumns(db, opts.localDevice ?? 'local')
   migrateAgentsIdentityKeyColumn(db)
   migrateAgentsRegisterGenerationColumn(db)
+  migrateAgentsPrevPaneColumn(db)
   migrateCodexPreRegIdentityKeyColumn(db)
   migrateMessagesNeedReplyColumn(db)
   migrateAgentsCursorWatermark(db)

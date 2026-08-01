@@ -56,8 +56,12 @@ describe('pane binding is exclusive per device (last-writer-wins)', () => {
     // rule reads it to tell a rename-migration from two panes racing for one
     // key, and a silently cleared pid turns a conflict into a quiet pass.
     expect(after.runtime_ui_pid).toBe(7001)
+    // The evicted pane is remembered, by the same statement that clears it:
+    // seat-follow's dead-holder branch asks "is the pane this row lost the
+    // pane the caller now holds?", which nothing else in the row can answer.
+    expect(after.prev_tmux_pane_id).toBe(PANE)
     for (const key of Object.keys(before)) {
-      if (key === 'tmux_pane_id') continue
+      if (key === 'tmux_pane_id' || key === 'prev_tmux_pane_id') continue
       expect([key, after[key]]).toEqual([key, before[key]])
     }
   })
