@@ -23,6 +23,41 @@ vi.mock('../src/daemon/runtime-identity.js', () => ({
   bindRuntimeIdentity: bindRuntimeIdentityMock,
 }))
 
+// Two pending rows is exactly the seeding trigger's firing condition, so this
+// fixture would otherwise start real schedules that probe real tmux/ps and
+// paste into whatever pane %10 happens to be on this machine.  The tokens here
+// are minted by hand: what this file tests is the scan half of the mechanism.
+const { evaluateSeedingMock } = vi.hoisted(() => ({
+  evaluateSeedingMock: vi.fn(),
+}))
+
+vi.mock('../src/mcp/codex-seeding-poke.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../src/mcp/codex-seeding-poke.js')>()
+  return { ...actual, evaluateCodexSeedingOnPreRegister: evaluateSeedingMock }
+})
+
+// Recorder only — it calls straight through, so recovery behaves normally.
+// Its sole purpose is to pin the ORDER of the two evaluations (see the
+// ordering test below).
+const { recoveryOrderSpy } = vi.hoisted(() => ({
+  recoveryOrderSpy: vi.fn(),
+}))
+
+vi.mock('../src/mcp/codex-recovery-poke.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../src/mcp/codex-recovery-poke.js')>()
+  return {
+    ...actual,
+    evaluateCodexRecoveryOnPreRegister: (
+      ...args: Parameters<typeof actual.evaluateCodexRecoveryOnPreRegister>
+    ) => {
+      recoveryOrderSpy()
+      return actual.evaluateCodexRecoveryOnPreRegister(...args)
+    },
+  }
+})
+
 vi.mock('../src/mcp/register-codex-self.js', () => {
   return {
     RegisterCodexSelfService: class {
@@ -82,6 +117,8 @@ describe('register_agent selects its pre-reg row by recovery nonce', () => {
   beforeEach(() => {
     detectTmuxPaneMock.mockReset()
     bindRuntimeIdentityMock.mockReset()
+    evaluateSeedingMock.mockReset()
+    recoveryOrderSpy.mockClear()
     detectTmuxPaneMock.mockResolvedValue({ error: 'not_found', candidates: [] })
     clearAllCodexRecoveryNonces()
     autoBindOverrides.listPanes = async () =>
@@ -139,6 +176,18 @@ describe('register_agent selects its pre-reg row by recovery nonce', () => {
       })
       expect(await parseTool(resp)).toMatchObject({ ok: true })
     }
+    // The trigger is wired to run on every accepted write, not only the one
+    // that makes the count ambiguous.
+    expect(evaluateSeedingMock).toHaveBeenCalledTimes(PANES.length)
+    // "One live token per pane" holds only if recovery has already claimed its
+    // panes by the time seeding decides which ones still need a token.  Run
+    // the other way round, a pane would take a seeding token and then a
+    // recovery schedule as well, and whichever minted last would silently
+    // invalidate the notice already sitting in the pane.  A comment at the
+    // call site is not enough to keep an ordering that load-bearing.
+    expect(recoveryOrderSpy).toHaveBeenCalledTimes(PANES.length)
+    expect(recoveryOrderSpy.mock.invocationCallOrder[0])
+      .toBeLessThan(evaluateSeedingMock.mock.invocationCallOrder[0])
     await t.close()
     await c.close()
     return { app, dbPath, url, logLines }

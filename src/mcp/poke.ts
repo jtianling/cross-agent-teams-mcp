@@ -231,6 +231,30 @@ export async function tmuxPokeImpl(args: {
   }
 }
 
+/**
+ * Whether a poke left its content sitting in the pane.
+ *
+ * Lives here rather than at the call sites because only this module knows
+ * which stages run AFTER `paste_buffer`.  A caller that re-derived the answer
+ * from the error name alone would silently go stale the next time a stage is
+ * added or reordered, and the callers that need it are the ones deciding
+ * whether a one-time token is still quotable — the wrong answer there either
+ * strands a pane forever or invalidates a token that really is in the pane.
+ *
+ * `ok` and `ownership_lost` (pasted, Enter never sent) are the documented
+ * positives.  `tmux_cmd_failed` is positive only for the post-paste stages:
+ * the throw came after the content was already in the pane.  `pane_dead` is
+ * NOT positive even post-paste — the pane that held the content is gone.
+ */
+export function pokeWroteContent(result: TmuxPokeResult): boolean {
+  if ('ok' in result && result.ok) return true
+  const failure = result as { error: string; detail?: unknown }
+  if (failure.error === 'ownership_lost') return true
+  if (failure.error !== 'tmux_cmd_failed') return false
+  const stage = (failure.detail as { stage?: unknown } | undefined)?.stage
+  return stage === 'send_keys' || stage === 'capture_after'
+}
+
 export async function poke(deps: PokeDeps, input: PokeInput): Promise<PokeResult> {
   if (!deps.callerAgentId) return { error: 'unknown_agent' }
 

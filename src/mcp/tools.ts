@@ -70,6 +70,11 @@ import {
   evaluateCodexRecoveryOnPreRegister,
   type CodexRecoveryDeps,
 } from './codex-recovery-poke.js'
+import {
+  cancelCodexSeedingSchedule,
+  evaluateCodexSeedingOnPreRegister,
+  type CodexSeedingDeps,
+} from './codex-seeding-poke.js'
 import type { SessionOriginInfo } from '../daemon/network-origin.js'
 import { isAlive } from '../daemon/pid.js'
 import { consumeCodexRecoveryNonce } from './codex-recovery-nonce.js'
@@ -481,10 +486,16 @@ export function registerBusinessTools(
     localDevice: recoveryLocalDevice,
     log,
   }
+  const codexSeedingDeps: CodexSeedingDeps = { repo: codexPanePreRegRepo, log }
   const preRegisterCodexPaneSvc = new PreRegisterCodexPaneService(
     codexPanePreRegRepo,
     undefined,
-    row => evaluateCodexRecoveryOnPreRegister(row, codexRecoveryDeps),
+    row => {
+      // Recovery first: a pane it schedules must already hold its token when
+      // the seeding trigger decides which panes still need one.
+      evaluateCodexRecoveryOnPreRegister(row, codexRecoveryDeps)
+      evaluateCodexSeedingOnPreRegister(row, codexSeedingDeps)
+    },
     log
   )
   const seatFollowDeps: SeatFollowDeps = {
@@ -712,8 +723,10 @@ export function registerBusinessTools(
         },
         log,
       },
-      onConsumed: paneId =>
-        cancelCodexRecoverySchedule(paneId, { reason: 'row_consumed', log }),
+      onConsumed: paneId => {
+        cancelCodexRecoverySchedule(paneId, { reason: 'row_consumed', log })
+        cancelCodexSeedingSchedule(paneId, { reason: 'row_consumed', log })
+      },
       log,
     })
     if (auto === false) return false
@@ -999,7 +1012,7 @@ export function registerBusinessTools(
       "Internal field for the cross-agent-teams-mcp channel proxy.  Stores the proxy's parent Claude Code UI pid (`process.ppid`) so that Claude Code hosts registering in the same lineage can auto-bind their claude-channel delivery.  Only valid when role='__channel_proxy__'; rejected otherwise."
     ),
     recovery_nonce: z.string().min(1).optional().describe(
-      'One-time token quoted verbatim in a cross-agent-teams recovery notice. Pass it back EXACTLY as given when you re-register in response to that notice: the daemon sent it to one specific tmux pane, so it is what tells the daemon which pane you are. Omitting it is safe and only means the daemon falls back to guessing; inventing one has no effect.'
+      'One-time token quoted verbatim in a cross-agent-teams notice written into your pane — either a recovery notice (re-register as a named identity) or a pane token notice (a first registration while several panes are starting at once). Pass it back EXACTLY as given on the register_agent call you make in response: the daemon sent it to one specific tmux pane, so it is what tells the daemon which pane you are. It says nothing about who you register as. Omitting it is safe and only means the daemon falls back to guessing; inventing one has no effect.'
     ),
     delivery: deliverySchema.optional(),
   }).strict(

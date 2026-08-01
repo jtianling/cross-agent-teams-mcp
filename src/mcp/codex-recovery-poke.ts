@@ -2,20 +2,16 @@ import type { CodexPanePreRegRepo } from './codex-pane-pre-register-repo.js'
 import type { AcceptedPreRegRow } from './pre-register-codex-pane.js'
 import type { IdentityKeyMatch } from '../storage/agents-repo.js'
 import {
-  argvContainsUuid,
   classifyCodexCarrier,
-  collapseCarrierMatches,
   defaultForegroundProbeSync,
-  defaultListPanes,
-  defaultTtyProcesses,
-  isCodexRemoteProcess,
-  isStoppedOrZombieStat,
-  parseCarrierPsLine,
   type CarrierMatchCollapse,
-  type CarrierPsEntry,
   type PaneTtyEntry,
 } from './auto-bind-codex-pane.js'
-import { tmuxPokeImpl } from './poke.js'
+import {
+  detectCodexCarrier,
+  type DetectedCodexCarrier,
+} from './codex-carrier-detect.js'
+import { pokeWroteContent, tmuxPokeImpl } from './poke.js'
 import type { TmuxPokeResult } from './transport-dispatch.js'
 import { runQuietGuard } from './poke-guard.js'
 import {
@@ -26,6 +22,7 @@ import {
 import { isAlive } from '../daemon/pid.js'
 import {
   clearCodexRecoveryNoncesForPane,
+  markCodexRecoveryNonceDelivered,
   mintCodexRecoveryNonce,
 } from './codex-recovery-nonce.js'
 import { describeRedactedError } from './log-redact.js'
@@ -178,6 +175,17 @@ export function clearAllCodexRecoverySchedules(
 
 export function __peekCodexRecoverySchedules(): string[] {
   return Array.from(recoverySchedules.keys())
+}
+
+/**
+ * Whether the pane currently holds a live recovery generation.  Read by the
+ * seeding trigger: a pane holds at most ONE live token, and the recovery one
+ * stands because it carries strictly more (it names the identity to register
+ * as).  The generation map, not the schedule map, is the authority — a send
+ * that has already left the schedule map is still live.
+ */
+export function hasLiveCodexRecoverySchedule(paneId: string): boolean {
+  return currentGenerationMessageId.has(paneId)
 }
 
 export function __peekCodexRecoveryGenerations(): Map<string, string> {
@@ -413,54 +421,18 @@ function logProbeStageError(
   )
 }
 
-interface DetectedCodex {
-  pid: number
-  tty: string
-}
-
 async function detectCodexProcess(
   state: ProbeState
-): Promise<DetectedCodex | undefined> {
+): Promise<DetectedCodexCarrier | undefined> {
   const { row, deps } = state
-  const listPanes = deps.listPanes ?? defaultListPanes
-  const ttyProcesses = deps.ttyProcesses ?? defaultTtyProcesses
-  let panes: PaneTtyEntry[]
-  try {
-    panes = await listPanes()
-  } catch (error) {
-    logProbeStageError(state, 'list_panes', error)
-    return undefined
-  }
-  const pane = panes.find(p => p.pane_id === row.pane_id)
-  if (!pane || !pane.tty) return undefined
-  let procs: string[]
-  try {
-    procs = await ttyProcesses(pane.tty)
-  } catch (error) {
-    logProbeStageError(state, 'tty_processes', error)
-    return undefined
-  }
-  // A stopped (SIGSTOP/traced) or zombie codex is not a detection: the shell
-  // owns the tty again, so treating it as up would aim a paste at the shell.
-  // Foreground-ness is deliberately NOT required at detection time for a
-  // single match; the write-time carrier proof enforces it before anything
-  // is written.  A wrapper+child pair sharing the foreground process group
-  // collapses into one detection whose pid is the group leader's; matches
-  // spanning different pgids stay ambiguous and detect nothing.
-  const matching = procs
-    .map(parseCarrierPsLine)
-    .filter((entry): entry is CarrierPsEntry =>
-      entry !== undefined
-      && isCodexRemoteProcess(entry.command)
-      && argvContainsUuid(entry.command, row.xats_agent_id)
-      && !isStoppedOrZombieStat(entry.stat)
-    )
-  const collapsed = collapseCarrierMatches(matching)
-  if (collapsed.entry === undefined) {
-    if (collapsed.matchCount > 1) logDetectCollapseSkip(state, collapsed)
-    return undefined
-  }
-  return { pid: collapsed.entry.pid, tty: pane.tty }
+  return detectCodexCarrier({
+    paneId: row.pane_id,
+    uuid: row.xats_agent_id,
+    listPanes: deps.listPanes,
+    ttyProcesses: deps.ttyProcesses,
+    onStageError: (stage, error) => logProbeStageError(state, stage, error),
+    onAmbiguous: collapsed => logDetectCollapseSkip(state, collapsed),
+  })
 }
 
 // Multiple matching codex lines that do not collapse into one foreground
@@ -643,6 +615,12 @@ async function sendAfterGuard(
     skipGuard: true,
     confirmOwnership,
   })
+  // Any outcome that left the notice in the pane counts as delivered, not just
+  // the successful one: the seeding trigger reads this to leave such a pane
+  // alone rather than mint a second token that would silently invalidate the
+  // notice already sitting there.  Keyed on THIS nonce so a send that outlived
+  // its generation cannot flag a replacement nothing has written yet.
+  if (pokeWroteContent(result)) markCodexRecoveryNonceDelivered(nonce)
   if ('ok' in result && result.ok) {
     rlog(deps,
       `codex-recovery delivered: pane=${row.pane_id} ` +

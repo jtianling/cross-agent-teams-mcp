@@ -11,6 +11,7 @@ import { ChannelWakeFanout } from './channel-wake-fanout.js'
 import { clearAllRetries } from '../mcp/poke-retry.js'
 import { clearAllKimiRetries } from '../mcp/kimi-poke-retry.js'
 import { clearAllCodexRecoverySchedules } from '../mcp/codex-recovery-poke.js'
+import { clearAllCodexSeedingSchedules } from '../mcp/codex-seeding-poke.js'
 import { resolveLocalDeviceLabel } from './local-device.js'
 import { bindHostCoversIpv4Loopback, classifyPeerAddress, type SessionOriginInfo } from './network-origin.js'
 
@@ -117,9 +118,11 @@ export async function buildServer(opts: ServerOpts): Promise<FastifyInstance> {
     clearInterval(orphanGcInterval)
     clearAllRetries()
     clearAllKimiRetries()
-    // Before db.close(): recovery probe timers and in-flight sends read the
-    // db synchronously; cancelled flags must be visible before it goes away.
+    // Before db.close(): recovery and seeding probe timers and in-flight sends
+    // read the db synchronously; cancelled flags must be visible before it
+    // goes away.
     clearAllCodexRecoverySchedules({ reason: 'daemon_shutdown', log: opts.mcpLog })
+    clearAllCodexSeedingSchedules({ reason: 'daemon_shutdown', log: opts.mcpLog })
     fanout.stopAll()
     db.close()
   })
