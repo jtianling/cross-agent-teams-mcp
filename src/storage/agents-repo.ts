@@ -566,6 +566,15 @@ export class AgentsRepo {
          model = excluded.model,
          last_seen_at = excluded.last_seen_at,
          tmux_pane_id = COALESCE(excluded.tmux_pane_id, tmux_pane_id),
+         -- Second writer of a live pane, and it must forget the lost one for
+         -- the same reason setRuntimeBinding does: prev_tmux_pane_id means
+         -- "the pane this row lost AND has not replaced".  Cleared only when
+         -- this upsert actually supplies a pane — a registration that carries
+         -- none leaves the binding alone and must leave the memory alone too.
+         prev_tmux_pane_id = CASE
+           WHEN excluded.tmux_pane_id IS NOT NULL THEN NULL
+           ELSE prev_tmux_pane_id
+         END,
          claude_ui_pid = COALESCE(excluded.claude_ui_pid, claude_ui_pid),
          runtime_ui_pid = COALESCE(excluded.runtime_ui_pid, runtime_ui_pid),
          remote_addr = excluded.remote_addr,

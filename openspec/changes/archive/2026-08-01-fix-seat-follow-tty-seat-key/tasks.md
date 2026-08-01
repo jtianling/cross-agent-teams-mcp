@@ -36,6 +36,12 @@
 - [x] 3b.1 `prev_tmux_pane_id` was written but never cleared, so it went stale: a row that lost `%1`, rebound onto `%2` and died there would still answer to `%1`, and the dead-holder branch would hand its key to whoever took over `%1` instead of `%2`.  That is a stale identifier authorising a key move — the exact defect this column was added to remove, reintroduced one level down.  The pane bind now clears it in the same statement, so the memory means "the pane this row lost AND has not replaced".  `clearRuntimeBinding` deliberately does NOT set it: that path is an undo, nobody took the pane, and after this fix the row's value is already NULL.
 - [x] 3b.2 Test + mutation: removing the clear turns 3b.1's case red and nothing else
 
+## 3c. Found by review (CRITICAL, after archive — fixed in a follow-up commit)
+
+- [x] 3c.1 `setRuntimeBinding` was not the only writer of a live pane.  The `register()` upsert's `ON CONFLICT` also binds one (`tmux_pane_id = COALESCE(excluded.tmux_pane_id, tmux_pane_id)`), and it did NOT clear the takeover memory — so the identical stale-history hole survived one path over: X loses `%1`, re-registers onto `%2`, dies, and a caller taking over `%1` inherits X's key.  Not a hypothetical path: register-time pane binding is covered by existing tests.  The upsert now clears `prev_tmux_pane_id` **only when it actually supplies a pane** — a registration carrying none must leave both the binding and the memory alone
+- [x] 3c.2 Two regression cases + both mutation directions: dropping the clear turns the rebind case red; making the clear unconditional turns the no-pane case red (it would silently disable legitimate same-pane-restart migration)
+- [x] 3c.3 Root cause of the miss, recorded: the grep that found `setRuntimeBinding` also listed this line, and it was not followed up.  "Find the writers of X" is only done when every hit has been ruled in or out, not when one of them explains the bug at hand
+
 ## 4. Regression
 
 - [x] 4.1 Existing seat-follow suites (`codex-seat-follow`, `codex-seat-follow-recovery`, `register-agent-seat-follow`) pass unchanged, or every changed expectation is justified in this file

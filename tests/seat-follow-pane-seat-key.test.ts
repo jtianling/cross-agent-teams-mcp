@@ -205,6 +205,61 @@ describe('seat-follow seat identity is the pane, never the tty', () => {
     db.close()
   })
 
+  it('a register-time rebind clears the lost pane too', () => {
+    // setRuntimeBinding is not the only writer of a live pane: the register
+    // upsert binds one as well (same identity re-registering onto a new pane).
+    // Missing it left the identical stale-history hole one path over.
+    const { dir, db, repo } = freshRepo(); cleanups.push(dir)
+    const holder = repo.register({
+      agent_type: 'codex', name: 'X', team: 'aoe', identity_key: 'K1',
+    })
+    bindSeat(repo, holder.agent_id, { pane: '%1', pid: 1001, tty: 'ttys026' })
+    const evictor = repo.register({ agent_type: 'codex', name: 'E', team: 'aoe' })
+    bindSeat(repo, evictor.agent_id, { pane: '%1', pid: 1002, tty: 'ttys026' })
+
+    // X re-registers onto %2 through the upsert, not through setRuntimeBinding.
+    repo.register({
+      agent_type: 'codex', name: 'X', team: 'aoe', tmux_pane_id: '%2',
+    })
+    expect(repo.findById(holder.agent_id)?.tmux_pane_id).toBe('%2')
+
+    const caller = repo.register({ agent_type: 'codex', name: 'Y', team: 'aoe' })
+    bindSeat(repo, caller.agent_id, { pane: '%1', pid: null, tty: 'ttys055' })
+
+    followSeatIdentityKey({
+      callerAgentId: caller.agent_id,
+      deps: realDeps(db, repo),
+    })
+
+    expect(keyOf(repo, caller.agent_id)).toBeNull()
+    expect(keyOf(repo, holder.agent_id)).toBe('K1')
+    db.close()
+  })
+
+  it('a registration carrying no pane leaves the lost pane remembered', () => {
+    // The CASE has to be conditional: a re-registration with no pane does not
+    // touch the binding, so it must not erase the takeover memory either —
+    // that would silently disable legitimate same-pane-restart migration.
+    const { dir, db, repo } = freshRepo(); cleanups.push(dir)
+    const holder = repo.register({
+      agent_type: 'codex', name: 'X', team: 'aoe', identity_key: 'K1',
+    })
+    bindSeat(repo, holder.agent_id, { pane: '%1', pid: DEAD_PID, tty: 'ttys026' })
+    const caller = repo.register({ agent_type: 'codex', name: 'Y', team: 'aoe' })
+    bindSeat(repo, caller.agent_id, { pane: '%1', pid: null, tty: 'ttys055' })
+    // X re-registers with no pane at all; its lost-%1 memory must survive.
+    repo.register({ agent_type: 'codex', name: 'X', team: 'aoe' })
+
+    followSeatIdentityKey({
+      callerAgentId: caller.agent_id,
+      deps: realDeps(db, repo),
+    })
+
+    expect(keyOf(repo, caller.agent_id)).toBe('K1')
+    expect(keyOf(repo, holder.agent_id)).toBeNull()
+    db.close()
+  })
+
   it('a holder that lost a DIFFERENT pane does not qualify', () => {
     const { dir, db, repo } = freshRepo(); cleanups.push(dir)
     const holder = repo.register({
