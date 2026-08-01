@@ -489,14 +489,21 @@ export function registerBusinessTools(
   const codexSeedingDeps: CodexSeedingDeps = { repo: codexPanePreRegRepo, log }
   const preRegisterCodexPaneSvc = new PreRegisterCodexPaneService(
     codexPanePreRegRepo,
-    undefined,
-    row => {
-      // Recovery first: a pane it schedules must already hold its token when
-      // the seeding trigger decides which panes still need one.
-      evaluateCodexRecoveryOnPreRegister(row, codexRecoveryDeps)
-      evaluateCodexSeedingOnPreRegister(row, codexSeedingDeps)
-    },
-    log
+    {
+      onAccepted: row => {
+        // Recovery first: a pane it schedules must already hold its token when
+        // the seeding trigger decides which panes still need one.
+        evaluateCodexRecoveryOnPreRegister(row, codexRecoveryDeps)
+        evaluateCodexSeedingOnPreRegister(row, codexSeedingDeps)
+      },
+      log,
+      // Absent unless the daemon entry point supplied one, in which case the
+      // service reports 'unknown'.  Inverted deliberately: the real probe
+      // shells out to bare tmux, and defaulting it on meant every test that
+      // builds a server in-process probed the host's own tmux server as a
+      // side effect of a successful pre-registration.
+      paneVisible: context?.paneVisibleProbe,
+    }
   )
   const seatFollowDeps: SeatFollowDeps = {
     findCaller: agentId => {

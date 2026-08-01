@@ -25,6 +25,9 @@ export interface ServerOpts {
   orphanGcMaxAgeMs?: number
   orphanGcMaxSessions?: number
   mcpLog?: (line: string) => void
+  /** Real tmux probe for pre-registration pane visibility.  Only the daemon
+   *  entry point passes it; tests leave it unset and get `'unknown'`. */
+  paneVisibleProbe?: (paneId: string) => boolean
   fanout?: SseFanout
   channelWakeFanout?: ChannelWakeFanout
 }
@@ -46,6 +49,10 @@ const DEFAULT_ORPHAN_GC_MAX_SESSIONS = 500
 
 export interface DaemonContext {
   localDevice: string
+  /** Supplied only by the daemon entry point.  Absent here the pre-register
+   *  service reports pane visibility as `'unknown'`, so an in-process server
+   *  never shells out to the host's tmux. */
+  paneVisibleProbe?: (paneId: string) => boolean
 }
 
 function parsePositiveInt(raw: string | undefined, fallback: number): number {
@@ -60,6 +67,7 @@ export async function buildServer(opts: ServerOpts): Promise<FastifyInstance> {
   const db = openDb(opts.dbPath)
   const context: DaemonContext = {
     localDevice: opts.localDevice ?? resolveLocalDeviceLabel(),
+    paneVisibleProbe: opts.paneVisibleProbe,
   }
   applySchema(db, { localDevice: context.localDevice })
   const startedAt = Date.now()

@@ -26,8 +26,27 @@ export const preRegisterCodexPaneInputSchema = z
 
 export type PreRegisterCodexPaneInput = z.infer<typeof preRegisterCodexPaneInputSchema>
 
+/**
+ * Whether the named pane exists on the daemon's OWN tmux server.  'unknown' is
+ * not a degraded false: a daemon that could not resolve tmux at all is a
+ * different diagnosis from one that resolved it and did not find the pane.
+ */
+export type PaneVisibility = boolean | 'unknown'
+
+/**
+ * Answers that question for one pane id.  Left unconfigured the service
+ * reports 'unknown': the real probe shells out to tmux, so only production
+ * wiring passes it and tests inject their own.
+ */
+export type PaneVisibleProbe = (paneId: string) => boolean
+
 export type PreRegisterCodexPaneResult =
-  | { ok: true; expires_at: string }
+  | {
+      ok: true
+      expires_at: string
+      received_fields: string[]
+      pane_visible: PaneVisibility
+    }
   | { error: 'invalid_arguments'; detail: string }
   | { error: 'pane_claimed'; detail: string }
 
@@ -59,6 +78,15 @@ export function defaultCarrierAlive(paneId: string, uuid: string): boolean {
   }
 }
 
+/** Names only.  Echoing the values would put identity_key in the response. */
+const REPORTED_FIELDS = [
+  'pane_id', 'xats_agent_id', 'identity_key', 'ttl_seconds',
+] as const
+
+function receivedFields(data: PreRegisterCodexPaneInput): string[] {
+  return REPORTED_FIELDS.filter(name => data[name] !== undefined)
+}
+
 const DEFAULT_TTL_SECONDS = 120
 const MIN_TTL_SECONDS = 1
 const MAX_TTL_SECONDS = 600
@@ -77,14 +105,54 @@ export interface AcceptedPreRegRow {
   expires_at: string
 }
 
+export interface PreRegisterCodexPaneOpts {
+  now?: () => Date
+  onAccepted?: (row: AcceptedPreRegRow) => void
+  log?: (line: string) => void
+  carrierAlive?: CarrierAliveProbe
+  /** Left unset the service reports `'unknown'`.  Only the daemon entry point
+   *  supplies the real probe, so nothing that constructs a server in-process
+   *  shells out to the host's tmux by accident. */
+  paneVisible?: PaneVisibleProbe
+}
+
 export class PreRegisterCodexPaneService {
+  private readonly now: () => Date
+  private readonly onAccepted?: (row: AcceptedPreRegRow) => void
+  private readonly log?: (line: string) => void
+  private readonly carrierAlive: CarrierAliveProbe
+  private readonly paneVisible?: PaneVisibleProbe
+
+  // Named rather than positional: the list had grown to six, and reaching the
+  // last one meant passing an explicit `undefined` past a defaulted probe —
+  // a wiring shape where one misplaced argument silently swaps two probes.
   constructor(
     private readonly repo: CodexPanePreRegRepo,
-    private readonly now: () => Date = () => new Date(),
-    private readonly onAccepted?: (row: AcceptedPreRegRow) => void,
-    private readonly log?: (line: string) => void,
-    private readonly carrierAlive: CarrierAliveProbe = defaultCarrierAlive
-  ) {}
+    opts: PreRegisterCodexPaneOpts = {}
+  ) {
+    this.now = opts.now ?? (() => new Date())
+    this.onAccepted = opts.onAccepted
+    this.log = opts.log
+    this.carrierAlive = opts.carrierAlive ?? defaultCarrierAlive
+    this.paneVisible = opts.paneVisible
+  }
+
+  /**
+   * Reported, never enforced.  A pane the daemon cannot see is the signal that
+   * the write and the pane are on different sides of an isolation boundary —
+   * but refusing on it would make every pre-registration depend on the
+   * daemon's own tmux resolution, which is exactly what is misconfigured in
+   * the case this exists to detect.  A probe that throws, times out, or is not
+   * configured at all therefore reports unknown, and the write proceeds.
+   */
+  private probePaneVisible(paneId: string): PaneVisibility {
+    if (this.paneVisible === undefined) return 'unknown'
+    try {
+      return this.paneVisible(paneId)
+    } catch {
+      return 'unknown'
+    }
+  }
 
   /**
    * A pending row's identity_key is that identity's ONLY handle for surviving
@@ -181,6 +249,11 @@ export class PreRegisterCodexPaneService {
         `error=${describeRedactedError(error, parsed.data.identity_key)}`
       )
     }
-    return { ok: true, expires_at }
+    return {
+      ok: true,
+      expires_at,
+      received_fields: receivedFields(parsed.data),
+      pane_visible: this.probePaneVisible(parsed.data.pane_id),
+    }
   }
 }

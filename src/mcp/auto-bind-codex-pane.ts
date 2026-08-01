@@ -277,6 +277,20 @@ export function defaultPaneTtySync(paneId: string): string | undefined {
   return normalizeTty(stdout.trim())
 }
 
+/** Synchronous membership test on the daemon's OWN tmux server: it shells out
+ *  to bare tmux, so a pane announced from a private socket is simply absent
+ *  here — which is the signal.  Throws when the question cannot be answered at
+ *  all (no tmux, no server, timeout); a caller MUST report that as unknown
+ *  rather than as a missing pane.  Tests MUST inject a replacement. */
+export function defaultPaneVisibleSync(paneId: string): boolean {
+  const stdout = execFileSync(
+    'tmux',
+    ['list-panes', '-a', '-F', '#{pane_id}'],
+    { timeout: TMUX_LIST_TIMEOUT_MS, encoding: 'utf8' }
+  )
+  return stdout.split('\n').some(line => line.trim() === paneId)
+}
+
 /**
  * Foreground-carrier probe for the detect_tmux_pane fallback bind: returns
  * the unique foreground `codex --remote` carrier pid on the pane tty (the

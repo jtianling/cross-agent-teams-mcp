@@ -435,4 +435,82 @@ describe('register_agent codex pre-reg auto-bind', () => {
       await app.close()
     })
   }
+
+  it('a pane announced but not yet running codex is still protected', async () => {
+    // Pins the refusal to row EXISTENCE.  The natural repair for the
+    // cross-server pane-id collision is to narrow it — block only when the
+    // row's uuid is observable on that pane's carrier — and that is wrong: the
+    // window this protects is the one before `exec codex` replaces the
+    // launcher shell, so the uuid is legitimately absent exactly when the
+    // protection is meant to apply.  Nothing asserted this directly before,
+    // which is why the narrowing looked safe.
+    detectTmuxPaneMock.mockResolvedValue({
+      ok: true,
+      pane: { pane_id: '%7', tty: 'ttys007' },
+    })
+    // A bind that would SUCCEED if it were reached: without it, dropping the
+    // refusal fails this test on an unrelated crash instead of on the pane.
+    bindRuntimeIdentityMock.mockResolvedValue({
+      ok: true,
+      tmux_pane_id: '%7',
+      verification_mode: 'verified_pid_tty_pane',
+      tty: 'ttys007',
+      ui_pid: 4242,
+    })
+    autoBindOverrides.listPanes = async () => [{ pane_id: '%7', tty: 'ttys007' }]
+    // The launcher's own shell, pre-`exec`: no codex on the pane at all.
+    autoBindOverrides.ttyProcesses = async () => ['4242 4242 4242 Ss+ -sh']
+
+    const { startServer } = await import('../src/daemon/server.js')
+    const dir = tmp()
+    cleanups.push(dir)
+    const dbPath = join(dir, 'data.db')
+    const logLines: string[] = []
+    const { app, port, host } = await startServer({
+      dbPath, port: 0, mcpLog: line => { logLines.push(line) },
+    })
+    const url = new URL(`http://${host}:${port}/mcp`)
+    const t = new StreamableHTTPClientTransport(url)
+    const c = new Client({ name: 'codex-cli', version: '0.0.0' })
+    await c.connect(t)
+
+    const preReg = await c.callTool({
+      name: 'pre_register_codex_pane',
+      arguments: {
+        pane_id: '%7', xats_agent_id: 'U_NOT_YET', identity_key: 'K_LAUNCH',
+      },
+    })
+    expect(await parseTool(preReg)).toMatchObject({ ok: true })
+
+    const resp = await c.callTool({
+      name: 'register_agent',
+      arguments: { agent_type: 'codex', model: 'gpt-5', role: 'worker', name: 'new-gpt', thread_id: VALID_THREAD_ID },
+    })
+    expect((await parseTool(resp)).agent_id).toBeDefined()
+
+    expect(bindRuntimeIdentityMock).not.toHaveBeenCalled()
+    expect(logLines).toContainEqual(
+      expect.stringContaining('reason=pane_has_pending_prereg')
+    )
+
+    const db = openDb(dbPath)
+    applySchema(db)
+    const agentRow = db
+      .prepare('SELECT tmux_pane_id FROM agents WHERE team=? AND name=?')
+      .get('default', 'new-gpt') as { tmux_pane_id: string | null } | undefined
+    expect(agentRow?.tmux_pane_id).toBeNull()
+    // Still pending, and still the launcher's: the refusal neither consumed
+    // the row nor took its key.
+    const left = db
+      .prepare('SELECT pane_id, xats_agent_id, identity_key FROM codex_pane_pre_registrations')
+      .all() as Array<{ pane_id: string; xats_agent_id: string; identity_key: string | null }>
+    expect(left).toEqual([
+      { pane_id: '%7', xats_agent_id: 'U_NOT_YET', identity_key: 'K_LAUNCH' },
+    ])
+    db.close()
+
+    await t.close()
+    await c.close()
+    await app.close()
+  })
 })

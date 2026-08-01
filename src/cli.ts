@@ -9,6 +9,7 @@ import { acquirePidFile } from './daemon/pid.js'
 import { selectPort } from './daemon/port.js'
 import { resolveLocalDeviceLabel } from './daemon/local-device.js'
 import { isLoopbackHost } from './daemon/network-origin.js'
+import { defaultPaneVisibleSync } from './mcp/auto-bind-codex-pane.js'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 
@@ -76,6 +77,11 @@ async function runDaemon(): Promise<void> {
     host: args.host,
     localDevice: args.localDevice,
     loopbackCompanion: args.loopbackCompanion,
+    // Supplied HERE and nowhere else: this is the only entry point that is a
+    // real daemon on a real host.  Everything that builds a server in-process
+    // (every test) leaves it unset and reports visibility as 'unknown', so a
+    // unit test can never probe the operator's tmux server as a side effect.
+    paneVisibleProbe: defaultPaneVisibleSync,
   })
   const companion = started.loopbackCompanion
   wireShutdown(started.app, args.pidPath, {
@@ -184,6 +190,22 @@ async function runPreRegisterCodexPane(): Promise<void> {
   const token = tokenExplicit ?? process.env.CROSS_AGENT_TEAMS_MCP_TOKEN
   const host = process.env.CROSS_AGENT_TEAMS_MCP_HOST ?? '127.0.0.1'
   const base = new URL(`http://${host}:${port}/mcp`)
+  // Reported on every outcome: with neither --port nor --token this resolves
+  // from the pid file and the inherited token, so an authenticated success can
+  // land on a daemon nobody intended and a refusal can come from one.  Host
+  // and port ONLY — never the token, its length, or a hash of it.
+  const endpoint = `${host}:${port}`
+  // Every exit past this point goes through these two, so "every outcome"
+  // stays true as branches are added.  An exit that formats its own envelope
+  // is how the destination went missing from exactly one error result.
+  const succeed = (obj: Record<string, unknown>): never => {
+    console.log(JSON.stringify({ ...obj, endpoint }))
+    process.exit(0)
+  }
+  const fail = (obj: Record<string, unknown>, code: number): never => {
+    console.error(JSON.stringify({ ...obj, endpoint }))
+    process.exit(code)
+  }
 
   const requestInit: RequestInit | undefined = token
     ? { headers: { Authorization: `Bearer ${token}` } }
@@ -206,8 +228,7 @@ async function runPreRegisterCodexPane(): Promise<void> {
     if (ttlRaw !== undefined) {
       const ttl = Number(ttlRaw)
       if (!Number.isInteger(ttl) || ttl <= 0) {
-        console.error('{"ok":false,"error":"invalid_ttl"}')
-        process.exit(2)
+        fail({ ok: false, error: 'invalid_ttl' }, 2)
       }
       args.ttl_seconds = ttl
     }
@@ -220,16 +241,11 @@ async function runPreRegisterCodexPane(): Promise<void> {
     let parsed: unknown
     try { parsed = JSON.parse(text) } catch { parsed = { raw: text } }
     const obj = (parsed ?? {}) as Record<string, unknown>
-    if (obj.ok === true) {
-      console.log(JSON.stringify(obj))
-      process.exit(0)
-    }
-    console.error(JSON.stringify(obj))
-    process.exit(1)
+    if (obj.ok === true) succeed(obj)
+    fail(obj, 1)
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error)
-    console.error(JSON.stringify({ ok: false, error: 'cli_failed', detail: msg }))
-    process.exit(1)
+    fail({ ok: false, error: 'cli_failed', detail: msg }, 1)
   } finally {
     try { await transport.close() } catch { /* best-effort */ }
     try { await client.close() } catch { /* best-effort */ }
