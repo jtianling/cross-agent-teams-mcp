@@ -144,6 +144,35 @@ describe('dispatchOpencodeServerPoke', () => {
     expect(calls).toHaveLength(0)
   })
 
+  it('passes recovery AbortSignal and closes an in-flight fetch', async () => {
+    const controller = new AbortController()
+    let receivedSignal: AbortSignal | null | undefined
+    let requestClosed = false
+    const fetchMock = ((_url: string, init?: RequestInit) => {
+      receivedSignal = init?.signal
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => {
+          requestClosed = true
+          reject(new Error('request aborted'))
+        }, { once: true })
+      })
+    }) as typeof fetch
+    const pending = dispatchOpencodeServerPoke(
+      {
+        delivery: DELIVERY,
+        content: 'recovery prompt',
+        signal: controller.signal,
+      },
+      { fetch: fetchMock, env: {} }
+    )
+    controller.abort()
+
+    expect(await pending).toMatchObject({ error: 'opencode_connect_failed' })
+    expect(receivedSignal).toBe(controller.signal)
+    expect(receivedSignal?.aborted).toBe(true)
+    expect(requestClosed).toBe(true)
+  })
+
   it('maps 404 response to opencode_inject_failed with status and body', async () => {
     const { fetch: fetchMock } = makeFetch({
       status: 404,

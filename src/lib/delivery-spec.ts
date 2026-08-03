@@ -21,6 +21,7 @@ export type DeliveryOpencodeServer = {
   session_id: string;
   base_url: string;
   auth_token_ref?: string;
+  runtime_generation?: number;
 };
 
 export type DeliveryKimiServer = {
@@ -110,6 +111,18 @@ export function parseDeliveryRow(row: DeliveryRow): DeliverySpec {
     if (typeof baseUrl !== 'string' || baseUrl.length === 0) {
       throw new Error('corrupt_delivery_payload');
     }
+    const hasRuntimeGeneration = Object.prototype.hasOwnProperty.call(
+      record,
+      'runtime_generation',
+    );
+    const runtimeGeneration = record.runtime_generation;
+    if (hasRuntimeGeneration && (
+      typeof runtimeGeneration !== 'number'
+      || !Number.isSafeInteger(runtimeGeneration)
+      || runtimeGeneration < 0
+    )) {
+      throw new Error('corrupt_delivery_payload');
+    }
     const hasAuthTokenRef = Object.prototype.hasOwnProperty.call(record, 'auth_token_ref');
     if (hasAuthTokenRef) {
       const authTokenRef = record.auth_token_ref;
@@ -121,9 +134,19 @@ export function parseDeliveryRow(row: DeliveryRow): DeliverySpec {
         session_id: sessionId,
         base_url: baseUrl,
         auth_token_ref: authTokenRef,
+        ...(hasRuntimeGeneration
+          ? { runtime_generation: runtimeGeneration as number }
+          : {}),
       };
     }
-    return { kind: 'opencode-server', session_id: sessionId, base_url: baseUrl };
+    return {
+      kind: 'opencode-server',
+      session_id: sessionId,
+      base_url: baseUrl,
+      ...(hasRuntimeGeneration
+        ? { runtime_generation: runtimeGeneration as number }
+        : {}),
+    };
   }
   if (kind === 'kimi-server') {
     const sessionId = record.session_id;
@@ -169,6 +192,7 @@ export type DeliveryValidationReason =
   | 'invalid_thread_id'
   | 'invalid_ws_url'
   | 'invalid_auth_token_ref'
+  | 'invalid_runtime_generation'
   | 'invalid_session_id'
   | 'invalid_base_url';
 
@@ -261,12 +285,27 @@ export function validateDeliveryForWrite(input: unknown): ValidateDeliveryResult
     if (authTokenRef === '') {
       return { error: 'invalid_delivery', reason: 'invalid_auth_token_ref' };
     }
+    const hasRuntimeGeneration = Object.prototype.hasOwnProperty.call(
+      record,
+      'runtime_generation',
+    );
+    const runtimeGeneration = record.runtime_generation;
+    if (hasRuntimeGeneration && (
+      typeof runtimeGeneration !== 'number'
+      || !Number.isSafeInteger(runtimeGeneration)
+      || runtimeGeneration < 0
+    )) {
+      return { error: 'invalid_delivery', reason: 'invalid_runtime_generation' };
+    }
 
     return {
       ok: {
         kind: 'opencode-server',
         session_id: sessionId,
         base_url: baseUrl,
+        ...(hasRuntimeGeneration
+          ? { runtime_generation: runtimeGeneration as number }
+          : {}),
         ...(authTokenRef === undefined ? {} : { auth_token_ref: authTokenRef }),
       },
     };

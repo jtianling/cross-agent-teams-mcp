@@ -6,6 +6,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { registerBusinessTools } from '../src/mcp/tools.js'
+import { AgentsRepo } from '../src/storage/agents-repo.js'
 import { openDb } from '../src/storage/db.js'
 import { applySchema } from '../src/storage/schema.js'
 
@@ -166,6 +167,170 @@ describe('reconnect opencode: credential recovery + Basic auth (integration)', (
     expect(authHeaders.length).toBeGreaterThanOrEqual(2)
     const expected = `Basic ${Buffer.from('opencode:integ-pw').toString('base64')}`
     for (const h of authHeaders) expect(h).toBe(expected)
+
+    await transport.close()
+    await client.close()
+    db.close()
+    await server.close()
+  })
+
+  it('preserves a committed runtime generation on legacy reconnect', async () => {
+    const seen: SeenCall[] = []
+    vi.stubGlobal('fetch', makeAuthedServerFetch(seen, [
+      { id: 'ses_runtime', time_updated: 1000 },
+    ]))
+    const { dir, db, server, client, transport } = await setup()
+    cleanups.push(dir)
+    const registered = new AgentsRepo(db).register({
+      agent_type: 'opencode',
+      name: 'runtime-aware',
+      team: 'default',
+      role: 'worker',
+      identity_key: 'runtime-key',
+      opencode_runtime_generation: 2,
+      delivery: {
+        kind: 'opencode-server',
+        base_url: BASE_URL,
+        session_id: 'ses_runtime',
+        runtime_generation: 2,
+      },
+    })
+    const before = db.prepare(
+      `SELECT register_generation, delivery_payload
+       FROM agents WHERE agent_id = ?`
+    ).get(registered.agent_id) as {
+      register_generation: number
+      delivery_payload: string
+    }
+
+    const response = await client.callTool({
+      name: 'reconnect',
+      arguments: { base_url: BASE_URL, session_id: 'ses_runtime' },
+    })
+    expect(await parseTool(response)).toMatchObject({
+      ok: true,
+      agent_id: registered.agent_id,
+      connection_bound: true,
+      runtime_generation: 2,
+    })
+    const after = db.prepare(
+      `SELECT register_generation, opencode_runtime_generation,
+              delivery_payload
+       FROM agents WHERE agent_id = ?`
+    ).get(registered.agent_id) as {
+      register_generation: number
+      opencode_runtime_generation: number
+      delivery_payload: string
+    }
+    expect(after).toEqual({
+      register_generation: before.register_generation,
+      opencode_runtime_generation: 2,
+      delivery_payload: before.delivery_payload,
+    })
+
+    await transport.close()
+    await client.close()
+    db.close()
+    await server.close()
+  })
+
+  it('accepts an effective-type legacy runtime with agent_type null', async () => {
+    const seen: SeenCall[] = []
+    vi.stubGlobal('fetch', makeAuthedServerFetch(seen, [
+      { id: 'ses_effective', time_updated: 1000 },
+    ]))
+    const { dir, db, server, client, transport } = await setup()
+    cleanups.push(dir)
+    const registered = new AgentsRepo(db).register({
+      agent_type: 'opencode',
+      name: 'effective-runtime',
+      team: 'default',
+      role: 'worker',
+      identity_key: 'effective-runtime-key',
+      opencode_runtime_generation: 2,
+      delivery: {
+        kind: 'opencode-server',
+        base_url: BASE_URL,
+        session_id: 'ses_effective',
+        runtime_generation: 2,
+      },
+    })
+    db.prepare(
+      `UPDATE agents SET agent_type = NULL WHERE agent_id = ?`
+    ).run(registered.agent_id)
+    const before = db.prepare(
+      `SELECT agent_type, register_generation,
+              opencode_runtime_generation, delivery_payload
+       FROM agents WHERE agent_id = ?`
+    ).get(registered.agent_id)
+
+    const response = await client.callTool({
+      name: 'reconnect',
+      arguments: { base_url: BASE_URL, session_id: 'ses_effective' },
+    })
+    expect(await parseTool(response)).toMatchObject({
+      ok: true,
+      agent_id: registered.agent_id,
+      connection_bound: true,
+      runtime_generation: 2,
+    })
+    const after = db.prepare(
+      `SELECT agent_type, register_generation,
+              opencode_runtime_generation, delivery_payload
+       FROM agents WHERE agent_id = ?`
+    ).get(registered.agent_id)
+    expect(after).toEqual(before)
+
+    await transport.close()
+    await client.close()
+    db.close()
+    await server.close()
+  })
+
+  it('fails closed when registration changes during legacy probe', async () => {
+    const { dir, db, server, client, transport } = await setup()
+    cleanups.push(dir)
+    const registered = new AgentsRepo(db).register({
+      agent_type: 'opencode',
+      name: 'runtime-race',
+      team: 'default',
+      role: 'worker',
+      identity_key: 'runtime-race-key',
+      opencode_runtime_generation: 2,
+      delivery: {
+        kind: 'opencode-server',
+        base_url: BASE_URL,
+        session_id: 'ses_runtime_race',
+        runtime_generation: 2,
+      },
+    })
+    let changed = false
+    vi.stubGlobal('fetch', (async (url: string) => {
+      if (url.endsWith('/global/health')) {
+        return new Response('{"healthy":true}', { status: 200 })
+      }
+      if (url.endsWith('/session')) {
+        db.prepare(
+          `UPDATE agents
+           SET register_generation = register_generation + 1
+           WHERE agent_id = ?`
+        ).run(registered.agent_id)
+        changed = true
+        return new Response(JSON.stringify([
+          { id: 'ses_runtime_race', time_updated: 1000 },
+        ]), { status: 200 })
+      }
+      return new Response(null, { status: 404 })
+    }) as typeof fetch)
+
+    expect(await parseTool(await client.callTool({
+      name: 'reconnect',
+      arguments: {
+        base_url: BASE_URL,
+        session_id: 'ses_runtime_race',
+      },
+    }))).toEqual({ error: 'opencode_runtime_coordinates_required' })
+    expect(changed).toBe(true)
 
     await transport.close()
     await client.close()

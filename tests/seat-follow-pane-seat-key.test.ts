@@ -44,7 +44,8 @@ function bindSeat(
 // branch logic, so neither layer alone reproduces it.
 function realDeps(
   db: ReturnType<typeof openDb>,
-  repo: AgentsRepo
+  repo: AgentsRepo,
+  isProcessAlive?: (pid: number) => boolean
 ): SeatFollowDeps {
   return {
     findCaller: agentId => {
@@ -68,6 +69,7 @@ function realDeps(
       })
       tx()
     },
+    isProcessAlive,
     log: vi.fn(),
   }
 }
@@ -350,6 +352,51 @@ describe('seat-follow seat identity is the pane, never the tty', () => {
     expect(deps.log).toHaveBeenCalledWith(
       expect.stringContaining('thread_mismatch')
     )
+    db.close()
+  })
+
+  it('does not move a generation-aware OpenCode key to a Codex seat', () => {
+    const { dir, db, repo } = freshRepo(); cleanups.push(dir)
+    const holder = repo.register({
+      agent_type: 'opencode',
+      name: 'OpenCode',
+      team: 'aoe',
+      identity_key: 'K-OPENCODE',
+      opencode_runtime_generation: 2,
+      delivery: {
+        kind: 'opencode-server',
+        base_url: 'http://127.0.0.1:18888',
+        session_id: 'ses_runtime',
+        runtime_generation: 2,
+      },
+    })
+    bindSeat(repo, holder.agent_id, {
+      pane: '%1', pid: DEAD_PID, tty: 'ttys026',
+    })
+    const caller = repo.register({
+      agent_type: 'codex', name: 'Codex', team: 'aoe',
+    })
+    bindSeat(repo, caller.agent_id, {
+      pane: '%1', pid: null, tty: 'ttys055',
+    })
+    const before = db.prepare(
+      `SELECT identity_key, agent_type, delivery_kind, delivery_payload,
+              opencode_runtime_generation, register_generation
+       FROM agents WHERE agent_id = ?`
+    ).get(holder.agent_id)
+
+    followSeatIdentityKey({
+      callerAgentId: caller.agent_id,
+      deps: realDeps(db, repo, () => false),
+    })
+
+    const after = db.prepare(
+      `SELECT identity_key, agent_type, delivery_kind, delivery_payload,
+              opencode_runtime_generation, register_generation
+       FROM agents WHERE agent_id = ?`
+    ).get(holder.agent_id)
+    expect(after).toEqual(before)
+    expect(keyOf(repo, caller.agent_id)).toBeNull()
     db.close()
   })
 })

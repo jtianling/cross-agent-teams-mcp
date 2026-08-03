@@ -5,6 +5,7 @@ import {
   AgentsRepo,
   sameIdentityRowSnapshot,
   type IdentityRowSnapshot,
+  type OpencodeRuntimeRow,
 } from '../storage/agents-repo.js'
 import { EventsOutbox } from '../storage/events-outbox.js'
 import {
@@ -30,6 +31,13 @@ import {
 } from './bind-runtime-identity.js'
 import { RegisterCodexSelfService } from './register-codex-self.js'
 import { RegisterOpencodeSelfService } from './register-opencode-self.js'
+import { dispatchOpencodeServerPoke } from './opencode-server-dispatch.js'
+import {
+  OPENCODE_RUNTIME_RECOVERY_PROTOCOL_VERSION,
+  OpencodeRuntimeRecoveryService,
+} from './opencode-runtime-recovery.js'
+import { canonicalOpencodeBaseUrl } from '../lib/opencode-url.js'
+import { resolveAgentType } from '../lib/agent-runtime.js'
 import {
   resolveCodexReconnect,
   resolveIdentityKeyReconnect,
@@ -93,6 +101,38 @@ const deliverySchema = z.object({
 }).passthrough()
 
 const agentTypeSchema = z.enum(['codex', 'claude-code', 'opencode', 'kimi-code', 'custom'])
+
+const runtimeGenerationSchema = z.number()
+  .int()
+  .positive()
+  .max(Number.MAX_SAFE_INTEGER)
+
+const recoveryProtocolVersionSchema = z.number()
+  .int()
+  .optional()
+
+const reserveOpencodeRuntimeSchema = z.object({
+  identity_key: z.string().min(1).refine(value => value.trim().length > 0),
+  runtime_generation: runtimeGenerationSchema,
+  protocol_version: recoveryProtocolVersionSchema,
+}).strict()
+
+const commitOpencodeRuntimeSchema = reserveOpencodeRuntimeSchema.extend({
+  base_url: z.string().url().refine(value => {
+    try {
+      canonicalOpencodeBaseUrl(value)
+      return true
+    } catch {
+      return false
+    }
+  }, {
+    message: 'base_url must be an http(s) URL without query, fragment, or userinfo',
+  }),
+  session_id: z.string().trim().min(1).refine(
+    value => value.startsWith('ses'),
+    { message: 'session_id must start with "ses"' }
+  ),
+})
 
 const detectTmuxPaneSchema = z.object({
   agent: z.enum(['codex', 'claude-code', 'opencode', 'custom']),
@@ -361,6 +401,9 @@ export function createAutoPokeImpl(
     if (err === 'kimi_pending_interaction') {
       return { ok: false, reason: 'kimi_pending_interaction' }
     }
+    if (err === 'runtime_recovering') {
+      return { ok: false, reason: 'runtime_recovering' }
+    }
     if (err === 'pane_reassigned') return { ok: false, reason: 'pane_reassigned' }
     if (err === 'tmux_unavailable') return { ok: false, reason: 'tmux_unavailable' }
     if (err === 'tmux_pane_not_set') return { ok: false, reason: 'no_pane' }
@@ -468,6 +511,18 @@ export function registerBusinessTools(
   const bindRuntimeIdentitySvc = new BindRuntimeIdentityService(db, log)
   const registerCodexSelfSvc = new RegisterCodexSelfService(registerSvc)
   const registerOpencodeSelfSvc = new RegisterOpencodeSelfService(registerSvc)
+  const opencodeRuntimeRecoverySvc = new OpencodeRuntimeRecoveryService(
+    agents,
+    {
+      localDevice: context?.localDevice ?? 'local',
+      probeExactSession: args => registerOpencodeSelfSvc.validateExactSession(
+        args.base_url,
+        args.session_id,
+        args.auth_token_ref
+      ),
+      sendRecoveryPrompt: args => dispatchOpencodeServerPoke(args),
+    }
+  )
   const unregisterSelfSvc = new UnregisterSelfService(db, agents)
 
   const autoPokeImpl = createAutoPokeImpl(db, agents, channelWakeFanout, context?.localDevice)
@@ -1010,6 +1065,7 @@ export function registerBusinessTools(
     auth_token_ref: z.string().min(1).optional(),
     base_url: z.string().min(1).refine(v => v.trim().length > 0, { message: 'base_url must not be empty' }).optional(),
     session_id: z.string().trim().min(1, { message: 'session_id must not be empty' }).optional(),
+    runtime_generation: runtimeGenerationSchema.optional(),
     identity_key: z.string().min(1).refine(v => v.trim().length > 0, {
       message: 'identity_key must not be empty',
     }).optional().describe(
@@ -1114,6 +1170,34 @@ export function registerBusinessTools(
           })
         }
       }
+      if (value.runtime_generation !== undefined) {
+        if (value.session_id === undefined) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['session_id'],
+            message: 'session_id is required with runtime_generation',
+          })
+        }
+        if (value.identity_key === undefined) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['identity_key'],
+            message: 'identity_key is required with runtime_generation',
+          })
+        }
+        if (value.base_url !== undefined) {
+          try {
+            canonicalOpencodeBaseUrl(value.base_url)
+          } catch {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              path: ['base_url'],
+              message: 'runtime recovery base_url cannot contain query, '
+                + 'fragment, or userinfo',
+            })
+          }
+        }
+      }
     }
     if (value.agent_type === 'kimi-code') {
       if (value.base_url === undefined || value.base_url.trim().length === 0) {
@@ -1164,6 +1248,13 @@ export function registerBusinessTools(
         code: z.ZodIssueCode.custom,
         path: ['agent_type'],
         message: 'agent_type=opencode or agent_type=kimi-code is required when session_id is provided',
+      })
+    }
+    if (value.runtime_generation !== undefined && value.agent_type !== 'opencode') {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['runtime_generation'],
+        message: 'runtime_generation is only allowed when agent_type="opencode"',
       })
     }
   })
@@ -1222,6 +1313,7 @@ export function registerBusinessTools(
       auth_token_ref?: string
       base_url?: string
       session_id?: string
+      runtime_generation?: number
       claude_ui_pid?: number
       identity_key?: string
       delivery?: { kind: string; [key: string]: unknown }
@@ -1263,6 +1355,7 @@ export function registerBusinessTools(
         project_dir: args.project_dir,
         base_url: args.base_url,
         session_id: args.session_id,
+        runtime_generation: args.runtime_generation,
         auth_token_ref: args.auth_token_ref,
         identity_key: args.identity_key,
       })
@@ -1573,6 +1666,41 @@ export function registerBusinessTools(
     }
   }
 
+  server.registerTool(
+    'reserve_opencode_runtime',
+    {
+      title: 'Reserve OpenCode runtime generation',
+      description: [
+        'LAUNCHER-ONLY control-plane tool.',
+        'Reserve a monotonically increasing OpenCode runtime generation before launch.',
+        'Callable without a registered agent connection.',
+        `protocol_version must equal ${OPENCODE_RUNTIME_RECOVERY_PROTOCOL_VERSION}.`,
+      ].join(' '),
+      inputSchema: reserveOpencodeRuntimeSchema,
+    },
+    async (args: z.infer<typeof reserveOpencodeRuntimeSchema>) => run(
+      async () => opencodeRuntimeRecoverySvc.reserve(args)
+    )
+  )
+
+  server.registerTool(
+    'commit_opencode_runtime',
+    {
+      title: 'Commit OpenCode runtime delivery',
+      description: [
+        'LAUNCHER-ONLY control-plane tool.',
+        'Commit an exact ready OpenCode server and session for a reserved generation.',
+        'The caller connection remains unbound; the exact OpenCode session '
+          + 'reconnects itself.',
+        `protocol_version must equal ${OPENCODE_RUNTIME_RECOVERY_PROTOCOL_VERSION}.`,
+      ].join(' '),
+      inputSchema: commitOpencodeRuntimeSchema,
+    },
+    async (args: z.infer<typeof commitOpencodeRuntimeSchema>) => run(
+      async () => opencodeRuntimeRecoverySvc.commit(args)
+    )
+  )
+
   // pre_register_codex_pane — callable by launchers before any agent row exists
   server.registerTool(
     'pre_register_codex_pane',
@@ -1679,6 +1807,7 @@ export function registerBusinessTools(
       auth_token_ref?: string
       base_url?: string
       session_id?: string
+      runtime_generation?: number
       claude_ui_pid?: number
       identity_key?: string
       delivery?: { kind: string; [key: string]: unknown }
@@ -1723,30 +1852,74 @@ export function registerBusinessTools(
     agent_type: z.enum(['opencode', 'kimi-code']).optional().describe(
       'Runtime discriminator for the base_url arm. REQUIRED as "kimi-code" for kimi recovery: without it a kimi reconnect on a registry with no matching rows is routed to the opencode probe and returns opencode-flavored errors instead of need_register. Optional for opencode.'
     ),
+    runtime_generation: runtimeGenerationSchema.optional(),
   }).strict()
 
   const reconnectArgsSchema = reconnectInputSchema.superRefine((value, ctx) => {
     const keyCount = Number(value.ui_pid !== undefined)
       + Number(value.thread_id !== undefined)
       + Number(value.base_url !== undefined)
-    // identity_key answers "which identity", the other three answer "which
-    // live runtime", so it does not join their exclusion group — it only
-    // relaxes the count to at-most-one.
-    if (value.identity_key === undefined ? keyCount !== 1 : keyCount > 1) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: value.identity_key === undefined
-          ? 'provide exactly one of ui_pid, thread_id, or base_url'
-          : 'identity_key combines with at most one of ui_pid or thread_id',
-      })
-    }
-    // The base_url arms resolve identity from a revalidated live session,
-    // which is a second identity lookup competing with the key.
-    if (value.identity_key !== undefined && value.base_url !== undefined) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: 'identity_key cannot be combined with base_url',
-      })
+    const keyBasedOpencode = value.identity_key !== undefined
+      && value.agent_type === 'opencode'
+    if (keyBasedOpencode) {
+      for (const [field, present] of [
+        ['base_url', value.base_url !== undefined],
+        ['session_id', value.session_id !== undefined],
+        ['runtime_generation', value.runtime_generation !== undefined],
+      ] as const) {
+        if (present) continue
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [field],
+          message: `${field} is required for identity-key OpenCode reconnect`,
+        })
+      }
+      if (
+        value.ui_pid !== undefined
+        || value.thread_id !== undefined
+        || value.ws_url !== undefined
+        || value.auth_token_ref !== undefined
+      ) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'identity-key OpenCode reconnect cannot mix other runtime arms',
+        })
+      }
+      if (value.base_url !== undefined) {
+        try {
+          canonicalOpencodeBaseUrl(value.base_url)
+        } catch {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['base_url'],
+            message: 'OpenCode recovery base_url cannot contain query, '
+              + 'fragment, or userinfo',
+          })
+        }
+      }
+    } else {
+      if (value.identity_key === undefined ? keyCount !== 1 : keyCount > 1) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: value.identity_key === undefined
+            ? 'provide exactly one of ui_pid, thread_id, or base_url'
+            : 'identity_key combines with at most one of ui_pid or thread_id',
+        })
+      }
+      if (value.identity_key !== undefined && value.base_url !== undefined) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'identity_key with base_url requires agent_type="opencode"',
+        })
+      }
+      if (value.runtime_generation !== undefined) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['runtime_generation'],
+          message: 'runtime_generation is only allowed for identity-key '
+            + 'OpenCode reconnect',
+        })
+      }
     }
     if (value.thread_id === undefined && value.ws_url !== undefined) {
       ctx.addIssue({
@@ -1936,6 +2109,10 @@ export function registerBusinessTools(
     )
     if (resolution.kind !== 'single') return unresolvedReconnect(resolution)
     const match = resolution.match
+    const stored = agents.findById(match.agent_id)
+    if (stored && resolveAgentType(stored) === 'opencode') {
+      return { error: 'opencode_runtime_coordinates_required' }
+    }
     if (args.ui_pid !== undefined) {
       return completeClaudeReconnect(match, args.ui_pid)
     }
@@ -1946,7 +2123,6 @@ export function registerBusinessTools(
         auth_token_ref: args.auth_token_ref,
       })
     }
-    const stored = agents.findById(match.agent_id)
     const res = await executeRegister({
       agent_type: stored?.agent_type ?? undefined,
       agent_type_name: stored?.agent_type_name ?? undefined,
@@ -1965,6 +2141,34 @@ export function registerBusinessTools(
       name: match.name,
       team: envelope.team,
       last_seen_at: match.last_seen_at,
+    }
+  }
+
+  async function executeIdentityKeyOpencodeReconnect(args: {
+    identity_key: string
+    base_url: string
+    session_id: string
+    runtime_generation: number
+  }): Promise<unknown> {
+    const validated = await opencodeRuntimeRecoverySvc.validateReconnect(args)
+    if (validated.ok !== true) return validated
+    const row = validated.row
+    const bound = bindExistingOpencodeConnection(row)
+    if ('error' in bound) return bound
+    opencodeRuntimeRecoverySvc.cancelPrompt(
+      row.agent_id,
+      args.runtime_generation
+    )
+    return {
+      ok: true,
+      agent_id: row.agent_id,
+      name: row.name,
+      team: row.team,
+      session_id: args.session_id,
+      base_url: canonicalOpencodeBaseUrl(args.base_url),
+      runtime_generation: args.runtime_generation,
+      connection_bound: true,
+      last_seen_at: row.last_seen_at,
     }
   }
 
@@ -2015,12 +2219,111 @@ export function registerBusinessTools(
     return undefined
   }
 
+  function bindExistingOpencodeConnection(
+    row: OpencodeRuntimeRow
+  ): { ok: true } | { error: string; detail?: string } {
+    const connectionId = getSessionId?.() ?? caller()
+    if (!connectionId) return { error: 'unknown_agent' }
+    if (!onRegisterSuccess) return { error: 'connection_binding_unavailable' }
+    try {
+      onRegisterSuccess(row.agent_id, row.team)
+    } catch (error) {
+      return {
+        error: 'connection_bind_failed',
+        detail: error instanceof Error ? error.message : String(error),
+      }
+    }
+    registerSvc.bindExistingConnection({
+      connection_id: connectionId,
+      agent_type: 'opencode',
+      delivery: row.delivery,
+      device: row.device,
+      team: row.team,
+      name: row.name,
+    })
+    return { ok: true }
+  }
+
+  function captureGenerationAwareOpencodeRows(args: {
+    base_url: string
+    session_id?: string
+    local_device: string
+  }): Map<string, OpencodeRuntimeRow | null> {
+    const matches = args.session_id === undefined
+      ? agents.findByOpencodeBaseUrl(args.base_url, args.local_device)
+      : agents.findByOpencodeSession(
+          args.base_url,
+          args.session_id,
+          args.local_device
+        )
+    const snapshots = new Map<string, OpencodeRuntimeRow | null>()
+    for (const match of matches) {
+      const stored = agents.findById(match.agent_id)
+      const deliveryGeneration = stored?.delivery.kind === 'opencode-server'
+        ? stored.delivery.runtime_generation ?? 0
+        : 0
+      if (
+        (stored?.opencode_runtime_generation ?? 0) === 0
+        && deliveryGeneration === 0
+      ) {
+        continue
+      }
+      const snapshot = stored?.identity_key
+        ? agents.findOpencodeRuntimeByIdentityKey(
+            stored.identity_key,
+            args.local_device
+          )
+        : undefined
+      snapshots.set(match.agent_id, snapshot ?? null)
+    }
+    return snapshots
+  }
+
+  function validateStableLegacyOpencodeRuntime(args: {
+    before: OpencodeRuntimeRow | null | undefined
+    current: OpencodeRuntimeRow | undefined
+    base_url: string
+    session_id: string
+  }): OpencodeRuntimeRow | undefined {
+    const before = args.before
+    const current = args.current
+    if (!before || !current) return undefined
+    if (
+      before.agent_id !== current.agent_id
+      || before.identity_key !== current.identity_key
+      || before.register_generation !== current.register_generation
+      || before.agent_type !== current.agent_type
+      || resolveAgentType(before) !== 'opencode'
+      || resolveAgentType(current) !== 'opencode'
+      || before.opencode_runtime_generation
+        !== current.opencode_runtime_generation
+      || before.delivery_kind !== current.delivery_kind
+      || before.delivery_payload !== current.delivery_payload
+      || current.delivery.kind !== 'opencode-server'
+      || before.delivery.kind !== 'opencode-server'
+      || current.opencode_runtime_generation <= 0
+      || (current.delivery.runtime_generation ?? 0)
+        !== current.opencode_runtime_generation
+      || canonicalOpencodeBaseUrl(current.delivery.base_url)
+        !== canonicalOpencodeBaseUrl(args.base_url)
+      || current.delivery.session_id !== args.session_id
+    ) {
+      return undefined
+    }
+    return current
+  }
+
   async function executeOpencodeReconnect(args: {
     base_url: string
     session_id?: string
     auth_token_ref?: string
   }): Promise<unknown> {
     const localDevice = context?.localDevice ?? 'local'
+    const runtimeSnapshots = captureGenerationAwareOpencodeRows({
+      base_url: args.base_url,
+      session_id: args.session_id,
+      local_device: localDevice,
+    })
     const recovered = recoverOpencodeAuth(
       args.base_url, args.session_id, args.auth_token_ref, localDevice
     )
@@ -2039,6 +2342,45 @@ export function registerBusinessTools(
     )
     if (resolution.kind !== 'single') return unresolvedReconnect(resolution)
     const match = resolution.match
+
+    const stored = agents.findById(match.agent_id)
+    const deliveryGeneration = stored?.delivery.kind === 'opencode-server'
+      ? stored.delivery.runtime_generation ?? 0
+      : 0
+    if (
+      runtimeSnapshots.has(match.agent_id)
+      || (stored?.opencode_runtime_generation ?? 0) > 0
+      || deliveryGeneration > 0
+    ) {
+      const current = stored?.identity_key
+        ? agents.findOpencodeRuntimeByIdentityKey(
+            stored.identity_key,
+            localDevice
+          )
+        : undefined
+      const stable = validateStableLegacyOpencodeRuntime({
+        before: runtimeSnapshots.get(match.agent_id),
+        current,
+        base_url: args.base_url,
+        session_id: sessionId,
+      })
+      if (!stable) {
+        return { error: 'opencode_runtime_coordinates_required' }
+      }
+      const bound = bindExistingOpencodeConnection(stable)
+      if ('error' in bound) return bound
+      return {
+        ok: true,
+        agent_id: stable.agent_id,
+        name: stable.name,
+        team: stable.team,
+        session_id: sessionId,
+        base_url: canonicalOpencodeBaseUrl(args.base_url),
+        runtime_generation: stable.opencode_runtime_generation,
+        connection_bound: true,
+        last_seen_at: stable.last_seen_at,
+      }
+    }
 
     const authTokenRef = args.auth_token_ref ?? readStoredOpencodeAuth(match.agent_id)
     const res = await executeRegister({
@@ -2154,10 +2496,19 @@ export function registerBusinessTools(
     base_url?: string
     session_id?: string
     agent_type?: 'opencode' | 'kimi-code'
+    runtime_generation?: number
   }): Promise<unknown> {
     // The key wins over any accompanying runtime lookup: after a restart the
     // new pid may already belong to an unrelated row.
     if (args.identity_key !== undefined) {
+      if (args.agent_type === 'opencode') {
+        return executeIdentityKeyOpencodeReconnect({
+          identity_key: args.identity_key,
+          base_url: args.base_url!,
+          session_id: args.session_id!,
+          runtime_generation: args.runtime_generation!,
+        })
+      }
       return executeIdentityKeyReconnect({
         identity_key: args.identity_key,
         ui_pid: args.ui_pid,
@@ -2231,6 +2582,7 @@ export function registerBusinessTools(
       base_url?: string
       session_id?: string
       agent_type?: 'opencode' | 'kimi-code'
+      runtime_generation?: number
     }) => {
       return run(async () => executeReconnect(reconnectArgsSchema.parse(args)))
     }

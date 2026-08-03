@@ -1,6 +1,8 @@
 import type Database from 'better-sqlite3'
 import type { ChannelWakeFanout } from '../daemon/channel-wake-fanout.js'
 import { CHANNEL_PROXY_ROLE } from './subscribe-channel-wake.js'
+import { AgentsRepo } from '../storage/agents-repo.js'
+import { isGenerationAwareOpencodeRow } from '../lib/agent-runtime.js'
 
 const LIVE_WINDOW_MS = 5 * 60 * 1000
 
@@ -22,7 +24,11 @@ export interface AutoBindSuccess {
 
 export interface AutoBindMiss {
   ok: false
-  reason: 'no_proxy_row' | 'proxy_payload_corrupt' | 'sink_not_live'
+  reason:
+    | 'no_proxy_row'
+    | 'proxy_payload_corrupt'
+    | 'sink_not_live'
+    | 'opencode_runtime_coordinates_required'
 }
 
 export type AutoBindResult = AutoBindSuccess | AutoBindMiss
@@ -50,10 +56,14 @@ interface ProxyRow {
  * existing delivery unchanged.
  */
 export class AutoBindChannelService {
+  private readonly repo: AgentsRepo
+
   constructor(
     private readonly db: Database.Database,
     private readonly fanout: ChannelWakeFanout
-  ) {}
+  ) {
+    this.repo = new AgentsRepo(db)
+  }
 
   lookup(input: LookupInput): LookupResult {
     return this.findLiveProxyCsid(input)
@@ -71,15 +81,22 @@ export class AutoBindChannelService {
     if (!found.ok) return found
     const csid = found.channel_session_id
     if (!this.fanout.has(csid)) return { ok: false, reason: 'sink_not_live' }
-    this.db
-      .prepare(
-        `UPDATE agents
-         SET delivery_kind = 'claude-channel',
-             delivery_payload = json_object('channel_session_id', ?)
-         WHERE agent_id = ?`
-      )
-      .run(csid, input.callerAgentId)
-    return { ok: true, channel_session_id: csid }
+    const tx = this.db.transaction((): AutoBindResult => {
+      const caller = this.repo.findById(input.callerAgentId)
+      if (!caller) return { ok: false, reason: 'no_proxy_row' }
+      if (isGenerationAwareOpencodeRow(caller)) {
+        return {
+          ok: false,
+          reason: 'opencode_runtime_coordinates_required',
+        }
+      }
+      this.repo.setDelivery(input.callerAgentId, {
+        kind: 'claude-channel',
+        channel_session_id: csid,
+      })
+      return { ok: true, channel_session_id: csid }
+    })
+    return tx()
   }
 
   private findLiveProxyCsid(input: LookupInput): LookupResult {

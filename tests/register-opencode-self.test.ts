@@ -52,13 +52,21 @@ describe('RegisterOpencodeSelfService', () => {
     cleanups.length = 0
   })
 
-  function setup(fetchMock: typeof fetch, env?: NodeJS.ProcessEnv) {
+  function setup(
+    fetchMock: typeof fetch,
+    env?: NodeJS.ProcessEnv,
+    requestTimeoutMs?: number
+  ) {
     const dir = tmp()
     cleanups.push(dir)
     const db = openDb(join(dir, 'data.db'))
     applySchema(db)
     const registerSvc = new RegisterAgentService(db)
-    const svc = new RegisterOpencodeSelfService(registerSvc, { fetch: fetchMock, env })
+    const svc = new RegisterOpencodeSelfService(registerSvc, {
+      fetch: fetchMock,
+      env,
+      requestTimeoutMs,
+    })
     return { db, svc }
   }
 
@@ -94,6 +102,190 @@ describe('RegisterOpencodeSelfService', () => {
     })
     expect(row.tmux_pane_id).toBeNull()
     expect(row.model).toBeNull()
+  })
+
+  it('atomically stores initial fence and delivery generation', async () => {
+    const fetchMock = makeFetch([
+      healthHandler,
+      (url) => url.endsWith('/session/ses_runtime')
+        ? { status: 200, body: '{"id":"ses_runtime"}' }
+        : null,
+    ])
+    const { db, svc } = setup(fetchMock)
+
+    const result = await svc.register({
+      connection_id: 'conn-runtime',
+      name: 'oc-runtime',
+      base_url: `${BASE_URL}/`,
+      session_id: 'ses_runtime',
+      identity_key: 'runtime-key',
+      runtime_generation: 8,
+    })
+
+    expect(result).toMatchObject({
+      session_id: 'ses_runtime',
+      base_url: BASE_URL,
+    })
+    const row = db.prepare(
+      `SELECT opencode_runtime_generation, delivery_payload
+       FROM agents WHERE identity_key = 'runtime-key'`
+    ).get() as {
+      opencode_runtime_generation: number
+      delivery_payload: string
+    }
+    expect(row.opencode_runtime_generation).toBe(8)
+    expect(JSON.parse(row.delivery_payload)).toMatchObject({
+      session_id: 'ses_runtime',
+      base_url: BASE_URL,
+      runtime_generation: 8,
+    })
+  })
+
+  it('allows generation-bearing register only for fresh initialization', async () => {
+    const fetchMock = makeFetch([
+      healthHandler,
+      (url) => url.includes('/session/ses_')
+        ? { status: 200, body: JSON.stringify({ id: url.split('/').at(-1) }) }
+        : null,
+    ])
+    const cases = [
+      {
+        generation: 1,
+        session_id: 'ses_lower',
+        error: 'stale_runtime_generation',
+      },
+      {
+        generation: 3,
+        session_id: 'ses_higher',
+        error: 'runtime_generation_not_reserved',
+      },
+      {
+        generation: 2,
+        session_id: 'ses_conflict',
+        error: 'runtime_generation_conflict',
+      },
+    ] as const
+
+    for (const item of cases) {
+      const { db, svc } = setup(fetchMock)
+      expect(await svc.register({
+        connection_id: `conn-initial-${item.error}`,
+        name: `oc-${item.error}`,
+        base_url: BASE_URL,
+        session_id: 'ses_current',
+        identity_key: `key-${item.error}`,
+        runtime_generation: 2,
+      })).toMatchObject({ agent_id: expect.any(String) })
+
+      expect(await svc.register({
+        connection_id: `conn-retry-${item.error}`,
+        name: `oc-${item.error}`,
+        base_url: BASE_URL,
+        session_id: item.session_id,
+        identity_key: `key-${item.error}`,
+        runtime_generation: item.generation,
+      })).toMatchObject({ error: item.error })
+
+      const row = db.prepare(
+        `SELECT opencode_runtime_generation, delivery_payload
+         FROM agents WHERE identity_key = ?`
+      ).get(`key-${item.error}`) as {
+        opencode_runtime_generation: number
+        delivery_payload: string
+      }
+      expect(row.opencode_runtime_generation).toBe(2)
+      expect(JSON.parse(row.delivery_payload)).toMatchObject({
+        session_id: 'ses_current',
+        runtime_generation: 2,
+      })
+      db.close()
+    }
+  })
+
+  it('keeps an exact generation-bearing register idempotent', async () => {
+    const fetchMock = makeFetch([
+      healthHandler,
+      (url) => url.endsWith('/session/ses_same')
+        ? { status: 200, body: '{"id":"ses_same"}' }
+        : null,
+    ])
+    const { db, svc } = setup(fetchMock)
+    const input = {
+      name: 'oc-same',
+      base_url: BASE_URL,
+      session_id: 'ses_same',
+      identity_key: 'same-key',
+      runtime_generation: 2,
+    }
+    const first = await svc.register({ connection_id: 'conn-1', ...input })
+    const second = await svc.register({ connection_id: 'conn-2', ...input })
+    expect(second).toMatchObject({
+      agent_id: (first as { agent_id: string }).agent_id,
+    })
+    const row = db.prepare(
+      `SELECT opencode_runtime_generation, register_generation
+       FROM agents WHERE identity_key = 'same-key'`
+    ).get() as {
+      opencode_runtime_generation: number
+      register_generation: number
+    }
+    expect(row).toEqual({
+      opencode_runtime_generation: 2,
+      register_generation: 1,
+    })
+  })
+
+  it('rejects a canonical delivery pair already owned by another row', async () => {
+    const fetchMock = makeFetch([
+      healthHandler,
+      (url) => url.endsWith('/session/ses_shared')
+        ? { status: 200, body: '{"id":"ses_shared"}' }
+        : null,
+    ])
+    const { db, svc } = setup(fetchMock)
+    expect(await svc.register({
+      connection_id: 'conn-owner',
+      name: 'owner',
+      base_url: 'http://LOCALHOST:80/',
+      session_id: 'ses_shared',
+      identity_key: 'owner-key',
+      runtime_generation: 1,
+    })).toMatchObject({ agent_id: expect.any(String) })
+    expect(await svc.register({
+      connection_id: 'conn-other',
+      name: 'other',
+      base_url: 'http://localhost',
+      session_id: 'ses_shared',
+      identity_key: 'other-key',
+      runtime_generation: 1,
+    })).toMatchObject({ error: 'runtime_delivery_conflict' })
+    const count = db.prepare(
+      `SELECT COUNT(*) AS n FROM agents WHERE delivery_kind = 'opencode-server'`
+    ).get() as { n: number }
+    expect(count.n).toBe(1)
+  })
+
+  it('bounds a never-resolving exact session probe without registering', async () => {
+    const fetchMock = (async (input: string) => {
+      if (input.endsWith('/global/health')) {
+        return new Response('{"healthy":true}', { status: 200 })
+      }
+      return new Promise<Response>(() => {})
+    }) as typeof fetch
+    const { db, svc } = setup(fetchMock, undefined, 10)
+
+    expect(await svc.register({
+      connection_id: 'conn-timeout',
+      name: 'oc-timeout',
+      base_url: BASE_URL,
+      session_id: 'ses_timeout',
+      identity_key: 'timeout-key',
+      runtime_generation: 1,
+    })).toMatchObject({ error: 'opencode_unreachable' })
+    const count = db.prepare(
+      `SELECT COUNT(*) AS n FROM agents WHERE identity_key = 'timeout-key'`
+    ).get() as { n: number }
+    expect(count.n).toBe(0)
   })
 
   it('auto-resolves session_id by max time_updated when session_id omitted', async () => {
@@ -357,6 +549,45 @@ describe('RegisterOpencodeSelfService', () => {
     })
     const row = db.prepare('SELECT agent_id FROM agents WHERE name=?').get('oc-1')
     expect(row).toBeUndefined()
+  })
+
+  it('validates only the exact session endpoint for runtime recovery', async () => {
+    const seenUrls: string[] = []
+    const fetchMock = makeFetch([
+      healthHandler,
+      (url) => {
+        seenUrls.push(url)
+        return url.endsWith('/session/ses_exact')
+          ? { status: 200, body: '{"id":"ses_exact"}' }
+          : null
+      },
+    ])
+    const { svc } = setup(fetchMock)
+
+    expect(await svc.validateExactSession(
+      BASE_URL,
+      'ses_exact'
+    )).toEqual({ ok: true })
+    expect(seenUrls).toContain(`${BASE_URL}/session/ses_exact`)
+    expect(seenUrls).not.toContain(`${BASE_URL}/session`)
+  })
+
+  it('rejects a mismatched exact session response', async () => {
+    const fetchMock = makeFetch([
+      healthHandler,
+      (url) => url.endsWith('/session/ses_exact')
+        ? { status: 200, body: '{"id":"ses_other"}' }
+        : null,
+    ])
+    const { svc } = setup(fetchMock)
+
+    expect(await svc.validateExactSession(
+      BASE_URL,
+      'ses_exact'
+    )).toEqual({
+      error: 'session_not_found',
+      detail: { base_url: BASE_URL, session_id: 'ses_exact' },
+    })
   })
 
   it('returns missing_auth_token when auth_token_ref points at an unset env var', async () => {

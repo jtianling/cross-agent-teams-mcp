@@ -4,6 +4,7 @@ import type {
 } from './register-agent.js'
 import { describeError } from './codex-appserver-rpc.js'
 import { opencodeAuthHeaders, type OpencodeAuthResult } from './opencode-auth.js'
+import { canonicalOpencodeBaseUrl } from '../lib/opencode-url.js'
 
 type FetchLike = typeof globalThis.fetch
 
@@ -19,6 +20,7 @@ export interface RegisterOpencodeSelfInput {
   session_id?: string
   auth_token_ref?: string
   identity_key?: string
+  runtime_generation?: number
 }
 
 export type RegisterOpencodeSelfResult =
@@ -37,6 +39,12 @@ export type RegisterOpencodeSelfResult =
   | { error: 'invalid_device_label' }
   | { error: 'invalid_name_label' }
   | { error: 'invalid_team_label' }
+  | { error: 'agent_type_conflict' }
+  | { error: 'stale_runtime_generation' }
+  | { error: 'runtime_generation_not_reserved' }
+  | { error: 'runtime_generation_conflict' }
+  | { error: 'runtime_delivery_conflict'; conflicting_agent_id: string }
+  | { error: 'opencode_runtime_coordinates_required' }
   | { error: 'opencode_unreachable'; detail: { base_url: string; cause: string } }
   | { error: 'no_active_session'; detail: { base_url: string } }
   | { error: 'session_not_found'; detail: { base_url: string; session_id: string } }
@@ -50,9 +58,16 @@ export type ResolveOpencodeSessionResult =
   | { error: 'session_not_found'; detail: { base_url: string; session_id: string } }
   | { error: 'missing_auth_token'; detail: { ref: string } }
 
+export type ValidateExactOpencodeSessionResult =
+  | { ok: true }
+  | { error: 'opencode_unreachable'; detail: { base_url: string; cause: string } }
+  | { error: 'session_not_found'; detail: { base_url: string; session_id: string } }
+  | { error: 'missing_auth_token'; detail: { ref: string } }
+
 export interface RegisterOpencodeSelfDeps {
   env?: NodeJS.ProcessEnv
   fetch?: FetchLike
+  requestTimeoutMs?: number
 }
 
 interface OpencodeSessionEntry {
@@ -78,6 +93,8 @@ function normalizeBaseUrl(baseUrl: string): string {
   return baseUrl.replace(/\/+$/, '')
 }
 
+const DEFAULT_OPENCODE_REQUEST_TIMEOUT_MS = 10_000
+
 export class RegisterOpencodeSelfService {
   constructor(
     private readonly registerSvc: RegisterAgentService,
@@ -88,15 +105,39 @@ export class RegisterOpencodeSelfService {
     input: RegisterOpencodeSelfInput
   ): Promise<RegisterOpencodeSelfResult> {
     const explicitSessionId = trimToUndefined(input.session_id)
-    // Both explicit and auto-resolved session_ids go through the server so a
-    // stale/explicit id is rejected (session_not_found) before any DB write.
-    const resolved = await this.resolveSessionId(
-      input.base_url,
-      input.auth_token_ref,
-      explicitSessionId
-    )
-    if ('error' in resolved) return resolved
-    const sessionId = resolved.session_id
+    if (
+      input.runtime_generation !== undefined
+      && (
+        !Number.isSafeInteger(input.runtime_generation)
+        || input.runtime_generation <= 0
+      )
+    ) {
+      return { error: 'invalid_delivery', reason: 'invalid_runtime_generation' }
+    }
+    if (input.runtime_generation !== undefined && explicitSessionId === undefined) {
+      return { error: 'invalid_delivery', reason: 'invalid_session_id' }
+    }
+    const baseUrl = input.runtime_generation === undefined
+      ? input.base_url
+      : canonicalOpencodeBaseUrl(input.base_url)
+    let sessionId: string
+    if (input.runtime_generation !== undefined) {
+      const exact = await this.validateExactSession(
+        baseUrl,
+        explicitSessionId!,
+        input.auth_token_ref
+      )
+      if ('error' in exact) return exact
+      sessionId = explicitSessionId!
+    } else {
+      const resolved = await this.resolveSessionId(
+        baseUrl,
+        input.auth_token_ref,
+        explicitSessionId
+      )
+      if ('error' in resolved) return resolved
+      sessionId = resolved.session_id
+    }
 
     const result = this.registerSvc.register({
       connection_id: input.connection_id,
@@ -108,10 +149,14 @@ export class RegisterOpencodeSelfService {
       team: input.team,
       project_dir: input.project_dir,
       identity_key: input.identity_key,
+      opencode_runtime_generation: input.runtime_generation,
       delivery: {
         kind: 'opencode-server',
         session_id: sessionId,
-        base_url: input.base_url,
+        base_url: baseUrl,
+        ...(input.runtime_generation === undefined
+          ? {}
+          : { runtime_generation: input.runtime_generation }),
         ...(input.auth_token_ref === undefined
           ? {}
           : { auth_token_ref: input.auth_token_ref }),
@@ -128,7 +173,7 @@ export class RegisterOpencodeSelfService {
     return {
       ...publicResult,
       session_id: sessionId,
-      base_url: input.base_url,
+      base_url: baseUrl,
     }
   }
 
@@ -145,14 +190,21 @@ export class RegisterOpencodeSelfService {
     const auth = this.authHeaders(auth_token_ref)
     if ('error' in auth) return auth
     try {
-      const healthRes = await fetchImpl(`${baseUrl}/global/health`, {
-        method: 'GET',
-        headers: auth.headers,
-      })
+      const healthRes = await this.fetchWithTimeout(
+        fetchImpl,
+        `${baseUrl}/global/health`,
+        {
+          method: 'GET',
+          headers: auth.headers,
+        }
+      )
       if (healthRes.ok) return { ok: true }
       return {
         error: 'opencode_unreachable',
-        detail: { base_url: baseUrlRaw, cause: `health check HTTP ${healthRes.status}` },
+        detail: {
+          base_url: baseUrlRaw,
+          cause: `health check HTTP ${healthRes.status}`,
+        },
       }
     } catch (error) {
       return {
@@ -203,9 +255,137 @@ export class RegisterOpencodeSelfService {
     return { session_id: candidates[0].id }
   }
 
+  async validateExactSession(
+    baseUrlRaw: string,
+    sessionId: string,
+    auth_token_ref?: string
+  ): Promise<ValidateExactOpencodeSessionResult> {
+    return this.withExactSessionTimeout(
+      this.validateExactSessionUnbounded(
+        baseUrlRaw,
+        sessionId,
+        auth_token_ref
+      ),
+      baseUrlRaw
+    )
+  }
+
+  private async validateExactSessionUnbounded(
+    baseUrlRaw: string,
+    sessionId: string,
+    auth_token_ref?: string
+  ): Promise<ValidateExactOpencodeSessionResult> {
+    const health = await this.healthCheck(baseUrlRaw, auth_token_ref)
+    if ('error' in health) return health
+
+    const fetchImpl = this.deps.fetch ?? globalThis.fetch
+    const baseUrl = normalizeBaseUrl(baseUrlRaw)
+    const auth = this.authHeaders(auth_token_ref)
+    if ('error' in auth) return auth
+    let response: Response
+    try {
+      response = await this.fetchWithTimeout(
+        fetchImpl,
+        `${baseUrl}/session/${encodeURIComponent(sessionId)}`,
+        { method: 'GET', headers: auth.headers }
+      )
+    } catch (error) {
+      return {
+        error: 'opencode_unreachable',
+        detail: { base_url: baseUrlRaw, cause: describeError(error) },
+      }
+    }
+    if (response.status === 404) {
+      return {
+        error: 'session_not_found',
+        detail: { base_url: baseUrlRaw, session_id: sessionId },
+      }
+    }
+    if (!response.ok) {
+      return {
+        error: 'opencode_unreachable',
+        detail: {
+          base_url: baseUrlRaw,
+          cause: `exact session HTTP ${response.status}`,
+        },
+      }
+    }
+    let body: unknown
+    try {
+      body = await response.json()
+    } catch (error) {
+      return {
+        error: 'opencode_unreachable',
+        detail: { base_url: baseUrlRaw, cause: describeError(error) },
+      }
+    }
+    const record = body && typeof body === 'object'
+      ? body as Record<string, unknown>
+      : undefined
+    const data = record?.data && typeof record.data === 'object'
+      ? record.data as Record<string, unknown>
+      : undefined
+    const returnedId = record?.id ?? data?.id
+    if (returnedId !== sessionId) {
+      return {
+        error: 'session_not_found',
+        detail: { base_url: baseUrlRaw, session_id: sessionId },
+      }
+    }
+    return { ok: true }
+  }
+
   private authHeaders(auth_token_ref?: string): OpencodeAuthResult {
     const env = this.deps.env ?? process.env
     return opencodeAuthHeaders(auth_token_ref, env)
+  }
+
+  private async fetchWithTimeout(
+    fetchImpl: FetchLike,
+    input: string,
+    init: RequestInit
+  ): Promise<Response> {
+    const timeoutMs = this.deps.requestTimeoutMs
+      ?? DEFAULT_OPENCODE_REQUEST_TIMEOUT_MS
+    const controller = new AbortController()
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        controller.abort()
+        reject(new Error('opencode_request_timeout'))
+      }, timeoutMs)
+    })
+    try {
+      return await Promise.race([
+        fetchImpl(input, { ...init, signal: controller.signal }),
+        timeout,
+      ])
+    } finally {
+      if (timer !== undefined) clearTimeout(timer)
+    }
+  }
+
+  private async withExactSessionTimeout(
+    operation: Promise<ValidateExactOpencodeSessionResult>,
+    baseUrlRaw: string
+  ): Promise<ValidateExactOpencodeSessionResult> {
+    const timeoutMs = this.deps.requestTimeoutMs
+      ?? DEFAULT_OPENCODE_REQUEST_TIMEOUT_MS
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const timeout = new Promise<ValidateExactOpencodeSessionResult>(resolve => {
+      timer = setTimeout(() => resolve({
+        error: 'opencode_unreachable',
+        detail: {
+          base_url: baseUrlRaw,
+          cause: 'exact session probe timed out',
+        },
+      }), timeoutMs)
+    })
+    try {
+      return await Promise.race([operation, timeout])
+    } finally {
+      if (timer !== undefined) clearTimeout(timer)
+    }
   }
 
   private async listSessions(
@@ -222,10 +402,14 @@ export class RegisterOpencodeSelfService {
     if ('error' in auth) return auth
     let res: Response
     try {
-      res = await fetchImpl(`${baseUrl}/session`, {
-        method: 'GET',
-        headers: auth.headers,
-      })
+      res = await this.fetchWithTimeout(
+        fetchImpl,
+        `${baseUrl}/session`,
+        {
+          method: 'GET',
+          headers: auth.headers,
+        }
+      )
     } catch (error) {
       return {
         error: 'opencode_unreachable',

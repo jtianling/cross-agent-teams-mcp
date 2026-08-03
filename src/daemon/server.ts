@@ -12,6 +12,9 @@ import { clearAllRetries } from '../mcp/poke-retry.js'
 import { clearAllKimiRetries } from '../mcp/kimi-poke-retry.js'
 import { clearAllCodexRecoverySchedules } from '../mcp/codex-recovery-poke.js'
 import { clearAllCodexSeedingSchedules } from '../mcp/codex-seeding-poke.js'
+import {
+  clearAllOpencodeRecoveryPromptSchedules,
+} from '../mcp/opencode-runtime-recovery.js'
 import { resolveLocalDeviceLabel } from './local-device.js'
 import { bindHostCoversIpv4Loopback, classifyPeerAddress, type SessionOriginInfo } from './network-origin.js'
 
@@ -131,6 +134,7 @@ export async function buildServer(opts: ServerOpts): Promise<FastifyInstance> {
     // goes away.
     clearAllCodexRecoverySchedules({ reason: 'daemon_shutdown', log: opts.mcpLog })
     clearAllCodexSeedingSchedules({ reason: 'daemon_shutdown', log: opts.mcpLog })
+    clearAllOpencodeRecoveryPromptSchedules()
     fanout.stopAll()
     db.close()
   })

@@ -180,6 +180,108 @@ describe('RegisterAgentService', () => {
     expect(r2.agent_id).not.toBe(r1.agent_id)
   })
 
+  it('moves one connection ledger entry when it binds another identity', () => {
+    const closes: string[] = []
+    const { svc } = setup({
+      closeSessionByConnectionId: connectionId => {
+        closes.push(connectionId)
+        return true
+      },
+    })
+    svc.register({ connection_id: 'conn-1', name: 'alice' })
+    svc.bindExistingConnection({
+      connection_id: 'conn-1',
+      agent_type: 'opencode',
+      delivery: {
+        kind: 'opencode-server',
+        base_url: 'http://127.0.0.1:3000',
+        session_id: 'ses_bob',
+        runtime_generation: 1,
+      },
+      device: 'local',
+      team: 'default',
+      name: 'bob',
+    })
+
+    svc.register({ connection_id: 'conn-2', name: 'alice' })
+    expect(closes).toEqual([])
+  })
+
+  it('rejects no-generation overwrite of a runtime-aware OpenCode row', () => {
+    const { db, svc } = setup()
+    const initial = svc.register({
+      connection_id: 'conn-1',
+      agent_type: 'opencode',
+      name: 'open',
+      identity_key: 'open-key',
+      opencode_runtime_generation: 2,
+      delivery: {
+        kind: 'opencode-server',
+        base_url: 'http://127.0.0.1:3000',
+        session_id: 'ses_current',
+        runtime_generation: 2,
+      },
+    })
+    if ('error' in initial) throw new Error('unexpected initial error')
+    const before = db.prepare(
+      `SELECT register_generation, delivery_payload
+       FROM agents WHERE agent_id = ?`
+    ).get(initial.agent_id)
+
+    expect(svc.register({
+      connection_id: 'conn-2',
+      agent_type: 'opencode',
+      name: 'open',
+      identity_key: 'open-key',
+      delivery: {
+        kind: 'opencode-server',
+        base_url: 'http://127.0.0.1:3000',
+        session_id: 'ses_current',
+      },
+    })).toEqual({ error: 'opencode_runtime_coordinates_required' })
+    expect(db.prepare(
+      `SELECT register_generation, delivery_payload
+       FROM agents WHERE agent_id = ?`
+    ).get(initial.agent_id)).toEqual(before)
+  })
+
+  it('rejects no-generation key migration from a runtime-aware row', () => {
+    const { db, svc } = setup()
+    const initial = svc.register({
+      connection_id: 'conn-1',
+      agent_type: 'opencode',
+      name: 'open',
+      identity_key: 'open-key',
+      opencode_runtime_generation: 2,
+      delivery: {
+        kind: 'opencode-server',
+        base_url: 'http://127.0.0.1:3000',
+        session_id: 'ses_current',
+        runtime_generation: 2,
+      },
+    })
+    if ('error' in initial) throw new Error('unexpected initial error')
+
+    expect(svc.register({
+      connection_id: 'conn-2',
+      agent_type: 'opencode',
+      name: 'renamed',
+      identity_key: 'open-key',
+      delivery: {
+        kind: 'opencode-server',
+        base_url: 'http://127.0.0.1:3000',
+        session_id: 'ses_current',
+      },
+    })).toEqual({ error: 'opencode_runtime_coordinates_required' })
+    expect(db.prepare(
+      `SELECT agent_id, name, identity_key FROM agents ORDER BY name`
+    ).all()).toEqual([{
+      agent_id: initial.agent_id,
+      name: 'open',
+      identity_key: 'open-key',
+    }])
+  })
+
   it('derives team from project_dir when team is omitted', () => {
     const { svc, db } = setup()
     const result = svc.register({

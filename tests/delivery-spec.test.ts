@@ -245,6 +245,12 @@ describe('parseDeliveryRow read-side validation (harden-delivery-read-path)', ()
       base_url: 'http://127.0.0.1:18888',
     });
     expect(Object.prototype.hasOwnProperty.call(spec, 'auth_token_ref')).toBe(false);
+    expect(
+      Object.prototype.hasOwnProperty.call(spec, 'runtime_generation'),
+    ).toBe(false);
+    if (spec.kind === 'opencode-server') {
+      expect(spec.runtime_generation ?? 0).toBe(0);
+    }
   });
 
   it('does not leak extra payload fields through the spread for claude-channel', () => {

@@ -12,6 +12,10 @@ import { isLoopbackHost } from './daemon/network-origin.js'
 import { defaultPaneVisibleSync } from './mcp/auto-bind-codex-pane.js'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
+import {
+  OPENCODE_RUNTIME_RECOVERY_PROTOCOL_VERSION,
+} from './mcp/opencode-runtime-recovery.js'
+import { canonicalOpencodeBaseUrl } from './lib/opencode-url.js'
 
 function parseArg(name: string, def?: string): string | undefined {
   const i = process.argv.indexOf(name)
@@ -109,6 +113,7 @@ function resolveDaemonPort(explicit: string | undefined): number | undefined {
 }
 
 const IDENTITY_KEY_ENV_DEFAULT = 'XATS_IDENTITY_KEY'
+const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/
 
 // The key must never appear on any argv (process-visible), so the flag names
 // an environment variable instead of carrying the value. A following token
@@ -252,6 +257,243 @@ async function runPreRegisterCodexPane(): Promise<void> {
   }
 }
 
+const RESERVE_OPENCODE_RUNTIME_FLAGS = new Set([
+  '--identity-key-env',
+  '--runtime-generation',
+  '--pid-file',
+  '--port',
+  '--token',
+])
+
+const COMMIT_OPENCODE_RUNTIME_FLAGS = new Set([
+  ...RESERVE_OPENCODE_RUNTIME_FLAGS,
+  '--base-url',
+  '--session-id',
+])
+
+function failLocalRuntimeCli(
+  error: string,
+  detail: string
+): never {
+  console.error(JSON.stringify({ ok: false, error, detail }))
+  process.exit(2)
+}
+
+function runtimeFlagValue(
+  argv: readonly string[],
+  name: string
+): string | undefined {
+  const index = argv.indexOf(name)
+  if (index < 0) return undefined
+  const value = argv[index + 1]
+  if (value === undefined || value.startsWith('--')) {
+    failLocalRuntimeCli('invalid_arguments', `${name} requires a value`)
+  }
+  return value
+}
+
+function rejectUnknownRuntimeFlags(
+  argv: readonly string[],
+  allowed: Set<string>
+): void {
+  const unknown = argv
+    .slice(3)
+    .filter(value => value.startsWith('--') && !allowed.has(value))
+  if (unknown.length === 0) return
+  failLocalRuntimeCli(
+    'invalid_arguments',
+    `unknown flag(s): ${unknown.join(', ')}`
+  )
+}
+
+function redactRuntimeText(value: string, identityKey: string): string {
+  const escapedKey = JSON.stringify(identityKey).slice(1, -1)
+  const redacted = value.split(identityKey).join('[REDACTED]')
+  return escapedKey === identityKey
+    ? redacted
+    : redacted.split(escapedKey).join('[REDACTED]')
+}
+
+function redactRuntimeValue(value: unknown, identityKey: string): unknown {
+  if (typeof value === 'string') {
+    return redactRuntimeText(value, identityKey)
+  }
+  if (Array.isArray(value)) {
+    return value.map(item => redactRuntimeValue(item, identityKey))
+  }
+  if (value === null || typeof value !== 'object') return value
+  return Object.fromEntries(
+    Object.entries(value).map(([key, item]) => [
+      redactRuntimeText(key, identityKey),
+      redactRuntimeValue(item, identityKey),
+    ])
+  )
+}
+
+export function safeRuntimeJson(
+  value: Record<string, unknown>,
+  identityKey: string
+): string {
+  return JSON.stringify(redactRuntimeValue(value, identityKey))
+}
+
+function runtimeOutcomeJson(
+  value: Record<string, unknown>,
+  identityKey: string,
+  endpoint: string
+): string {
+  const safe = redactRuntimeValue(value, identityKey) as Record<string, unknown>
+  return JSON.stringify({ ...safe, endpoint })
+}
+
+export async function runOpencodeRuntimeControl(
+  command: 'reserve' | 'commit',
+  protocolVersion = OPENCODE_RUNTIME_RECOVERY_PROTOCOL_VERSION
+): Promise<number> {
+  const allowed = command === 'reserve'
+    ? RESERVE_OPENCODE_RUNTIME_FLAGS
+    : COMMIT_OPENCODE_RUNTIME_FLAGS
+  rejectUnknownRuntimeFlags(process.argv, allowed)
+
+  const identityKeyEnv = runtimeFlagValue(
+    process.argv,
+    '--identity-key-env'
+  ) ?? IDENTITY_KEY_ENV_DEFAULT
+  if (!ENV_NAME_RE.test(identityKeyEnv)) {
+    failLocalRuntimeCli(
+      'invalid_arguments',
+      '--identity-key-env must name a valid environment variable'
+    )
+  }
+  const identityKey = process.env[identityKeyEnv]
+  if (identityKey === undefined || identityKey.trim().length === 0) {
+    failLocalRuntimeCli(
+      'invalid_arguments',
+      `identity_key env ${identityKeyEnv} is missing or empty`
+    )
+  }
+
+  const generationRaw = runtimeFlagValue(
+    process.argv,
+    '--runtime-generation'
+  )
+  if (generationRaw === undefined) {
+    failLocalRuntimeCli(
+      'invalid_arguments',
+      '--runtime-generation is required'
+    )
+  }
+  const runtimeGeneration = Number(generationRaw)
+  if (
+    !Number.isSafeInteger(runtimeGeneration)
+    || runtimeGeneration <= 0
+  ) {
+    failLocalRuntimeCli(
+      'invalid_arguments',
+      '--runtime-generation must be a positive safe integer'
+    )
+  }
+
+  let baseUrl: string | undefined
+  let sessionId: string | undefined
+  if (command === 'commit') {
+    const baseUrlRaw = runtimeFlagValue(process.argv, '--base-url')
+    sessionId = runtimeFlagValue(process.argv, '--session-id')
+    if (baseUrlRaw === undefined || sessionId === undefined) {
+      failLocalRuntimeCli(
+        'invalid_arguments',
+        '--base-url and --session-id are required for commit'
+      )
+    }
+    try {
+      baseUrl = canonicalOpencodeBaseUrl(baseUrlRaw)
+    } catch {
+      failLocalRuntimeCli(
+        'invalid_arguments',
+        '--base-url must be an http(s) URL without query, fragment, or userinfo'
+      )
+    }
+    if (!sessionId.startsWith('ses')) {
+      failLocalRuntimeCli(
+        'invalid_arguments',
+        '--session-id must start with "ses"'
+      )
+    }
+  }
+
+  const portExplicit = runtimeFlagValue(process.argv, '--port')
+  const tokenExplicit = runtimeFlagValue(process.argv, '--token')
+  const port = resolveDaemonPort(portExplicit)
+  if (!port) {
+    console.error(JSON.stringify({
+      ok: false,
+      error: 'daemon_port_unresolved',
+      detail: 'pass --port or start the daemon so the pid file is present',
+    }))
+    process.exit(1)
+  }
+
+  const host = process.env.CROSS_AGENT_TEAMS_MCP_HOST ?? '127.0.0.1'
+  const endpoint = `${host}:${port}`
+  const token = tokenExplicit ?? process.env.CROSS_AGENT_TEAMS_MCP_TOKEN
+  const succeed = (value: Record<string, unknown>): number => {
+    console.log(runtimeOutcomeJson(value, identityKey, endpoint))
+    return 0
+  }
+  const fail = (value: Record<string, unknown>): number => {
+    console.error(runtimeOutcomeJson(value, identityKey, endpoint))
+    return 1
+  }
+  const requestInit: RequestInit | undefined = token
+    ? { headers: { Authorization: `Bearer ${token}` } }
+    : undefined
+  const transport = new StreamableHTTPClientTransport(
+    new URL(`http://${host}:${port}/mcp`),
+    { requestInit }
+  )
+  const client = new Client({
+    name: 'cross-agent-teams-mcp-cli',
+    version: '0.8.3',
+  })
+
+  try {
+    await client.connect(transport)
+    const arguments_: Record<string, unknown> = {
+      identity_key: identityKey,
+      runtime_generation: runtimeGeneration,
+      protocol_version: protocolVersion,
+      ...(command === 'commit'
+        ? { base_url: baseUrl, session_id: sessionId }
+        : {}),
+    }
+    const response = await client.callTool({
+      name: command === 'reserve'
+        ? 'reserve_opencode_runtime'
+        : 'commit_opencode_runtime',
+      arguments: arguments_,
+    })
+    const content = (
+      response as { content?: Array<{ text?: string }> }
+    ).content
+    const text = content?.[0]?.text ?? ''
+    let parsed: Record<string, unknown>
+    try {
+      parsed = JSON.parse(text) as Record<string, unknown>
+    } catch {
+      parsed = { ok: false, error: 'invalid_daemon_response' }
+    }
+    if (parsed.ok === true) return succeed(parsed)
+    return fail(parsed)
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    return fail({ ok: false, error: 'cli_failed', detail })
+  } finally {
+    try { await transport.terminateSession() } catch { /* best-effort */ }
+    try { await client.close() } catch { /* best-effort */ }
+    try { await transport.close() } catch { /* best-effort */ }
+  }
+}
+
 async function main(): Promise<void> {
   const cmd = process.argv[2]
   if (cmd === 'daemon') {
@@ -262,7 +504,19 @@ async function main(): Promise<void> {
     await runPreRegisterCodexPane()
     return
   }
-  console.error('usage: cross-agent-teams-mcp <daemon|pre-register-codex-pane> [options]')
+  if (cmd === 'reserve-opencode-runtime') {
+    process.exitCode = await runOpencodeRuntimeControl('reserve')
+    return
+  }
+  if (cmd === 'commit-opencode-runtime') {
+    process.exitCode = await runOpencodeRuntimeControl('commit')
+    return
+  }
+  console.error(
+    'usage: cross-agent-teams-mcp '
+      + '<daemon|pre-register-codex-pane|reserve-opencode-runtime|'
+      + 'commit-opencode-runtime> [options]'
+  )
   process.exit(2)
 }
 

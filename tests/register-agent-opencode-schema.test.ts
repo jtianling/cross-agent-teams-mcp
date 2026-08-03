@@ -117,4 +117,39 @@ describe('register_agent({agent_type:"opencode"}) schema rejection', () => {
     expect(isError).toBe(true)
     expect(text).toMatch(/agent_type=opencode/i)
   })
+
+  it('rejects runtime_generation without exact session_id', async () => {
+    const { isError, text } = await callRegister({
+      agent_type: 'opencode',
+      name: 'oc-1',
+      base_url: 'http://127.0.0.1:18888',
+      identity_key: 'key',
+      runtime_generation: 1,
+    })
+    expect(isError).toBe(true)
+    expect(text).toMatch(/session_id/i)
+  })
+
+  it('rejects runtime_generation without identity_key', async () => {
+    const { isError, text } = await callRegister({
+      agent_type: 'opencode',
+      name: 'oc-1',
+      base_url: 'http://127.0.0.1:18888',
+      session_id: 'ses_runtime',
+      runtime_generation: 1,
+    })
+    expect(isError).toBe(true)
+    expect(text).toMatch(/identity_key/i)
+  })
+
+  it('rejects runtime_generation on non-OpenCode registration', async () => {
+    const { isError, text } = await callRegister({
+      agent_type: 'custom',
+      agent_type_name: 'cursor',
+      name: 'custom-1',
+      runtime_generation: 1,
+    })
+    expect(isError).toBe(true)
+    expect(text).toMatch(/runtime_generation/i)
+  })
 })

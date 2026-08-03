@@ -35,6 +35,7 @@ export async function dispatchOpencodeServerPoke(
   input: {
     delivery: DeliveryOpencodeServer
     content: string
+    signal?: AbortSignal
   },
   deps: OpencodeServerDispatchDeps = {}
 ): Promise<OpencodeServerDispatchResult> {
@@ -60,6 +61,7 @@ export async function dispatchOpencodeServerPoke(
       method: 'POST',
       headers,
       body,
+      signal: input.signal,
     })
   } catch (error) {
     return {

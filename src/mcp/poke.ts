@@ -93,6 +93,7 @@ interface TargetRow {
   team: string
   tmux_pane_id: string | null
   runtime_ui_pid: number | null
+  opencode_runtime_generation: number
   delivery_kind: string
   delivery_payload: string | null
 }
@@ -272,6 +273,7 @@ export async function poke(deps: PokeDeps, input: PokeInput): Promise<PokeResult
          team,
          tmux_pane_id,
          runtime_ui_pid,
+         opencode_runtime_generation,
          delivery_kind,
          delivery_payload
        FROM agents
@@ -302,6 +304,7 @@ export async function poke(deps: PokeDeps, input: PokeInput): Promise<PokeResult
     delivery,
     tmux_pane_id: target.tmux_pane_id,
     runtime_ui_pid: target.runtime_ui_pid,
+    opencode_runtime_generation: target.opencode_runtime_generation,
   }
   const verify = createPaneHostVerifier(deps)
   const confirmOwn = ({ row, paneId }: { row: DispatchTargetRow; paneId: string }): boolean =>

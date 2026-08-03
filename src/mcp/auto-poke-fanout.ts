@@ -13,6 +13,7 @@ export type AutoPokeSkipReason =
   | 'self'
   | 'kimi_session_busy'
   | 'kimi_pending_interaction'
+  | 'runtime_recovering'
   | 'pane_reassigned'
 
 export interface AutoPokeArgs {

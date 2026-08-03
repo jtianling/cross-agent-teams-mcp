@@ -2,6 +2,7 @@ import type { ChannelWakeFanout } from '../daemon/channel-wake-fanout.js'
 import { sendChannelWake } from '../daemon/channel-wake-send.js'
 import type { AgentType } from '../lib/agent-type.js'
 import type { DeliverySpec } from '../lib/delivery-spec.js'
+import { resolveAgentType } from '../lib/agent-runtime.js'
 import {
   dispatchCodexAppserverPoke,
   type CodexAppserverDispatchResult,
@@ -54,6 +55,7 @@ export interface TargetRow {
   delivery: DeliverySpec
   tmux_pane_id: string | null
   runtime_ui_pid: number | null
+  opencode_runtime_generation?: number
 }
 
 export interface DispatchInput {
@@ -111,14 +113,7 @@ export async function dispatchPoke(
 
 // Exported so the poke-side codex carrier gate keys off the same effective
 // type this dispatcher routes by (legacy rows may have agent_type=NULL).
-export function resolveAgentType(target: TargetRow): AgentType | null {
-  if (target.agent_type) return target.agent_type
-  if (target.delivery.kind === 'claude-channel') return 'claude-code'
-  if (target.delivery.kind === 'codex-appserver') return 'codex'
-  if (target.delivery.kind === 'opencode-server') return 'opencode'
-  if (target.delivery.kind === 'kimi-server') return 'kimi-code'
-  return null
-}
+export { resolveAgentType } from '../lib/agent-runtime.js'
 
 async function dispatchTmux(
   deps: DispatchDeps,
@@ -232,6 +227,14 @@ async function dispatchOpencode(
   input: DispatchInput
 ): Promise<DispatchResult> {
   if (target.delivery.kind === 'opencode-server') {
+    const fence = target.opencode_runtime_generation ?? 0
+    const deliveryGeneration = target.delivery.runtime_generation ?? 0
+    if (fence > deliveryGeneration) {
+      return {
+        error: 'runtime_recovering',
+        transport_used: 'opencode-server',
+      }
+    }
     const result = await (deps.opencodeServerDispatch ?? dispatchOpencodeServerPoke)({
       delivery: target.delivery,
       content: input.content,

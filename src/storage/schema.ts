@@ -36,7 +36,8 @@ const DDL = [
     delivery_payload TEXT,
     remote_addr TEXT,
     identity_key TEXT,
-    register_generation INTEGER NOT NULL DEFAULT 0
+    register_generation INTEGER NOT NULL DEFAULT 0,
+    opencode_runtime_generation INTEGER NOT NULL DEFAULT 0
   )`,
   `CREATE UNIQUE INDEX IF NOT EXISTS agents_identity_idx ON agents(device, team, name)`,
   `CREATE TABLE IF NOT EXISTS messages (
@@ -256,6 +257,27 @@ function migrateAgentsRegisterGenerationColumn(db: Database.Database): void {
   )
 }
 
+function migrateAgentsOpencodeRuntimeGenerationColumn(
+  db: Database.Database
+): void {
+  const tableExists = db
+    .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='agents'`)
+    .get() as { name: string } | undefined
+  if (!tableExists) return
+  const cols = db.pragma('table_info(agents)') as Array<{ name: string }>
+  if (!cols.some(c => c.name === 'opencode_runtime_generation')) {
+    db.exec(
+      `ALTER TABLE agents ADD COLUMN opencode_runtime_generation `
+        + `INTEGER NOT NULL DEFAULT 0`
+    )
+  }
+  db.exec(
+    `UPDATE agents
+     SET opencode_runtime_generation = 0
+     WHERE opencode_runtime_generation IS NULL`
+  )
+}
+
 // Pane-takeover memory: the per-device pane-exclusivity clear records the pane
 // it takes away, so seat-follow's dead-holder branch can ask "is the pane this
 // row lost the pane the caller now holds?" instead of comparing a recycled tty.
@@ -325,6 +347,7 @@ export function applySchema(
   migrateAgentsDeviceColumns(db, opts.localDevice ?? 'local')
   migrateAgentsIdentityKeyColumn(db)
   migrateAgentsRegisterGenerationColumn(db)
+  migrateAgentsOpencodeRuntimeGenerationColumn(db)
   migrateAgentsPrevPaneColumn(db)
   migrateCodexPreRegIdentityKeyColumn(db)
   migrateMessagesNeedReplyColumn(db)

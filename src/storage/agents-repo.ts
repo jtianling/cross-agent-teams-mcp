@@ -8,7 +8,9 @@ import {
 } from '../lib/delivery-spec.js'
 import type { AgentType } from '../lib/agent-type.js'
 import { canonicalKimiBaseUrl } from '../lib/kimi-url.js'
+import { tryCanonicalOpencodeBaseUrl } from '../lib/opencode-url.js'
 import { isAlive } from '../daemon/pid.js'
+import { isGenerationAwareOpencodeRow } from '../lib/agent-runtime.js'
 
 export interface RegisterInput {
   agent_type?: AgentType
@@ -24,6 +26,7 @@ export interface RegisterInput {
   runtime_ui_pid?: number
   remote_addr?: string | null
   identity_key?: string
+  opencode_runtime_generation?: number
 }
 
 export interface AgentRow {
@@ -40,7 +43,17 @@ export interface AgentRow {
   delivery: DeliverySpec
   channel_session_id: string | null
   identity_key: string | null
+  opencode_runtime_generation?: number
   last_seen_at: string
+}
+
+export interface OpencodeRuntimeRow extends AgentRow {
+  opencode_runtime_generation: number
+  delivery_kind: string
+  delivery_payload: string | null
+  registered_at: string
+  last_processed_event_id: number
+  register_generation: number
 }
 
 export interface AgentListRow extends AgentRow {
@@ -129,6 +142,7 @@ type DbAgentRow = {
   tmux_pane_id: string | null
   runtime_ui_pid: number | null
   identity_key: string | null
+  opencode_runtime_generation: number | null
   last_seen_at: string
 } & DeliveryRow
 
@@ -165,6 +179,7 @@ function toAgentRow(row: DbAgentRow): AgentRow {
     channel_session_id:
       delivery.kind === 'claude-channel' ? delivery.channel_session_id : null,
     identity_key: row.identity_key,
+    opencode_runtime_generation: row.opencode_runtime_generation ?? 0,
     last_seen_at: row.last_seen_at,
   }
 }
@@ -175,6 +190,16 @@ export class AgentsRepo {
     // references without losing `this` binding. (Tests in particular extract
     // `repo.list` to a local for type-cast purposes.)
     this.list = this.list.bind(this)
+  }
+
+  private runGuardedLegacyWrite(agent_id: string, write: () => void): void {
+    const tx = this.db.transaction(() => {
+      if (isGenerationAwareOpencodeRow(this.findById(agent_id))) {
+        throw new Error('opencode_runtime_coordinates_required')
+      }
+      write()
+    })
+    tx()
   }
 
   findByIdentity(args: { device: string; team: string; name: string }): { agent_id: string } | undefined {
@@ -236,16 +261,136 @@ export class AgentsRepo {
     ).all(localDevice, identity_key) as IdentityKeyMatch[]
   }
 
+  findOpencodeRuntimeByIdentityKey(
+    identity_key: string,
+    localDevice: string
+  ): OpencodeRuntimeRow | undefined {
+    const row = this.db.prepare(
+      `SELECT agent_id, agent_type, agent_type_name, device, team, role, name,
+              model, tmux_pane_id, runtime_ui_pid, delivery_kind,
+              delivery_payload, identity_key,
+              COALESCE(opencode_runtime_generation, 0)
+                AS opencode_runtime_generation,
+              last_seen_at, registered_at, last_processed_event_id,
+              register_generation
+       FROM agents
+       WHERE device = ?
+         AND role != '__channel_proxy__'
+         AND identity_key = ?`
+    ).get(localDevice, identity_key) as (
+      DbAgentRow & {
+        registered_at: string
+        last_processed_event_id: number
+        register_generation: number
+      }
+    ) | undefined
+    if (!row) return undefined
+    return {
+      ...toAgentRow(row),
+      opencode_runtime_generation: row.opencode_runtime_generation ?? 0,
+      delivery_kind: row.delivery_kind,
+      delivery_payload: row.delivery_payload,
+      registered_at: row.registered_at,
+      last_processed_event_id: row.last_processed_event_id,
+      register_generation: row.register_generation,
+    }
+  }
+
+  compareAndSetOpencodeRuntimeGeneration(args: {
+    agent_id: string
+    device: string
+    identity_key: string
+    expected_generation: number
+    expected_register_generation: number
+    runtime_generation: number
+  }): { changes: number } {
+    const result = this.db.prepare(
+      `UPDATE agents
+       SET opencode_runtime_generation = ?
+       WHERE agent_id = ?
+         AND device = ?
+         AND identity_key = ?
+         AND COALESCE(opencode_runtime_generation, 0) = ?
+         AND register_generation = ?
+         AND (
+           agent_type = 'opencode'
+           OR (agent_type IS NULL AND delivery_kind = 'opencode-server')
+         )`
+    ).run(
+      args.runtime_generation,
+      args.agent_id,
+      args.device,
+      args.identity_key,
+      args.expected_generation,
+      args.expected_register_generation
+    )
+    return { changes: result.changes }
+  }
+
+  compareAndSetOpencodeDelivery(args: {
+    agent_id: string
+    device: string
+    identity_key: string
+    expected_generation: number
+    expected_register_generation: number
+    expected_delivery_kind: string
+    expected_delivery_payload: string | null
+    delivery: Extract<DeliverySpec, { kind: 'opencode-server' }>
+  }): { changes: number; pair_conflict_agent_id?: string } {
+    const serialized = serializeDelivery(args.delivery)
+    const tx = this.db.transaction(() => {
+      const collision = this.findByOpencodeSession(
+        args.delivery.base_url,
+        args.delivery.session_id,
+        args.device
+      ).find(row => row.agent_id !== args.agent_id)
+      if (collision) {
+        return { changes: 0, pair_conflict_agent_id: collision.agent_id }
+      }
+      const result = this.db.prepare(
+        `UPDATE agents
+         SET delivery_kind = ?, delivery_payload = ?
+         WHERE agent_id = ?
+           AND device = ?
+           AND identity_key = ?
+           AND COALESCE(opencode_runtime_generation, 0) = ?
+           AND register_generation = ?
+           AND (
+             agent_type = 'opencode'
+             OR (agent_type IS NULL AND delivery_kind = 'opencode-server')
+           )
+           AND delivery_kind = ?
+           AND delivery_payload IS ?`
+      ).run(
+        serialized.delivery_kind,
+        serialized.delivery_payload,
+        args.agent_id,
+        args.device,
+        args.identity_key,
+        args.expected_generation,
+        args.expected_register_generation,
+        args.expected_delivery_kind,
+        args.expected_delivery_payload
+      )
+      return { changes: result.changes }
+    })
+    return tx()
+  }
+
   clearIdentityKey(agent_id: string): void {
-    this.db.prepare(
-      `UPDATE agents SET identity_key = NULL WHERE agent_id = ?`
-    ).run(agent_id)
+    this.runGuardedLegacyWrite(agent_id, () => {
+      this.db.prepare(
+        `UPDATE agents SET identity_key = NULL WHERE agent_id = ?`
+      ).run(agent_id)
+    })
   }
 
   bindIdentityKey(agent_id: string, identity_key: string): void {
-    this.db.prepare(
-      `UPDATE agents SET identity_key = ? WHERE agent_id = ?`
-    ).run(identity_key, agent_id)
+    this.runGuardedLegacyWrite(agent_id, () => {
+      this.db.prepare(
+        `UPDATE agents SET identity_key = ? WHERE agent_id = ?`
+      ).run(identity_key, agent_id)
+    })
   }
 
   /**
@@ -343,31 +488,32 @@ export class AgentsRepo {
     ).all(localDevice, thread_id) as CodexThreadMatch[]
   }
 
-  /**
-   * Precise opencode reverse lookup. base_url matched trailing-slash-tolerant;
-   * scoped to localDevice (remote servers unreachable here).
-   */
+  /** Precise canonical OpenCode reverse lookup on the local device. */
   findByOpencodeSession(
     base_url: string,
     session_id: string,
     localDevice: string
   ): OpencodeSessionMatch[] {
-    return this.db.prepare(
-      `SELECT agent_id, device, team, name, role, last_seen_at
+    const canonicalBaseUrl = tryCanonicalOpencodeBaseUrl(base_url)
+    if (canonicalBaseUrl === undefined) return []
+    const rows = this.db.prepare(
+      `SELECT agent_id, device, team, name, role, last_seen_at,
+              json_extract(delivery_payload, '$.base_url') AS base_url
        FROM agents
        WHERE device = ?
          AND role != '__channel_proxy__'
          AND delivery_kind = 'opencode-server'
-         AND CASE
-           WHEN json_valid(delivery_payload)
-           THEN json_extract(delivery_payload, '$.session_id')
-         END = ?
-         AND CASE
-           WHEN json_valid(delivery_payload)
-           THEN rtrim(json_extract(delivery_payload, '$.base_url'), '/')
-         END = rtrim(?, '/')
+         AND json_valid(delivery_payload)
+         AND json_extract(delivery_payload, '$.session_id') = ?
        ORDER BY last_seen_at DESC`
-    ).all(localDevice, session_id, base_url) as OpencodeSessionMatch[]
+    ).all(localDevice, session_id) as Array<
+      OpencodeSessionMatch & { base_url: unknown }
+    >
+    return rows.flatMap(({ base_url: storedBaseUrl, ...row }) =>
+      tryCanonicalOpencodeBaseUrl(storedBaseUrl) === canonicalBaseUrl
+        ? [row]
+        : []
+    )
   }
 
   /**
@@ -378,18 +524,25 @@ export class AgentsRepo {
     base_url: string,
     localDevice: string
   ): OpencodeSessionMatch[] {
-    return this.db.prepare(
-      `SELECT agent_id, device, team, name, role, last_seen_at
+    const canonicalBaseUrl = tryCanonicalOpencodeBaseUrl(base_url)
+    if (canonicalBaseUrl === undefined) return []
+    const rows = this.db.prepare(
+      `SELECT agent_id, device, team, name, role, last_seen_at,
+              json_extract(delivery_payload, '$.base_url') AS base_url
        FROM agents
        WHERE device = ?
          AND role != '__channel_proxy__'
          AND delivery_kind = 'opencode-server'
-         AND CASE
-           WHEN json_valid(delivery_payload)
-           THEN rtrim(json_extract(delivery_payload, '$.base_url'), '/')
-         END = rtrim(?, '/')
+         AND json_valid(delivery_payload)
        ORDER BY last_seen_at DESC`
-    ).all(localDevice, base_url) as OpencodeSessionMatch[]
+    ).all(localDevice) as Array<
+      OpencodeSessionMatch & { base_url: unknown }
+    >
+    return rows.flatMap(({ base_url: storedBaseUrl, ...row }) =>
+      tryCanonicalOpencodeBaseUrl(storedBaseUrl) === canonicalBaseUrl
+        ? [row]
+        : []
+    )
   }
 
   /**
@@ -555,9 +708,10 @@ export class AgentsRepo {
       `INSERT INTO agents (
          agent_id, agent_type, agent_type_name, device, team, role, name, model, registered_at, last_seen_at,
          tmux_pane_id, claude_ui_pid, runtime_ui_pid, delivery_kind, delivery_payload, remote_addr,
-         identity_key, register_generation, last_processed_event_id
+         identity_key, register_generation, opencode_runtime_generation,
+         last_processed_event_id
        )
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?,
                COALESCE((SELECT MAX(event_id) FROM events), 0))
        ON CONFLICT (device, team, name) DO UPDATE SET
          agent_type = excluded.agent_type,
@@ -580,6 +734,10 @@ export class AgentsRepo {
          remote_addr = excluded.remote_addr,
          identity_key = COALESCE(excluded.identity_key, identity_key),
          register_generation = register_generation + 1,
+         opencode_runtime_generation = CASE
+           WHEN ? THEN COALESCE(opencode_runtime_generation, 0)
+           ELSE excluded.opencode_runtime_generation
+         END,
          delivery_kind = CASE
            WHEN ? THEN delivery_kind
            ELSE excluded.delivery_kind
@@ -606,6 +764,8 @@ export class AgentsRepo {
       serialized.delivery_payload,
       input.remote_addr ?? null,
       input.identity_key ?? null,
+      input.opencode_runtime_generation ?? 0,
+      input.opencode_runtime_generation === undefined ? 1 : 0,
       preserveExistingDelivery,
       preserveExistingDelivery,
     )
@@ -649,26 +809,34 @@ export class AgentsRepo {
            delivery_kind = 'none'
            OR (delivery_kind = 'claude-channel'
                AND json_extract(delivery_payload,'$.channel_session_id') != ?)
+         )
+         AND NOT (
+           agent_type = 'opencode'
+           AND COALESCE(opencode_runtime_generation, 0) > 0
          )`
     ).run(args.new_csid, args.proxy_device, args.claude_ui_pid, args.team, args.new_csid)
   }
 
   setDelivery(agent_id: string, spec: DeliverySpec): void {
     const serialized = serializeDelivery(spec)
-    this.db.prepare(
-      `UPDATE agents
-       SET delivery_kind=?, delivery_payload=?
-       WHERE agent_id=?`
-    ).run(serialized.delivery_kind, serialized.delivery_payload, agent_id)
+    this.runGuardedLegacyWrite(agent_id, () => {
+      this.db.prepare(
+        `UPDATE agents
+         SET delivery_kind=?, delivery_payload=?
+         WHERE agent_id=?`
+      ).run(serialized.delivery_kind, serialized.delivery_payload, agent_id)
+    })
   }
 
   setAgentType(agent_id: string, agent_type: AgentType, agent_type_name?: string | null): void {
-    this.db.prepare(
-      `UPDATE agents
-       SET agent_type=?,
-           agent_type_name=?
-       WHERE agent_id=?`
-    ).run(agent_type, agent_type_name ?? null, agent_id)
+    this.runGuardedLegacyWrite(agent_id, () => {
+      this.db.prepare(
+        `UPDATE agents
+         SET agent_type=?,
+             agent_type_name=?
+         WHERE agent_id=?`
+      ).run(agent_type, agent_type_name ?? null, agent_id)
+    })
   }
 
   /**
@@ -780,6 +948,7 @@ export class AgentsRepo {
          delivery_kind,
          delivery_payload,
          identity_key,
+         opencode_runtime_generation,
          last_seen_at
        FROM agents
        WHERE team=?`
@@ -832,6 +1001,7 @@ export class AgentsRepo {
          delivery_kind,
          delivery_payload,
          identity_key,
+         opencode_runtime_generation,
          last_seen_at
        FROM agents
        WHERE agent_id=?`

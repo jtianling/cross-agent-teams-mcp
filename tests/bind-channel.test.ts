@@ -142,4 +142,41 @@ describe('bind_channel service (self-binding)', () => {
     expect(row.channel_session_id).toBe('legacy-csid')
     db.close()
   })
+
+  it('does not replace a generation-aware OpenCode runtime', () => {
+    const { dir, db, repo, fanout, svc } = setup(); cleanups.push(dir)
+    const caller = repo.register({
+      agent_type: 'opencode',
+      model: 'gpt',
+      role: 'worker',
+      name: 'runtime-aware',
+      identity_key: 'runtime-key',
+      opencode_runtime_generation: 2,
+      delivery: {
+        kind: 'opencode-server',
+        base_url: 'http://127.0.0.1:18888',
+        session_id: 'ses_runtime',
+        runtime_generation: 2,
+        auth_token_ref: 'OPENCODE_SERVER_PASSWORD',
+      },
+    })
+    fanout.attach('csid-new', () => { /* sink */ }, 'proxy-session-1')
+    const before = db.prepare(
+      `SELECT agent_type, delivery_kind, delivery_payload, identity_key,
+              opencode_runtime_generation, register_generation
+       FROM agents WHERE agent_id = ?`
+    ).get(caller.agent_id)
+
+    expect(svc.bind({
+      callerAgentId: caller.agent_id,
+      channel_session_id: 'csid-new',
+    })).toEqual({ error: 'opencode_runtime_coordinates_required' })
+    const after = db.prepare(
+      `SELECT agent_type, delivery_kind, delivery_payload, identity_key,
+              opencode_runtime_generation, register_generation
+       FROM agents WHERE agent_id = ?`
+    ).get(caller.agent_id)
+    expect(after).toEqual(before)
+    db.close()
+  })
 })

@@ -131,4 +131,59 @@ describe('AgentsRepo delivery integration', () => {
     expect(rows.find(row => row.agent_id === bob.agent_id)?.channel_session_id).toBeNull()
     db.close()
   })
+
+  it('guards low-level type and delivery writers for runtime-aware OpenCode', () => {
+    const { db, repo } = setup()
+    const runtime = repo.register({
+      agent_type: 'opencode',
+      name: 'runtime-aware',
+      identity_key: 'runtime-key',
+      opencode_runtime_generation: 2,
+      delivery: {
+        kind: 'opencode-server',
+        base_url: 'http://127.0.0.1:18888',
+        session_id: 'ses_runtime',
+        runtime_generation: 2,
+      },
+    })
+    const before = repo.getById(runtime.agent_id)
+
+    expect(() => repo.setAgentType(runtime.agent_id, 'claude-code'))
+      .toThrow('opencode_runtime_coordinates_required')
+    expect(() => repo.setDelivery(runtime.agent_id, {
+      kind: 'claude-channel',
+      channel_session_id: 'csid-new',
+    })).toThrow('opencode_runtime_coordinates_required')
+    expect(repo.getById(runtime.agent_id)).toEqual(before)
+    db.close()
+  })
+
+  it('reactive proxy rebind skips a reserved OpenCode row', () => {
+    const { db, repo } = setup()
+    const runtime = repo.register({
+      agent_type: 'opencode',
+      name: 'reserved-runtime',
+      team: 'default',
+      runtime_ui_pid: 55,
+      opencode_runtime_generation: 2,
+    })
+
+    repo.register({
+      agent_type: 'custom',
+      agent_type_name: 'cross-agent-teams-channel',
+      model: 'proxy',
+      role: '__channel_proxy__',
+      name: 'proxy',
+      team: 'default',
+      claude_ui_pid: 55,
+      delivery: {
+        kind: 'claude-channel',
+        channel_session_id: 'csid-new',
+      },
+    })
+
+    expect(repo.getById(runtime.agent_id)?.delivery).toEqual({ kind: 'none' })
+    expect(repo.getById(runtime.agent_id)?.opencode_runtime_generation).toBe(2)
+    db.close()
+  })
 })

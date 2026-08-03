@@ -184,4 +184,50 @@ describe('AutoBindChannelService', () => {
     expect(res).toEqual({ ok: false, reason: 'no_proxy_row' })
     db.close()
   })
+
+  it('does not replace a generation-aware OpenCode runtime', () => {
+    const { dir, db, repo, fanout, svc } = setup(); cleanups.push(dir)
+    repo.register({
+      agent_type: 'custom',
+      model: 'proxy',
+      role: CHANNEL_PROXY_ROLE,
+      name: 'proxy-1',
+      team: 'default',
+      claude_ui_pid: 55,
+      delivery: { kind: 'claude-channel', channel_session_id: 'csid-live' },
+    })
+    fanout.attach('csid-live', () => { /* sink */ }, 'sess-live')
+    const caller = repo.register({
+      agent_type: 'opencode',
+      model: 'gpt',
+      role: 'worker',
+      name: 'runtime-aware',
+      team: 'default',
+      identity_key: 'runtime-key',
+      opencode_runtime_generation: 2,
+      delivery: {
+        kind: 'opencode-server',
+        base_url: 'http://127.0.0.1:18888',
+        session_id: 'ses_runtime',
+        runtime_generation: 2,
+      },
+    })
+    const before = db.prepare(
+      `SELECT agent_type, delivery_kind, delivery_payload, identity_key,
+              opencode_runtime_generation, register_generation
+       FROM agents WHERE agent_id = ?`
+    ).get(caller.agent_id)
+
+    expect(svc.run({ callerAgentId: caller.agent_id, ui_pid: 55 })).toEqual({
+      ok: false,
+      reason: 'opencode_runtime_coordinates_required',
+    })
+    const after = db.prepare(
+      `SELECT agent_type, delivery_kind, delivery_payload, identity_key,
+              opencode_runtime_generation, register_generation
+       FROM agents WHERE agent_id = ?`
+    ).get(caller.agent_id)
+    expect(after).toEqual(before)
+    db.close()
+  })
 })

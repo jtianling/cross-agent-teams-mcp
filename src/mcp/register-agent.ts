@@ -7,6 +7,11 @@ import {
 import type { AgentType } from '../lib/agent-type.js'
 import { deriveDefaultTeam } from '../lib/default-team.js'
 import { canonicalKimiBaseUrl } from './kimi-session-state.js'
+import { canonicalOpencodeBaseUrl } from '../lib/opencode-url.js'
+import {
+  isGenerationAwareOpencodeRow,
+  resolveAgentType,
+} from '../lib/agent-runtime.js'
 import {
   AgentsRepo,
   type IdentityKeyMatch,
@@ -32,6 +37,7 @@ export interface RegisterInput {
   claude_ui_pid?: number
   runtime_ui_pid?: number
   identity_key?: string
+  opencode_runtime_generation?: number
 }
 
 export type IdentityKeyConflict = {
@@ -39,7 +45,7 @@ export type IdentityKeyConflict = {
   detail: { team: string; name: string }
 }
 
-export type RegisterResult =
+type BaseRegisterResult =
   // prior_snapshot is the caller row's ACTUAL pre-upsert state, read inside
   // the same transaction as the upsert (CAS input for the codex same-thread
   // evidence path).  register_generation is the counter that upsert minted;
@@ -62,6 +68,15 @@ export type RegisterResult =
   | { error: 'invalid_name_label' }
   | { error: 'invalid_team_label' }
   | IdentityKeyConflict
+
+export type RegisterResult =
+  | BaseRegisterResult
+  | { error: 'agent_type_conflict' }
+  | { error: 'stale_runtime_generation' }
+  | { error: 'runtime_generation_not_reserved' }
+  | { error: 'runtime_generation_conflict' }
+  | { error: 'runtime_delivery_conflict'; conflicting_agent_id: string }
+  | { error: 'opencode_runtime_coordinates_required' }
 
 export type IdentityKeyPlan =
   | { kind: 'bind' }
@@ -184,6 +199,15 @@ export interface RegisterAgentDeps {
   getSessionOrigin?: (connectionId: string) => SessionOriginInfo | undefined
 }
 
+interface InitialOpencodeRuntimeContext {
+  input: RegisterInput
+  delivery: Extract<DeliverySpec, { kind: 'opencode-server' }>
+  device: string
+  remote_addr: string | null
+  team: string
+  role: string
+}
+
 export class RegisterAgentService {
   private readonly db: Database.Database
   private readonly repo: AgentsRepo
@@ -199,6 +223,13 @@ export class RegisterAgentService {
     this.deps = deps
   }
 
+  register(
+    input: RegisterInput & {
+      agent_type?: Exclude<AgentType, 'opencode'>
+      opencode_runtime_generation?: undefined
+    }
+  ): BaseRegisterResult
+  register(input: RegisterInput): RegisterResult
   register(input: RegisterInput): RegisterResult {
     const rawValidated =
       input.delivery === undefined
@@ -208,16 +239,30 @@ export class RegisterAgentService {
     // Canonicalize at the persistence boundary, not only in the MCP tool
     // layer: the share key and the reconnect lookup compare canonical URLs,
     // so service-direct callers must persist the same form.
-    const validated = rawValidated === undefined
-      ? undefined
-      : rawValidated.ok.kind === 'kimi-server'
-        ? {
-            ok: {
-              ...rawValidated.ok,
-              base_url: canonicalKimiBaseUrl(rawValidated.ok.base_url),
-            },
-          }
-        : rawValidated
+    let validated = rawValidated
+    if (rawValidated?.ok.kind === 'kimi-server') {
+      validated = {
+        ok: {
+          ...rawValidated.ok,
+          base_url: canonicalKimiBaseUrl(rawValidated.ok.base_url),
+        },
+      }
+    }
+    if (
+      rawValidated?.ok.kind === 'opencode-server'
+      && input.opencode_runtime_generation !== undefined
+    ) {
+      try {
+        validated = {
+          ok: {
+            ...rawValidated.ok,
+            base_url: canonicalOpencodeBaseUrl(rawValidated.ok.base_url),
+          },
+        }
+      } catch {
+        return { error: 'invalid_delivery', reason: 'invalid_base_url' }
+      }
+    }
 
     const role = input.role ?? 'default'
     if (input.claude_ui_pid !== undefined && role !== '__channel_proxy__') {
@@ -240,6 +285,16 @@ export class RegisterAgentService {
       team: input.team,
       project_dir: input.project_dir,
     })
+    if (input.opencode_runtime_generation !== undefined) {
+      return this.registerInitialOpencodeRuntime({
+        input,
+        delivery: validated?.ok,
+        device: resolvedDevice.ok,
+        remote_addr: resolvedDevice.remote_addr,
+        team,
+        role,
+      })
+    }
     // Resolved before any connection binding so a conflict leaves both the
     // registry and the in-memory session map untouched.
     const identityKeyPlan = input.identity_key === undefined
@@ -256,19 +311,26 @@ export class RegisterAgentService {
       return identityKeyPlan
     }
 
-    const key = identityKey(resolvedDevice.ok, team, input.name)
-    const runtimeKey = sharedRuntimeKey(input.agent_type, validated?.ok)
-    this.bindConnection({
-      key,
-      connectionId: input.connection_id,
-      runtimeKey,
-      device: resolvedDevice.ok,
-      team,
-      name: input.name,
-    })
     // One transaction: the old row must not lose the key unless the new row
     // gets it, and the unique index forbids both holding it at once.
     const write = this.db.transaction(() => {
+      const target = this.repo.findByIdentity({
+        device: resolvedDevice.ok,
+        team,
+        name: input.name,
+      })
+      const stored = target
+        ? this.repo.findById(target.agent_id)
+        : undefined
+      const migratingHolder = identityKeyPlan?.kind === 'migrate'
+        ? this.repo.findById(identityKeyPlan.from_agent_id)
+        : undefined
+      if (
+        isGenerationAwareOpencodeRow(stored)
+        || isGenerationAwareOpencodeRow(migratingHolder)
+      ) {
+        return { error: 'opencode_runtime_coordinates_required' as const }
+      }
       if (identityKeyPlan?.kind === 'migrate') {
         this.repo.clearIdentityKey(identityKeyPlan.from_agent_id)
       }
@@ -286,9 +348,148 @@ export class RegisterAgentService {
         runtime_ui_pid: input.runtime_ui_pid,
         remote_addr: resolvedDevice.remote_addr,
         identity_key: input.identity_key,
+        opencode_runtime_generation: input.opencode_runtime_generation,
+      })
+    })
+    const result = write()
+    if ('error' in result) return result
+    this.bindConnection({
+      key: identityKey(resolvedDevice.ok, team, input.name),
+      connectionId: input.connection_id,
+      runtimeKey: sharedRuntimeKey(input.agent_type, validated?.ok),
+      device: resolvedDevice.ok,
+      team,
+      name: input.name,
+    })
+    return result
+  }
+
+  private registerInitialOpencodeRuntime(args: {
+    input: RegisterInput
+    delivery: DeliverySpec | undefined
+    device: string
+    remote_addr: string | null
+    team: string
+    role: string
+  }): RegisterResult {
+    const generation = args.input.opencode_runtime_generation!
+    const delivery = args.delivery
+    if (
+      args.input.agent_type !== 'opencode'
+      || args.input.identity_key === undefined
+      || delivery?.kind !== 'opencode-server'
+      || delivery.runtime_generation !== generation
+    ) {
+      return { error: 'invalid_delivery', reason: 'invalid_runtime_generation' }
+    }
+    const result = this.persistInitialOpencodeRuntime({
+      ...args,
+      delivery,
+    })
+    if ('error' in result) return result
+    this.bindConnection({
+      key: identityKey(args.device, args.team, args.input.name),
+      connectionId: args.input.connection_id,
+      runtimeKey: undefined,
+      device: args.device,
+      team: args.team,
+      name: args.input.name,
+    })
+    return result
+  }
+
+  private persistInitialOpencodeRuntime(
+    args: InitialOpencodeRuntimeContext
+  ): RegisterResult {
+    const write = this.db.transaction(() => {
+      const target = this.repo.findByIdentity({
+        device: args.device,
+        team: args.team,
+        name: args.input.name,
+      })
+      const holder = this.repo.findByIdentityKey(
+        args.input.identity_key!,
+        args.device
+      )[0]
+      if (target || holder) {
+        return this.reuseInitialOpencodeRuntime({
+          target_agent_id: target?.agent_id,
+          holder,
+          identity_key: args.input.identity_key!,
+          generation: args.input.opencode_runtime_generation!,
+          delivery: args.delivery,
+          target: { team: args.team, name: args.input.name },
+        })
+      }
+      const collision = this.repo.findByOpencodeSession(
+        args.delivery.base_url,
+        args.delivery.session_id,
+        args.device
+      )[0]
+      if (collision) {
+        return {
+          error: 'runtime_delivery_conflict' as const,
+          conflicting_agent_id: collision.agent_id,
+        }
+      }
+      return this.repo.register({
+        ...args.input,
+        device: args.device,
+        remote_addr: args.remote_addr,
+        team: args.team,
+        role: args.role,
+        delivery: args.delivery,
       })
     })
     return write()
+  }
+
+  private reuseInitialOpencodeRuntime(args: {
+    target_agent_id?: string
+    holder: IdentityKeyMatch | undefined
+    identity_key: string
+    generation: number
+    delivery: Extract<DeliverySpec, { kind: 'opencode-server' }>
+    target: { team: string; name: string }
+  }): RegisterResult {
+    if (
+      args.target_agent_id === undefined
+      || args.holder?.agent_id !== args.target_agent_id
+    ) {
+      const conflict = args.holder ?? args.target
+      return {
+        error: 'identity_key_conflict',
+        detail: { team: conflict.team, name: conflict.name },
+      }
+    }
+    const row = this.repo.findOpencodeRuntimeByIdentityKey(
+      args.identity_key,
+      args.holder.device
+    )!
+    const actualType = resolveAgentType(row)
+    if (actualType !== 'opencode') return { error: 'agent_type_conflict' }
+    if (args.generation < row.opencode_runtime_generation) {
+      return { error: 'stale_runtime_generation' }
+    }
+    if (args.generation > row.opencode_runtime_generation) {
+      return { error: 'runtime_generation_not_reserved' }
+    }
+    if (
+      row.delivery.kind !== 'opencode-server'
+      || canonicalOpencodeBaseUrl(row.delivery.base_url)
+        !== args.delivery.base_url
+      || row.delivery.session_id !== args.delivery.session_id
+      || row.delivery.auth_token_ref !== args.delivery.auth_token_ref
+      || (row.delivery.runtime_generation ?? 0) !== args.generation
+    ) {
+      return { error: 'runtime_generation_conflict' }
+    }
+    return {
+      agent_id: row.agent_id,
+      team: row.team,
+      prior_snapshot: null,
+      register_generation: row.register_generation,
+    }
   }
 
   releaseConnection(_agent_id: string, connection_id: string): void {
@@ -309,6 +510,24 @@ export class RegisterAgentService {
     this.connections = new Map(remaining)
   }
 
+  bindExistingConnection(input: {
+    connection_id: string
+    agent_type: AgentType
+    delivery: DeliverySpec
+    device: string
+    team: string
+    name: string
+  }): void {
+    this.bindConnection({
+      key: identityKey(input.device, input.team, input.name),
+      connectionId: input.connection_id,
+      runtimeKey: sharedRuntimeKey(input.agent_type, input.delivery),
+      device: input.device,
+      team: input.team,
+      name: input.name,
+    })
+  }
+
   private bindConnection(input: {
     key: string
     connectionId: string
@@ -317,6 +536,10 @@ export class RegisterAgentService {
     team: string
     name: string
   }): void {
+    this.removeConnectionFromOtherIdentities(
+      input.connectionId,
+      input.key
+    )
     const current = this.connections.get(input.key) ?? new Map()
     const prior = Array.from(current.entries()).filter(
       ([connectionId]) => connectionId !== input.connectionId
@@ -349,6 +572,22 @@ export class RegisterAgentService {
         ...failed,
         [input.connectionId, input.runtimeKey] as const,
       ])
+    )
+  }
+
+  private removeConnectionFromOtherIdentities(
+    connectionId: string,
+    targetKey: string
+  ): void {
+    this.connections = new Map(
+      Array.from(this.connections.entries()).flatMap(([key, bindings]) => {
+        if (key === targetKey || !bindings.has(connectionId)) {
+          return [[key, bindings] as const]
+        }
+        const next = new Map(bindings)
+        next.delete(connectionId)
+        return next.size === 0 ? [] : [[key, next] as const]
+      })
     )
   }
 
