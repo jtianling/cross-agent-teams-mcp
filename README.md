@@ -31,7 +31,7 @@ The agent will confirm a device label, whether Codex App also needs xats, and
 the `~/.zshrc` changes with you, auto-generate the daemon token on first
 `start-xats`, and wire up the `free-xats-codex` / `xats-codex` /
 optional `xats-codex-app` /
-`free-xats-opencode` / `xats-opencode` / `xats-kimi` launchers plus `start-xats` /
+`free-xats-opencode` / `xats-opencode` launchers plus `start-xats` /
 `stop-xats`.  Prefer doing it by hand?  Continue below.
 
 ### Claude Code
@@ -263,171 +263,11 @@ What the launcher does:
 
 Inside the opencode TUI say:
 
-> 注册到 xats, name: oc-1, team: default
+> Register with xats, name: oc-1, team: default
 
 The agent detects `$OPENCODE_XATS_BASE_URL`, picks `agent_type="opencode"` automatically, passes the env value as `base_url`, and omits `session_id` (the daemon auto-resolves it as the most recently updated session on that base_url).  `auth_token_ref` is only required when the opencode server was started with `OPENCODE_SERVER_PASSWORD` set; in that case also pass `auth_token_ref: "OPENCODE_SERVER_PASSWORD"`.
 
 If you launch opencode via plain `opencode` (without the wrapper), the env var is absent, the agent falls back to `agent_type="custom"` with `agent_type_name="opencode"`, and pokes are delivered via tmux pane injection (see next section).
-
-#### kimi-code
-
-Kimi Code ships `kimi web` — a local REST+WebSocket daemon (default port 58627, loopback-only, bearer auth) exposing `POST /api/v1/sessions/{session_id}/prompts`, which enqueues a prompt into an existing session.  (It used to be `kimi server run`; kimi 0.28.0 deprecated the `kimi server` subcommand to a no-op stub — `kimi web` is the only way to start it now, and lifecycle management moved to `kimi web kill` / `kimi web ps`.)  The daemon uses it as a dedicated wake-up transport (`kimi-server` delivery kind) — no tmux pane injection required.  The transport is activated by registering with `agent_type="kimi-code"`, a `base_url` pointing at the kimi server, and an explicit `session_id` (unlike opencode, the daemon does NOT auto-resolve it).
-
-Add an `xats-kimi` zsh function to `~/.zshrc` (yolo-only):
-
-```zsh
-xats-kimi() {
-    local base_url port token session_id title
-    base_url="${KIMI_XATS_BASE_URL:-http://127.0.0.1:58627}"
-    port="${base_url##*:}"
-    port="${port%%/*}"
-    [[ -z "$port" || "$port" == "$base_url" ]] && port=58627
-    if ! nc -z 127.0.0.1 "$port" >/dev/null 2>&1; then
-        echo "[xats] kimi server not listening on port $port, starting it" >&2
-        mkdir -p "$HOME/.config/xats"
-        kimi web --no-open \
-            >>"$HOME/.config/xats/kimi-server.log" 2>&1 &!
-        local i
-        for i in {1..20}; do
-            nc -z 127.0.0.1 "$port" >/dev/null 2>&1 && break
-            sleep 0.5
-        done
-        if ! nc -z 127.0.0.1 "$port" >/dev/null 2>&1; then
-            echo "[xats] failed to start kimi server on $base_url; see $HOME/.config/xats/kimi-server.log" >&2
-            return 1
-        fi
-    fi
-
-    # Pre-create the session via the kimi server REST API so the session id is
-    # EXACT (guessing from ~/.kimi-code/session_index.jsonl picks the wrong
-    # session when several kimi sessions share a workDir).
-    token="$(cat "$HOME/.kimi-code/server.token" 2>/dev/null)"
-    if [[ -z "$token" ]]; then
-        echo "[xats] kimi server token missing at ~/.kimi-code/server.token" >&2
-        return 1
-    fi
-    title="xats-kimi $(date '+%H:%M:%S')"
-    session_id="$(curl -sf -m 10 -X POST \
-        -H "Authorization: Bearer $token" \
-        -H 'Content-Type: application/json' \
-        -d "{\"title\":\"$title\",\"metadata\":{\"cwd\":\"$PWD\"}}" \
-        "$base_url/api/v1/sessions" \
-        | python3 -c 'import json,sys; print(json.load(sys.stdin)["data"]["id"])' 2>/dev/null)"
-    if [[ -z "$session_id" ]]; then
-        echo "[xats] failed to pre-create kimi session on $base_url" >&2
-        return 1
-    fi
-    # Server-created sessions carry no model; server-driven turns (init prompt,
-    # xats pokes) fail instantly with model.not_configured until one is set.
-    local model
-    model="$(sed -n 's/^default_model *= *"\(.*\)".*/\1/p' \
-        "$HOME/.kimi-code/config.toml" 2>/dev/null | head -n1)"
-    if [[ -n "$model" ]]; then
-        curl -sf -m 10 -X POST \
-            -H "Authorization: Bearer $token" \
-            -H 'Content-Type: application/json' \
-            -d "{\"agent_config\":{\"model\":\"$model\",\"permission_mode\":\"yolo\"}}" \
-            "$base_url/api/v1/sessions/$session_id/profile" >/dev/null \
-            || echo "[xats] warning: failed to set session model on $base_url" >&2
-    fi
-    # The CLI refuses to attach a server-created session until its agents/
-    # state exists; one trivial init prompt materializes it.
-    curl -sf -m 30 -X POST \
-        -H "Authorization: Bearer $token" \
-        -H 'Content-Type: application/json' \
-        -d '{"content":[{"type":"text","text":"(xats-kimi launcher init message, reply ok)"}]}' \
-        "$base_url/api/v1/sessions/$session_id/prompts" >/dev/null
-    local j sess_dir
-    for j in {1..30}; do
-        for sess_dir in "$HOME"/.kimi-code/sessions/*/"$session_id"(N); do
-            [[ -d "$sess_dir/agents/main" ]] && break 2
-        done
-        sleep 1
-    done
-
-    KIMI_XATS_BASE_URL="$base_url" \
-    KIMI_XATS_SESSION_ID="$session_id" \
-        exec kimi --session "$session_id" --yolo "$@"
-}
-```
-
-Then replace plain `kimi` with `xats-kimi`:
-
-```bash
-xats-kimi                                      # pre-created session, args pass through
-xats-kimi --model kimi-code/kimi-for-coding    # args pass through
-```
-
-What the launcher does:
-
-- Resolves the base URL as `${KIMI_XATS_BASE_URL:-http://127.0.0.1:58627}` (the `kimi web` default bind port).
-- If nothing is listening on that port, starts `kimi web --no-open` first and waits for the port.  `kimi web` runs in the foreground, so the launcher backgrounds it with `&!` (background + disown) and `--no-open` keeps it from opening a browser tab.  Omitting `--host` keeps the bind on loopback.
-- Pre-creates the session via `POST /api/v1/sessions` and exports `KIMI_XATS_SESSION_ID` with the exact id.  This matters: deriving the id from `~/.kimi-code/session_index.jsonl` (last `workDir` match) picks the WRONG session when several kimi sessions share a directory — pokes then wake that other session while reporting `delivered`.
-- Sets the session model and `permission_mode: "yolo"` via `POST /api/v1/sessions/<id>/profile` (model from `default_model` in `~/.kimi-code/config.toml`).  Both are required: server-created sessions carry no model (every server-driven turn fails instantly with `model.not_configured`), and server-driven turns use the session's permission mode — not the CLI's `--yolo` flag — so without it every tool call in a poke-woken turn blocks on an unanswered approval.
-- Fires one init prompt so the CLI can attach the server-created session (kimi refuses `Agent "main" was not found` otherwise).
-- `exec kimi --session <id> --yolo "$@"` replaces the shell with the kimi TUI attached to the pre-created session.
-
-**Sessions can never be deleted — so the default is a fresh one, and reuse is opt-in.**  kimi's REST API has no route for removing a session: its whole surface exposes three `DELETE` endpoints and none of them is for sessions, and `DELETE /api/v1/workspaces/{id}` only unregisters a workspace ("does not remove on-disk content") while leaving its sessions listed.  A fresh session per launch therefore leaks one permanently each time — but that is still the default, because the alternative proved worse: a session whose context went bad (e.g. polluted by a stuck tool-call loop) keeps coming back every time it is reused, while a fresh session is clean by construction.
-
-When you do want to continue a previous session, set `XATS_KIMI_REUSE=1`: `xats-kimi` then does find-or-create — it reuses the newest *free* session from its own pool for the current directory (sessions whose title starts with `xats-kimi` and whose `metadata.cwd` matches `$PWD`), and only creates one when every candidate is taken.  Pool size converges on your peak concurrent launches per directory rather than on your total number of launches.  If a reused session's context has gone bad, archive it (`POST /api/v1/sessions/<id>:archive`) to take it out of the pool.
-
-In reuse mode, occupancy has to be tracked by the launcher, because kimi cannot answer it: `kimi web ps` and the server's `connections` only count web clients, and a TUI attachment is invisible to both.  So claiming a session is a `mkdir`-atomic lock directory under `~/.config/xats/kimi-locks` holding the TUI's pid — `exec` replaces the shell, so `$$` is the kimi process itself.  Locks whose pid is dead are collected on the next launch, which means a TUI that exits or crashes releases its session with no cleanup hook.  `XATS_KIMI_DRYRUN=1 xats-kimi` prints the pool with each entry marked `OCCUPIED` or `FREE` and exits without claiming anything.
-
-One caveat: attaching to a pool session with a plain `kimi --session <id>` takes no lock, so `xats-kimi` may later hand that same session to a second TUI.  Open pool sessions only through `xats-kimi`.  kimi exposes no session-level occupancy API, so this cannot be enforced.
-
-`start-xats` also brings the kimi server up: when a `kimi` binary is on PATH and the port is free, it runs `kimi web --no-open` and logs the result (via `_xats-log-event`); when the binary is absent it skips silently.  `stop-xats` stops it via `kimi web kill`, falling back to killing the listener on port 58627 when the subcommand fails (e.g. a server started by an older kimi that `kimi web ps` cannot see).  `start-local-xats` / `stop-local-xats` manage the kimi server the same way.
-
-**MCP config.**  The launcher and the poke transport above only cover the *wake-up* half; the agent still needs the xats tools themselves.  kimi resolves MCP servers from three files, later overriding earlier: `$KIMI_CODE_HOME/mcp.json` (falling back to `~/.kimi-code/mcp.json`), `<git root>/.mcp.json`, and `<cwd>/.kimi-code/mcp.json` — note the last one is anchored at the **current working directory**, not the git root, so starting kimi from a subdirectory will not pick up the repo-root copy.
-
-Because kimi natively reads `<git root>/.mcp.json` — the same file Claude Code uses — a repo already set up for Claude Code appears to work with no extra config.  Do not rely on that: `.mcp.json` also declares `cross-agent-teams-channel`, a **Claude-Code-only** stdio server, and kimi will keep trying to start it and keep erroring.  Give kimi its own `<repo>/.kimi-code/mcp.json` that disables it explicitly:
-
-```json
-{
-  "mcpServers": {
-    "cross-agent-teams": {
-      "transport": "http",
-      "url": "http://127.0.0.1:9100/mcp",
-      "bearerTokenEnvVar": "CROSS_AGENT_TEAMS_MCP_TOKEN"
-    },
-    "cross-agent-teams-channel": { "enabled": false }
-  }
-}
-```
-
-`npx -y mcpsmgr@latest add jtianling/cross-agent-teams-mcp -a kimi-code -y` writes both entries for you, disable included (`--global` targets `~/.kimi-code/mcp.json`).  The disable must be an explicit `"enabled": false`, not an omission: kimi merges the three files as a per-key object spread, so leaving the channel out of `.kimi-code/mcp.json` would leave the `<git root>/.mcp.json` declaration in force.  It only matters when such a root file actually declares the channel; a repo set up for kimi alone has nothing to shadow.
-
-The same per-key merge means **`mcpsmgr remove` is not a full uninstall for kimi**: deleting an entry from `.kimi-code/mcp.json` lets the same-named entry in `<git root>/.mcp.json` take effect again.  That is inherent to kimi's layering — to really remove it, drop it from the root file too.
-
-Two more things about this file.  Prefer `bearerTokenEnvVar` over a literal `headers.Authorization` value — kimi validates the referenced variable and drops the server if it is unset, and its own guidance is to keep secrets out of `mcp.json`.  And note that a single malformed entry costs you the whole file: kimi parses each `mcp.json` as a unit and rejects it wholesale with `CONFIG_INVALID`.
-
-Inside the kimi TUI say:
-
-> 注册到 xats, name: kimi-1, team: default
-
-The agent detects `$KIMI_XATS_BASE_URL`, picks `agent_type="kimi-code"` automatically, passes the env value as `base_url`, and passes `session_id` straight from `$KIMI_XATS_SESSION_ID` — no guessing.  At poke time the daemon reads the bearer token from `~/.kimi-code/server.token` (persisted by `kimi web` across restarts; `kimi web rotate-token` invalidates it); pass `auth_token_ref` (an env var name) only for non-default token setups.  There is no registration-time health check: if the server is down at poke time the poke fails with `kimi_connect_failed` and the mailbox retry governs.
-
-**One kimi session, two MCP connections — they share, not fight.**  kimi's dual-engine architecture gives one logical agent two MCP connections: the TUI's in-process engine and the server engine that runs poke-woken turns.  A server-side turn that wakes unbound re-registers under the same name; because both registrations declare `agent_type="kimi-code"` with the same `(base_url, session_id)` pair (base URLs compared in canonical form — case, default port, and trailing slashes do not matter), the daemon treats them as concurrent connections of one runtime identity — the re-register does NOT close the TUI's connection.  The first `unknown_agent` → register on a fresh server-engine MCP session is still expected and correct; only a *different* session (another `session_id`, or the same id on a truly different server) claiming the same name performs a real takeover and closes the old connections.  Identity lost after a context clear: `reconnect({ agent_type: "kimi-code", base_url, session_id })` recovers it — `agent_type` makes the dispatch deterministic (an empty registry answers `need_register` instead of probing an opencode server), `session_id` is REQUIRED (kimi sessions are never auto-resolved), the daemon revalidates the session against the kimi server (the response must identify that exact session and not be archived) before rebinding, and the recovered connection shares with live engine connections of the same session.  In the common case the whole recovery is restarting the TUI: `xats-kimi` re-exports `KIMI_XATS_BASE_URL` / `KIMI_XATS_SESSION_ID`.
-
-If you launch kimi via plain `kimi` (without the wrapper), both env vars are absent, the agent falls back to `agent_type="custom"` with `agent_type_name="kimi-code"`, and pokes are delivered via tmux pane injection (see next section).
-
-Known limitation (kimi-side, not xats): a poke wakes the session via a server-driven turn, but the STOCK kimi TUI does NOT live-refresh while its open session is being driven by the server — the woken turn (inbox check, reply, etc.) only appears in the TUI transcript after the session is reloaded.  The work still happens; only the live display is missing.  **This is solved for xats users**: `xats-kimi` launches the locally patched TUI (server-sync observer, `~/workspace/kimi-code` main) by default, which shows external turns live (status hint + queued input) and auto-refreshes the transcript when the turn ends.  The stock TUI keeps the limitation (no upstream issue is planned); use `kimi web` on the same session if you ever need live display there.
-
-Do not try to confirm this by asking the kimi agent itself: it runs *inside* the session and sees its own conversation through session state, not through the rendered terminal.  Asked whether its TUI updated, it will truthfully report that the turn ran and answer "yes, it showed up live" — a claim it has no way to observe.  Only a human looking at the actual terminal can settle this.
-
-**The poke is gated on a session precondition check.**  Injecting a turn on top of one already running makes two engines write the same session, so before every `POST /prompts` the daemon probes the target and may decline.  Two inputs, checked in this order:
-
-1. `GET /api/v1/sessions/<id>` — `pending_interaction != 'none'` reports `kimi_pending_interaction`; `main_turn_active` reports `kimi_session_busy` with `reason: main_turn_active`.
-2. the mtime of `~/.kimi-code/sessions/*/<id>/agents/main/wire.jsonl` — a write inside the last 10 seconds reports `kimi_session_busy` with `reason: tui_recent_write`.
-
-The gate reads `main_turn_active`, **not** `busy`.  `busy` is also true while a background task is alive, and a background task can run for a long time without conflicting with an injected prompt — gating on it would defer pokes that were perfectly safe to deliver.
-
-A `kimi_session_busy` deferral (from the gate, or from a `SESSION_BUSY` rejection by `POST /prompts` itself) is retried on the same ladder the tmux path uses — **30s / 180s / 600s** — re-running the whole precondition check on each attempt.  `kimi_pending_interaction` is **not** retried: an unanswered approval keeps the turn active indefinitely, so retrying only burns the gradient.  When the gradient is exhausted the daemon stops: no forced injection, no tmux fallback.  The mailbox row was written when the message was sent, so the agent still sees the message on its next `get_inbox` — a wake-up is an optimisation over that, not the delivery mechanism.
-
-**Two blind spots, stated plainly.**  The REST probe cannot see the TUI: `busy` and `main_turn_active` reflect only the kimi *server* process engine, while a turn you run in the TUI executes in the TUI's own in-process engine — the same dual-engine split behind the no-live-refresh limitation above.  The wire-log mtime is a heuristic patch for exactly that case, and a missing or unreadable log fails open (the poke proceeds).  And the gate is check-then-inject, never atomic: a turn can begin between the probe and the POST.  Both probe inputs fail open by design, so a probe that cannot answer degrades to the old un-gated behaviour rather than to a delivery outage.  This is mitigation, not a guarantee; the real fix is kimi collapsing the TUI onto the server engine upstream.
-
-**Gate decisions leave a trace in the daemon log.**  Every deferral emits a structured `{"event":"kimi_poke_deferred","session_id":…,…}` record carrying the sub-reason (`main_turn_active` / `tui_recent_write` / `session_busy_response`, or the concrete pending interaction).  A proceed whose wire log is younger than an observation ceiling (default 120s, `KIMI_WIRE_AGE_OBSERVE_MS` to override) additionally emits `{"event":"kimi_poke_proceeded","session_id":…,"wire_age_ms":…}` — the observable shadow of an injection that may have raced a TUI turn during a thinking-gap silence.  The ceiling is observation-only and never changes the inject/defer decision; idle sessions (no wire log, or age at or above the ceiling) log nothing.  Together the two records give any future tuning of the 10s window double-sided evidence.
-
-**Long injected turns are logged, never aborted.**  After a successful injection the daemon records the returned prompt id and, once past a threshold (default 10 minutes, `XATS_KIMI_PROMPT_OBSERVE_MS` to change), checks whether that prompt is still running and emits a log record if it is.  It does not stop it, and there is no option to.  Elapsed time is the wrong discriminator for "stuck": poke-woken turns here routinely run past five minutes doing real work, while the runaway that motivated this gate was making *no progress* — an identical TodoList round every ~10s.  A duration-based abort would reliably kill the healthy case and only incidentally catch the sick one.
 
 #### Other coding agents (cursor, ...)
 
@@ -464,9 +304,9 @@ curl -s -X DELETE http://127.0.0.1:<port>/api/agents/<agent_id>
 
 There is deliberately no `register_agent` over REST — creating or rebinding an identity is the very takeover footgun this surface avoids, so an agent must have registered once (over MCP) before it can use the lifeboat.
 
-**Removing a registry row.**  `DELETE /api/agents/<agent_id>` deletes exactly that row and returns `{"deleted":true,"agent_id":...,"team":...,"name":...}`; an id that matches nothing returns `404 {"error":"unknown_agent"}`, so a repeated delete tells you it was already gone.  It is addressed by `agent_id` rather than `(team, name)` on purpose — rows carrying a device label the daemon no longer uses are exactly the ones worth clearing, and a `(team, name)` lookup pinned to the local device cannot reach them.  Liveness is not consulted: `online` degrades to a multi-day `last_seen_at` window for runtimes that register without a pid or a tmux pane (kimi-code), so gating on it would refuse the rows that most need removing.
+**Removing a registry row.**  `DELETE /api/agents/<agent_id>` deletes exactly that row and returns `{"deleted":true,"agent_id":...,"team":...,"name":...}`; an id that matches nothing returns `404 {"error":"unknown_agent"}`, so a repeated delete tells you it was already gone.  It is addressed by `agent_id` rather than `(team, name)` on purpose — rows carrying a device label the daemon no longer uses are exactly the ones worth clearing, and a `(team, name)` lookup pinned to the local device cannot reach them.  Liveness is not consulted: `online` degrades to a multi-day `last_seen_at` window for runtimes that register without a pid or a tmux pane, so gating on it would refuse the rows that most need removing.
 
-This is a **registry** operation, not a way to stop an agent.  Nothing is killed: no process, no pane, no session.  A running agent whose row you delete will fail its next xats call as an unregistered session and has to `register_agent` again.  For kimi-code the gap is wider — the kimi session keeps running and keeps accepting prompts (kimi's REST API has no session-delete route at all), so deleting the row only ends the agent's addressability through xats.  Agents remove themselves with the `unregister_self` tool; there is deliberately no MCP tool for removing *another* agent.
+This is a **registry** operation, not a way to stop an agent.  Nothing is killed: no process, no pane, no session.  A running agent whose row you delete will fail its next xats call as an unregistered session and has to `register_agent` again.  Agents remove themselves with the `unregister_self` tool; there is deliberately no MCP tool for removing *another* agent.
 
 > Security note: "loopback-only" includes a browser running on the same machine, so run the daemon with `--token` to keep a local web page from reaching `/api/`.  Without a token, the worst a malicious local page can do is advance an agent's inbox cursor via a cross-site `GET /api/inbox` — it cannot read any response (CORS), send, or impersonate; the only effect is that agent may miss unread messages.  That is a bounded, consciously accepted risk; a token removes it entirely.
 
@@ -603,28 +443,31 @@ The `--token` + Codex `--remote` combination surfaces three caveats that don't s
 - Per-agent config details: `docs/configs/`.
 - Source: [github.com/jtianling/cross-agent-teams-mcp](https://github.com/jtianling/cross-agent-teams-mcp).
 
-## Codex App 和 Codex CLI 隔离运行
+## Running Codex App and Codex CLI in isolation
 
-如果既要通过 SSH 长期使用 Codex CLI, 又希望 Codex App 能被 xats poke
-唤醒, 两者不能共享同一个 app-server 和 `CODEX_HOME`.  当前隔离方式如下:
+If you use Codex CLI over SSH for long-running work and also want xats to wake
+Codex App with a poke, the two surfaces must not share one app-server or
+`CODEX_HOME`.  The current isolation is:
 
-- xats daemon 使用 `9100`.
-- Codex CLI 使用 `8799` 和默认的 `~/.codex`, 通过 `xats-codex` 或
-  `free-xats-codex` 启动.
-- Codex App 使用 `8800` 和隔离的 `~/.codex-app`, 通过 `xats-codex-app`
-  启动.
-- daemon 同时接收两个 WebSocket endpoint, 注册时根据
-  `CODEX_THREAD_ID` 找到唯一匹配的 endpoint.  因此 App 和 CLI 即使打开
-  同一个 project, session 也不会互相接管.
+- The xats daemon uses port `9100`.
+- Codex CLI uses `8799` and the default `~/.codex`, launched with
+  `xats-codex` or `free-xats-codex`.
+- Codex App uses `8800` and the isolated `~/.codex-app`, launched with
+  `xats-codex-app`.
+- The daemon accepts both WebSocket endpoints and uses `CODEX_THREAD_ID` at
+  registration to find the unique matching endpoint.  App and CLI sessions
+  therefore do not take over each other even when both open the same project.
 
-这条路径已经验证可以正常注册, 收取邮件, 被 poke 唤醒并回复消息.  但它
-有一个明确限制: `xats-codex-app` 通过外部 app-server 启动 Codex App,
-当前不能使用 ChatGPT in Chrome 插件.  `features.code_mode_host=true` 和
-App bundle 内置的 codex binary 只能保证 App 与 app-server 版本匹配,
-不能恢复 Chrome 插件能力.
+This setup has been verified for registration, inbox delivery, poke wake-ups,
+and replies.  It has one explicit limitation: Codex App launched through the
+external app-server with `xats-codex-app` cannot currently use the ChatGPT in
+Chrome plugin.  `features.code_mode_host=true` and the codex binary bundled
+with the App only keep the App and app-server versions aligned; they do not
+restore Chrome plugin support.
 
-如果 Chrome 插件更重要, 不要为 Codex App 启用 xats.  只为 Codex CLI
-保留 `8799` 和 xats poke, Codex App 则继续点击 macOS 应用图标原生启动.
-这种方式下 App 可以使用 Chrome 插件, 但 App 本身不具备这里描述的
-xats poke 唤醒能力.  完整的自动配置分支和启动脚本见
-[README.agent.md](README.agent.md).
+If the Chrome plugin matters more, do not enable xats for Codex App.  Keep
+port `8799` and xats poke support for Codex CLI, and continue launching Codex
+App natively from its macOS icon.  In this mode the App keeps Chrome plugin
+support but does not receive xats poke wake-ups.  See
+[README.agent.md](README.agent.md) for the complete automated setup branch and
+launcher scripts.

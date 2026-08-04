@@ -30,7 +30,7 @@ agent 可读的操作手册: [README.agent.md](README.agent.md).  把下面这�
 agent 会与你确认设备标签, `~/.zshrc` 改动, 以及是否也要在 Codex App 中启用
 xats.  首次 `start-xats` 时自动生成 daemon token, 并配好
 `free-xats-codex` / `xats-codex` / 可选的 `xats-codex-app` /
-`free-xats-opencode` / `xats-opencode` / `xats-kimi` 启动函数以及 `start-xats` /
+`free-xats-opencode` / `xats-opencode` 启动函数以及 `start-xats` /
 `stop-xats`.  想手工操作的话, 继续往下看.
 
 ### Claude Code
@@ -266,164 +266,6 @@ agent 会自动检测 `$OPENCODE_XATS_BASE_URL`, 选 `agent_type="opencode"`, �
 
 如果你直接用 `opencode` 启动 (没用 wrapper), env 变量缺失, agent 会回退到 `agent_type="custom"` 加 `agent_type_name="opencode"`, poke 通过 tmux pane 注入投递 (见下一节).
 
-#### kimi-code
-
-Kimi Code 自带 `kimi web` — 本地 REST+WebSocket 守护进程 (默认端口 58627, 仅 loopback, bearer 鉴权), 暴露 `POST /api/v1/sessions/{session_id}/prompts`, 可以把 prompt 塞进一个已存在 session 的队列.  (以前叫 `kimi server run`; kimi 0.28.0 把 `kimi server` 子命令废弃成了空壳, 现在只能用 `kimi web` 启动, 生命周期管理也移到了 `kimi web kill` / `kimi web ps`.)  daemon 用它作为专用唤醒通道 (`kimi-server` delivery kind) — 不需要 tmux pane 注入.  通过 `agent_type="kimi-code"` 加 `base_url` (指向 kimi server) 加显式 `session_id` 注册即可激活 (与 opencode 不同, daemon 不会自动解析 session_id).
-
-把下面的 `xats-kimi` zsh 函数加到 `~/.zshrc` (仅 yolo 模式):
-
-```zsh
-xats-kimi() {
-    local base_url port token session_id title
-    base_url="${KIMI_XATS_BASE_URL:-http://127.0.0.1:58627}"
-    port="${base_url##*:}"
-    port="${port%%/*}"
-    [[ -z "$port" || "$port" == "$base_url" ]] && port=58627
-    if ! nc -z 127.0.0.1 "$port" >/dev/null 2>&1; then
-        echo "[xats] kimi server not listening on port $port, starting it" >&2
-        mkdir -p "$HOME/.config/xats"
-        kimi web --no-open \
-            >>"$HOME/.config/xats/kimi-server.log" 2>&1 &!
-        local i
-        for i in {1..20}; do
-            nc -z 127.0.0.1 "$port" >/dev/null 2>&1 && break
-            sleep 0.5
-        done
-        if ! nc -z 127.0.0.1 "$port" >/dev/null 2>&1; then
-            echo "[xats] failed to start kimi server on $base_url; see $HOME/.config/xats/kimi-server.log" >&2
-            return 1
-        fi
-    fi
-
-    # 通过 kimi server REST API 预创建 session, 拿到精确的 session id
-    # (从 ~/.kimi-code/session_index.jsonl 猜测在同目录多 kimi 会话时会拿错).
-    token="$(cat "$HOME/.kimi-code/server.token" 2>/dev/null)"
-    if [[ -z "$token" ]]; then
-        echo "[xats] kimi server token missing at ~/.kimi-code/server.token" >&2
-        return 1
-    fi
-    title="xats-kimi $(date '+%H:%M:%S')"
-    session_id="$(curl -sf -m 10 -X POST \
-        -H "Authorization: Bearer $token" \
-        -H 'Content-Type: application/json' \
-        -d "{\"title\":\"$title\",\"metadata\":{\"cwd\":\"$PWD\"}}" \
-        "$base_url/api/v1/sessions" \
-        | python3 -c 'import json,sys; print(json.load(sys.stdin)["data"]["id"])' 2>/dev/null)"
-    if [[ -z "$session_id" ]]; then
-        echo "[xats] failed to pre-create kimi session on $base_url" >&2
-        return 1
-    fi
-    # server 创建的 session 不带 model; server 驱动的 turn (初始化 prompt, xats poke)
-    # 会立刻以 model.not_configured 失败, 必须先设置.
-    local model
-    model="$(sed -n 's/^default_model *= *"\(.*\)".*/\1/p' \
-        "$HOME/.kimi-code/config.toml" 2>/dev/null | head -n1)"
-    if [[ -n "$model" ]]; then
-        curl -sf -m 10 -X POST \
-            -H "Authorization: Bearer $token" \
-            -H 'Content-Type: application/json' \
-            -d "{\"agent_config\":{\"model\":\"$model\",\"permission_mode\":\"yolo\"}}" \
-            "$base_url/api/v1/sessions/$session_id/profile" >/dev/null \
-            || echo "[xats] warning: failed to set session model on $base_url" >&2
-    fi
-    # CLI 在 session 的 agents/ 状态存在之前拒绝挂载; 发一条初始化 prompt 使其落地.
-    curl -sf -m 30 -X POST \
-        -H "Authorization: Bearer $token" \
-        -H 'Content-Type: application/json' \
-        -d '{"content":[{"type":"text","text":"(xats-kimi 启动器自动初始化消息, 回复 ok 即可)"}]}' \
-        "$base_url/api/v1/sessions/$session_id/prompts" >/dev/null
-    local j sess_dir
-    for j in {1..30}; do
-        for sess_dir in "$HOME"/.kimi-code/sessions/*/"$session_id"(N); do
-            [[ -d "$sess_dir/agents/main" ]] && break 2
-        done
-        sleep 1
-    done
-
-    KIMI_XATS_BASE_URL="$base_url" \
-    KIMI_XATS_SESSION_ID="$session_id" \
-        exec kimi --session "$session_id" --yolo "$@"
-}
-```
-
-然后用 `xats-kimi` 替代原本的 `kimi`:
-
-```bash
-xats-kimi                                      # 预创建 session, 透传用户参数
-xats-kimi --model kimi-code/kimi-for-coding    # 透传用户参数
-```
-
-launcher 做的事:
-
-- 把 base URL 解析为 `${KIMI_XATS_BASE_URL:-http://127.0.0.1:58627}` (`kimi web` 的默认绑定端口).
-- 端口上没有监听时, 先启动 `kimi web --no-open` 并等待端口就绪.  `kimi web` 是前台运行的, 所以启动器用 `&!` (后台 + disown) 把它甩到后台, `--no-open` 阻止它自动开浏览器.  不传 `--host` 就保持 loopback 绑定.
-- 通过 `POST /api/v1/sessions` 预创建 session 并导出 `KIMI_XATS_SESSION_ID` (精确 id).  这一点很关键: 从 `~/.kimi-code/session_index.jsonl` 取 `workDir` 匹配的最后一行, 在同目录多个 kimi 会话时会拿错 — poke 会唤醒别的 session 却报告 `delivered`.
-- 通过 `POST /api/v1/sessions/<id>/profile` 给 session 设置 model (从 `~/.kimi-code/config.toml` 的 `default_model` 读) 和 `permission_mode: "yolo"`.  两者都是必须的: server 创建的 session 不带 model (所有 server 驱动的 turn 立刻以 `model.not_configured` 失败), 且 server 驱动的 turn 用的是 session 的 permission mode 而不是 CLI 的 `--yolo` 参数 — 不设置的话, poke 唤醒的 turn 里每次工具调用都会卡在无人应答的审批上.
-- 发一条初始化 prompt, 让 CLI 能挂载 server 创建的 session (否则 kimi 报 `Agent "main" was not found`).
-- `exec kimi --session <id> --yolo "$@"` 用挂了预创建 session 的 kimi TUI 替换当前 shell.
-
-**session 永远删不掉 — 所以默认每次新建, 复用需要显式开启.**  kimi 的 REST API **没有删除 session 的路由**: 整个接口面只有三个 `DELETE`, 没有一个是 sessions 的; `DELETE /api/v1/workspaces/{id}` 也只是注销 workspace ("does not remove on-disk content"), 它下面的 session 照样列着.  每次启动新建一个 session 确实会永久泄漏 — 但这仍是默认行为, 因为反过来更糟: 上下文坏掉的 session (比如被卡死的工具调用循环污染) 会在每次复用时准时回来, 而新 session 天然干净.
-
-需要续用旧 session 时设 `XATS_KIMI_REUSE=1`: `xats-kimi` 会走 find-or-create — 优先复用当前目录对应池子里**最新的空闲** session (标题以 `xats-kimi` 开头且 `metadata.cwd` 等于 `$PWD`), 只有全部被占用时才新建.  池子大小收敛于你在该目录下的**并发峰值**, 而不是累计启动次数.  复用到的 session 如果上下文已经坏了, 归档它 (`POST /api/v1/sessions/<id>:archive`) 即可移出池子.
-
-复用模式下, 占用状态只能由启动器自己维护, 因为 kimi 答不了这个问题: `kimi web ps` 和服务端的 `connections` 只统计 web 客户端, TUI 挂载对两者都不可见.  所以认领 session 用的是 `~/.config/xats/kimi-locks` 下 `mkdir` 原子创建的锁目录, 里面存 TUI 的 pid —— `exec` 会用 kimi 替换掉 shell, 所以 `$$` 就是 kimi 进程本身.  pid 已死的锁会在下次启动时被回收, 也就是说 TUI 正常退出或崩溃都会自动释放 session, 不需要清理钩子.  `XATS_KIMI_DRYRUN=1 xats-kimi` 会打印池子里每个 session 的 `OCCUPIED` / `FREE` 状态然后退出, 不认领也不启动.
-
-一个注意点: 用裸 `kimi --session <id>` 挂载池子里的 session **不会加锁**, 之后 `xats-kimi` 可能把同一个 session 再交给第二个 TUI.  池子里的 session 只通过 `xats-kimi` 打开.  kimi 没有 session 级的占用 API, 所以这一点没法强制.
-
-`start-xats` 也会拉起 kimi server: 当 PATH 上有 `kimi` 二进制且端口空闲时, 运行 `kimi web --no-open` 并记录结果 (通过 `_xats-log-event`); 二进制缺失时静默跳过.  `stop-xats` 通过 `kimi web kill` 停掉它, 子命令失败时回退到直接 kill 58627 端口上的监听进程 (比如老版本 kimi 起的 server, `kimi web ps` 看不到).  `start-local-xats` / `stop-local-xats` 以同样方式管理 kimi server.
-
-**MCP 配置.**  上面的启动器和 poke 通道只解决了**唤醒**这一半, agent 还得能拿到 xats 工具本身.  kimi 按三个文件解析 MCP server, 后面的覆盖前面的: `$KIMI_CODE_HOME/mcp.json` (回落 `~/.kimi-code/mcp.json`)、`<git root>/.mcp.json`、以及 `<cwd>/.kimi-code/mcp.json` —— 注意最后一个锚在**当前工作目录**而不是 git root, 所以从子目录启动 kimi 是读不到仓库根那份的.
-
-因为 kimi 原生读 `<git root>/.mcp.json` —— 也就是 Claude Code 用的那个文件 —— 一个已经配好 Claude Code 的仓库看起来不用额外配置就能用.  别依赖这一点: `.mcp.json` 里还声明了 `cross-agent-teams-channel`, 这是 **Claude Code 专用**的 stdio server, kimi 会不停尝试启动它并不停报错.  给 kimi 单独一份 `<repo>/.kimi-code/mcp.json`, 显式禁用它:
-
-```json
-{
-  "mcpServers": {
-    "cross-agent-teams": {
-      "transport": "http",
-      "url": "http://127.0.0.1:9100/mcp",
-      "bearerTokenEnvVar": "CROSS_AGENT_TEAMS_MCP_TOKEN"
-    },
-    "cross-agent-teams-channel": { "enabled": false }
-  }
-}
-```
-
-`npx -y mcpsmgr@latest add jtianling/cross-agent-teams-mcp -a kimi-code -y` 会帮你把两条都写好, 包括禁用那条 (`--global` 写到 `~/.kimi-code/mcp.json`).  禁用必须是显式 `"enabled": false`, 不能靠省略: kimi 对这三个文件是按 key 的对象展开合并, 所以在 `.kimi-code/mcp.json` 里不写 channel, `<git root>/.mcp.json` 里那条**照样生效**.  只有当根文件确实声明了 channel 时这条才有意义; 只配了 kimi 的仓库没有东西要盖.
-
-同样因为是按 key 合并, **`mcpsmgr remove` 对 kimi 不等于完整卸载**: 从 `.kimi-code/mcp.json` 删掉一条之后, `<git root>/.mcp.json` 里的同名条目会重新生效.  这是 kimi 分层设计的固有属性 —— 真要卸载, 根文件里那条也得删.
-
-另外两点.  优先用 `bearerTokenEnvVar` 而不是明文 `headers.Authorization` —— kimi 会校验引用的变量, 变量没设时直接丢弃该 server, 而且它自己的规范就是别把 secret 放进 `mcp.json`.  还要注意**一条写坏会废掉整个文件**: kimi 是把每个 `mcp.json` 当作一个整体做 schema 校验的, 失败就整份报 `CONFIG_INVALID`, 那个文件里所有 server 一起失效.
-
-在 kimi TUI 里说:
-
-> 注册到 xats, name: kimi-1, team: default
-
-agent 会自动检测 `$KIMI_XATS_BASE_URL`, 选 `agent_type="kimi-code"`, 把 env 值作为 `base_url` 传过去, 并直接从 `$KIMI_XATS_SESSION_ID` 读 `session_id` — 不需要猜测.  poke 时 daemon 从 `~/.kimi-code/server.token` 读 bearer token (`kimi web` 跨重启持久化, `kimi web rotate-token` 可以让旧 token 立即失效); 只有非默认 token 部署才需要传 `auth_token_ref` (env 变量名).  注册时不做健康检查: 如果 poke 时服务器没在跑, poke 以 `kimi_connect_failed` 失败, 由 mailbox 重试机制接管.
-
-**同一个 kimi session 的两条 MCP 连接共存, 不互相顶掉.**  kimi 的双引擎架构让一个逻辑 agent 拥有两条 MCP 连接: TUI 的进程内引擎, 和跑 poke 唤醒 turn 的 server 引擎.  server 侧 turn 醒来时未绑定, 会用同一个名字 re-register; 由于两次注册都声明 `agent_type="kimi-code"` 且 `(base_url, session_id)` 二元组相同 (base URL 按 canonical 形式比较 —— 大小写、默认端口、尾斜杠都不影响), daemon 把它们当作同一 runtime 身份的并发连接 —— re-register 不会关闭 TUI 那条连接.  server 引擎每条新 MCP session 上第一次 `unknown_agent` → register 依然是预期且正确的; 只有*不同的* session (另一个 `session_id`, 或同名 id 出现在真正不同的 server 上) 抢占同名身份时才执行真正的 takeover 并关闭旧连接.  context clear 后丢了身份: 用 `reconnect({ agent_type: "kimi-code", base_url, session_id })` 找回 —— `agent_type` 让分派变得确定 (空注册表直接回 `need_register`, 而不是去探测 opencode server), `session_id` 必传 (kimi session 永不按最近使用自动解析), daemon 会先向 kimi server 复验该 session (返回必须指认这个 session 本身且未归档) 再重绑, 恢复的连接与同 session 的在线引擎连接共享绑定.  最常见的恢复方式就是重启 TUI: `xats-kimi` 会重新导出 `KIMI_XATS_BASE_URL` / `KIMI_XATS_SESSION_ID`.
-
-如果你直接用 `kimi` 启动 (没用 wrapper), 两个 env 变量都缺失, agent 会回退到 `agent_type="custom"` 加 `agent_type_name="kimi-code"`, poke 通过 tmux pane 注入投递 (见下一节).
-
-已知限制 (kimi 侧的问题, 不是 xats 的): poke 通过 server 驱动的 turn 唤醒 session, 但**安装版** kimi TUI 不会实时刷新自己被 server 驱动的 session — 被唤醒的 turn (收信, 回复等) 要重新加载 session 后才会出现在 TUI 记录里.  活照样干了, 只是少了实时显示.  **对 xats 用户这已经解决**: `xats-kimi` 默认启动本地 patched TUI (server-sync observer, `~/workspace/kimi-code` main), 外部 turn 实时可见 (状态栏提示 + 输入排队), turn 结束后自动刷新 transcript.  安装版 TUI 的限制会长期存在 (已决定不向上游提 issue); 在那上面需要实时显示的话, 用 `kimi web` 打开同一个 session.
-
-不要通过问 kimi agent 本人来确认这一点: 它跑在 session **内部**, 通过 session 状态看自己的对话, 而不是通过渲染出来的终端.  你问它 TUI 有没有刷新, 它会如实报告 turn 跑过了, 并回答 "刷新了, 实时可见" —— 而这是它结构上无法观察的断言.  只有人去看真实终端才能判定.
-
-**poke 前会做一次 session 前置检查.**  往一个已经在跑 turn 的 session 里注入, 等于让两个引擎同时写同一个 session, 所以每次 `POST /prompts` 之前 daemon 会先探测目标, 必要时拒绝注入.  两个输入, 按这个顺序判定:
-
-1. `GET /api/v1/sessions/<id>` —— `pending_interaction != 'none'` 返回 `kimi_pending_interaction`; `main_turn_active` 为真返回 `kimi_session_busy`, `reason: main_turn_active`.
-2. `~/.kimi-code/sessions/*/<id>/agents/main/wire.jsonl` 的 mtime —— 最近 10 秒内被写过, 返回 `kimi_session_busy`, `reason: tui_recent_write`.
-
-这个门判定的是 `main_turn_active`, **不是** `busy`.  后台任务活着的时候 `busy` 也是真, 而后台任务可以跑很久却完全不跟注入的 prompt 冲突 —— 用 `busy` 会把本来安全的 poke 也挡掉.
-
-`kimi_session_busy` (无论来自这个门, 还是来自 `POST /prompts` 自己回的 `SESSION_BUSY` 拒绝) 会按 tmux 路径同一套梯度重试 —— **30s / 180s / 600s**, 每次都重新跑一遍完整的前置检查.  `kimi_pending_interaction` **不重试**: 没人应答的审批会让 turn 一直挂着, 重试只是白白烧掉梯度.  梯度耗尽后 daemon 什么都不做: 不强行注入, 不回落 tmux.  消息发出时 mailbox 行就已经落库了, agent 下次 `get_inbox` 照样看得到 —— 唤醒是对它的优化, 不是投递手段本身.
-
-**两个盲区, 明说.**  REST 探测看不见 TUI: `busy` 和 `main_turn_active` 只反映 kimi **server** 进程里的引擎, 而你在 TUI 里跑的 turn 走的是 TUI 自己的进程内引擎 —— 跟上面"不实时刷新"是同一个双引擎根因.  wire 日志 mtime 就是为这种情况打的启发式补丁, 文件缺失或读不到时 fail open (照常注入).  另外这个门是 check-then-inject, 永远不是原子的: 探测和 POST 之间仍可能起一个 turn.  两个探测输入都刻意 fail open, 所以探测答不上来时退化成改动前的无门行为, 而不是投递中断.  这是缓解, 不是保证; 真正的修法是 kimi 上游把 TUI 收敛到 server 引擎上.
-
-**门的判定会在 daemon log 里留痕.**  每次推迟都会输出一条结构化记录 `{"event":"kimi_poke_deferred","session_id":…,…}`, 带上子原因 (`main_turn_active` / `tui_recent_write` / `session_busy_response`, 或具体的 pending interaction).  放行时如果 wire 日志的 age 低于观察上限 (默认 120s, 用 `KIMI_WIRE_AGE_OBSERVE_MS` 改), 会额外输出 `{"event":"kimi_poke_proceeded","session_id":…,"wire_age_ms":…}` —— 这是"注入可能恰好撞上 TUI turn 思考间隙"那类 near-miss 的可观测影子.  这个上限只用于观察, 永远不改变注入/推迟的判定; 空闲 session (没有 wire 日志, 或 age 达到上限) 什么都不记.  两类记录合起来, 为将来调 10s 窗口提供双侧证据.
-
-**跑很久的注入 turn 只记日志, 绝不中止.**  注入成功后 daemon 会记下返回的 prompt id, 超过阈值 (默认 10 分钟, 用 `XATS_KIMI_PROMPT_OBSERVE_MS` 改) 后检查这个 prompt 是否还在跑, 还在就打一条日志.  它不会去停这个 turn, 也不提供停的开关.  用时长判断"卡住"是错的判据: 这个项目里被 poke 唤醒的 turn 干真活跑过五分钟很常见, 而触发这次改动的失控案例特征是**毫无进展** —— 每 ~10 秒重复一模一样的 TodoList 轮次.  按时长中止会稳定地杀掉健康的那种, 只是顺带撞上生病的那种.
-
 #### 其它编码 agent (cursor, ...)
 
 非 Claude Code, 非 Codex, 也非通过 launcher 启动的 opencode — cursor, 编辑器扩展, 自己的 harness — 直接通过 Streamable HTTP 连 daemon, 注册时用 `agent_type="custom"` (agent 自己会判断).  这些 agent 没有专用的唤醒通道; 跨 agent poke 通过把文本注入到 agent 所在的 tmux pane 实现, 所以把 agent 跑在 tmux 窗口里, 注册时 daemon 会自动解析 `pid → tty → pane`.
@@ -459,9 +301,9 @@ curl -s -X DELETE http://127.0.0.1:<port>/api/agents/<agent_id>
 
 REST 上刻意没有 `register_agent` — 创建或重新绑定身份正是这个接口要规避的 takeover 陷阱, 所以 agent 必须先 (通过 MCP) 注册过一次, 才能用这个救生艇.
 
-**删除注册行.**  `DELETE /api/agents/<agent_id>` 只删这一行, 成功返回 `{"deleted":true,"agent_id":...,"team":...,"name":...}`; id 匹配不到任何行时返回 `404 {"error":"unknown_agent"}`, 所以重复删除会明确告诉你"本来就没了".  它按 `agent_id` 而不是 `(team, name)` 寻址是刻意的 —— 带着 daemon 已经不再使用的 device 标签的那些行, 正是最值得清理的, 而绑定到本机 device 的 `(team, name)` 查找根本够不着它们.  也刻意不看存活状态: 对于注册时既没有 pid 也没有 tmux pane 的 runtime (kimi-code), `online` 会退化成一个以天计的 `last_seen_at` 窗口, 拿它当门槛只会把最该删的行挡在外面.
+**删除注册行.**  `DELETE /api/agents/<agent_id>` 只删这一行, 成功返回 `{"deleted":true,"agent_id":...,"team":...,"name":...}`; id 匹配不到任何行时返回 `404 {"error":"unknown_agent"}`, 所以重复删除会明确告诉你"本来就没了".  它按 `agent_id` 而不是 `(team, name)` 寻址是刻意的 —— 带着 daemon 已经不再使用的 device 标签的那些行, 正是最值得清理的, 而绑定到本机 device 的 `(team, name)` 查找根本够不着它们.  也刻意不看存活状态: 对于注册时既没有 pid 也没有 tmux pane 的 runtime, `online` 会退化成一个以天计的 `last_seen_at` 窗口, 拿它当门槛只会把最该删的行挡在外面.
 
-这是**注册表**操作, 不是停止 agent 的手段.  它不杀任何东西: 不杀进程, 不杀 pane, 不杀 session.  一个正在运行的 agent 被删掉行之后, 它的下一次 xats 调用会以未注册 session 被拒, 需要重新 `register_agent`.  kimi-code 的落差更大 —— kimi session 会继续运行、继续接收 prompt (kimi 的 REST API 压根没有删除 session 的路由), 所以删行只是终结了它在 xats 里的可寻址性.  agent 删自己用 `unregister_self` 工具; 删**别的** agent 刻意没有提供 MCP 工具.
+这是**注册表**操作, 不是停止 agent 的手段.  它不杀任何东西: 不杀进程, 不杀 pane, 不杀 session.  一个正在运行的 agent 被删掉行之后, 它的下一次 xats 调用会以未注册 session 被拒, 需要重新 `register_agent`.  agent 删自己用 `unregister_self` 工具; 删**别的** agent 刻意没有提供 MCP 工具.
 
 > 安全提示: "loopback-only" 也包含同机的浏览器, 所以给 daemon 带上 `--token` 才能挡住本机网页访问 `/api/`.  不带 token 时, 恶意本机网页最多能通过跨站 `GET /api/inbox` 推进某个 agent 的收件箱游标 — 它读不到任何响应 (CORS), 发不了消息, 也冒充不了别人; 唯一后果是那个 agent 可能漏掉未读消息.  这是一个有界的、经过权衡后接受的风险; 带 token 就能彻底消除.
 
