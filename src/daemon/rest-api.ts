@@ -1,4 +1,9 @@
-import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify'
+import type {
+  FastifyError,
+  FastifyInstance,
+  FastifyRequest,
+  FastifyReply,
+} from 'fastify'
 import type Database from 'better-sqlite3'
 import { z } from 'zod'
 import { AgentsRepo } from '../storage/agents-repo.js'
@@ -8,20 +13,31 @@ import { GetInboxService } from '../mcp/get-inbox.js'
 import { createAutoPokeImpl } from '../mcp/tools.js'
 import { listAgentsForTeam } from '../mcp/list-agents.js'
 import { removeAgentRow } from '../mcp/unregister-self.js'
-import { wrapStorage } from './errors.js'
+import { isStorageError, wrapStorage } from './errors.js'
 import type { ChannelWakeFanout } from './channel-wake-fanout.js'
 import type { SessionOriginInfo } from './network-origin.js'
 import type { DaemonContext } from './server.js'
+import type {
+  CommitOpencodeRuntimeRestInput,
+  ReserveOpencodeRuntimeRestInput,
+} from '../mcp/opencode-runtime-control-schema.js'
+import {
+  commitOpencodeRuntimeRestSchema,
+  reserveOpencodeRuntimeRestSchema,
+} from '../mcp/opencode-runtime-control-schema.js'
 
-// Loopback-only, sessionless REST lifeboat. It reuses the SAME service layer as
-// the MCP tools (SendMessageService / GetInboxService / listAgentsForTeam) and
-// resolves identity purely by (team, name) → agents row on the local device.
-// It NEVER touches any MCP session, RegisterAgentService.connections, or any
-// delivery/fanout/channel-wake binding — there is no code path from here into
-// the session/register machinery (the no-session-side-effect invariant).
+// Loopback-only, sessionless REST surface. Lifeboat routes reuse the MCP data
+// services without touching session bindings. Runtime control routes reuse the
+// recovery service and may update only its generation and delivery fields.
 export interface RestApiDeps {
   channelWakeFanout?: ChannelWakeFanout
   context?: DaemonContext
+  runtimeControlService: OpencodeRuntimeControlService
+}
+
+export interface OpencodeRuntimeControlService {
+  reserve(input: ReserveOpencodeRuntimeRestInput): unknown
+  commit(input: CommitOpencodeRuntimeRestInput): Promise<unknown>
 }
 
 interface RestCtx {
@@ -30,6 +46,7 @@ interface RestCtx {
   agents: AgentsRepo
   sendSvc: SendMessageService
   inboxSvc: GetInboxService
+  runtimeControlService: OpencodeRuntimeControlService
 }
 
 const identitySchema = z.object({
@@ -177,10 +194,89 @@ async function handleDeleteAgent(ctx: RestCtx, req: FastifyRequest, reply: Fasti
   })
 }
 
+async function sendRuntimeFailure(
+  reply: FastifyReply,
+  error: unknown
+): Promise<void> {
+  if (isStorageError(error)) {
+    await reply.code(503).send({
+      ok: false,
+      error: 'storage_unavailable',
+    })
+    return
+  }
+  await reply.code(500).send({ ok: false, error: 'internal_error' })
+}
+
+async function sendInvalidRuntimeRequest(
+  reply: FastifyReply,
+  detail: string
+): Promise<void> {
+  await reply.code(400).send({
+    ok: false,
+    error: 'invalid_request',
+    detail,
+  })
+}
+
+async function runtimeRouteErrorHandler(
+  error: FastifyError,
+  _req: FastifyRequest,
+  reply: FastifyReply
+): Promise<void> {
+  if (error.statusCode === 400) {
+    await sendInvalidRuntimeRequest(reply, 'Invalid JSON body')
+    return
+  }
+  await sendRuntimeFailure(reply, error)
+}
+
+async function handleRuntimeReserve(
+  ctx: RestCtx,
+  req: FastifyRequest,
+  reply: FastifyReply
+): Promise<void> {
+  const parsed = reserveOpencodeRuntimeRestSchema.safeParse(req.body)
+  if (!parsed.success) {
+    await sendInvalidRuntimeRequest(
+      reply,
+      'Request body does not match schema'
+    )
+    return
+  }
+  try {
+    const result = await ctx.runtimeControlService.reserve(parsed.data)
+    await reply.send(result)
+  } catch (error) {
+    await sendRuntimeFailure(reply, error)
+  }
+}
+
+async function handleRuntimeCommit(
+  ctx: RestCtx,
+  req: FastifyRequest,
+  reply: FastifyReply
+): Promise<void> {
+  const parsed = commitOpencodeRuntimeRestSchema.safeParse(req.body)
+  if (!parsed.success) {
+    await sendInvalidRuntimeRequest(
+      reply,
+      'Request body does not match schema'
+    )
+    return
+  }
+  try {
+    const result = await ctx.runtimeControlService.commit(parsed.data)
+    await reply.send(result)
+  } catch (error) {
+    await sendRuntimeFailure(reply, error)
+  }
+}
+
 export function mountRestApi(
   app: FastifyInstance,
   db: Database.Database,
-  deps: RestApiDeps = {}
+  deps: RestApiDeps
 ): void {
   const agents = new AgentsRepo(db)
   const events = new EventsOutbox(db)
@@ -191,7 +287,14 @@ export function mountRestApi(
   const autoPokeImpl = createAutoPokeImpl(db, agents, deps.channelWakeFanout, localDevice)
   const sendSvc = new SendMessageService(db, agents, events, { poke: autoPokeImpl })
   const inboxSvc = new GetInboxService(db, agents)
-  const ctx: RestCtx = { db, localDevice, agents, sendSvc, inboxSvc }
+  const ctx: RestCtx = {
+    db,
+    localDevice,
+    agents,
+    sendSvc,
+    inboxSvc,
+    runtimeControlService: deps.runtimeControlService,
+  }
 
   // Loopback gate for every /api/* route. Runs after the global token-auth and
   // origin-classification onRequest hooks registered in buildServer, so the order
@@ -202,4 +305,14 @@ export function mountRestApi(
   app.get('/api/inbox', (req, reply) => handleInbox(ctx, req, reply))
   app.get('/api/agents', (req, reply) => handleAgents(ctx, req, reply))
   app.delete('/api/agents/:agent_id', (req, reply) => handleDeleteAgent(ctx, req, reply))
+  app.post(
+    '/api/runtime/opencode/reserve',
+    { errorHandler: runtimeRouteErrorHandler },
+    (req, reply) => handleRuntimeReserve(ctx, req, reply)
+  )
+  app.post(
+    '/api/runtime/opencode/commit',
+    { errorHandler: runtimeRouteErrorHandler },
+    (req, reply) => handleRuntimeCommit(ctx, req, reply)
+  )
 }

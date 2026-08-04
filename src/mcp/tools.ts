@@ -49,6 +49,11 @@ import {
   type ReconnectResolution,
 } from './reconnect.js'
 import { canonicalKimiBaseUrl, kimiBaseUrlIssue } from '../lib/kimi-url.js'
+import {
+  commitOpencodeRuntimeSchema,
+  reserveOpencodeRuntimeSchema,
+  runtimeGenerationSchema,
+} from './opencode-runtime-control-schema.js'
 import { UnregisterSelfService } from './unregister-self.js'
 import { listAgentsForTeam } from './list-agents.js'
 import { detectTmuxPane } from '../daemon/tmux-pane-detect.js'
@@ -101,38 +106,6 @@ const deliverySchema = z.object({
 }).passthrough()
 
 const agentTypeSchema = z.enum(['codex', 'claude-code', 'opencode', 'kimi-code', 'custom'])
-
-const runtimeGenerationSchema = z.number()
-  .int()
-  .positive()
-  .max(Number.MAX_SAFE_INTEGER)
-
-const recoveryProtocolVersionSchema = z.number()
-  .int()
-  .optional()
-
-const reserveOpencodeRuntimeSchema = z.object({
-  identity_key: z.string().min(1).refine(value => value.trim().length > 0),
-  runtime_generation: runtimeGenerationSchema,
-  protocol_version: recoveryProtocolVersionSchema,
-}).strict()
-
-const commitOpencodeRuntimeSchema = reserveOpencodeRuntimeSchema.extend({
-  base_url: z.string().url().refine(value => {
-    try {
-      canonicalOpencodeBaseUrl(value)
-      return true
-    } catch {
-      return false
-    }
-  }, {
-    message: 'base_url must be an http(s) URL without query, fragment, or userinfo',
-  }),
-  session_id: z.string().trim().min(1).refine(
-    value => value.startsWith('ses'),
-    { message: 'session_id must start with "ses"' }
-  ),
-})
 
 const detectTmuxPaneSchema = z.object({
   agent: z.enum(['codex', 'claude-code', 'opencode', 'custom']),

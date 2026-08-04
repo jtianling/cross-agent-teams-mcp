@@ -302,6 +302,35 @@ curl -s 'http://127.0.0.1:<port>/api/agents?team=default'
 curl -s -X DELETE http://127.0.0.1:<port>/api/agents/<agent_id>
 ```
 
+**OpenCode runtime control.**  Launchers can use two separate sessionless
+endpoints to reserve a runtime generation and commit an exact OpenCode session.
+They use the same loopback and bearer-token gates as the lifeboat routes.  The
+identity key is accepted only in the JSON body.
+
+```text
+POST /api/runtime/opencode/reserve
+{"identity_key":"<key>","runtime_generation":2,"protocol_version":1}
+
+POST /api/runtime/opencode/commit
+{"identity_key":"<key>","runtime_generation":2,"protocol_version":1,
+ "base_url":"http://127.0.0.1:4096","session_id":"ses_exact"}
+```
+
+Both bodies are strict, and `protocol_version` is required.  A schema-valid
+service outcome is returned unchanged with HTTP `200`, including domain failures
+whose body has `ok:false`.  Invalid JSON or schema input returns HTTP `400` as
+`{"ok":false,"error":"invalid_request","detail":"..."}`.  Storage and
+unexpected adapter failures return stable HTTP `503 storage_unavailable` and
+HTTP `500 internal_error` envelopes with `ok:false`.  Authentication and remote
+peer rejection remain HTTP `401` and `403`, before the recovery service runs.
+The commit response keeps `connection_bound:false`; the exact OpenCode session
+must reconnect itself.
+
+These endpoints do not add daemon discovery.  A launcher must already know the
+daemon endpoint or read the existing pid file for its `port`; a bearer token,
+when configured, is supplied separately.  No new discovery endpoint or Unix
+socket is exposed.
+
 There is deliberately no `register_agent` over REST — creating or rebinding an identity is the very takeover footgun this surface avoids, so an agent must have registered once (over MCP) before it can use the lifeboat.
 
 **Removing a registry row.**  `DELETE /api/agents/<agent_id>` deletes exactly that row and returns `{"deleted":true,"agent_id":...,"team":...,"name":...}`; an id that matches nothing returns `404 {"error":"unknown_agent"}`, so a repeated delete tells you it was already gone.  It is addressed by `agent_id` rather than `(team, name)` on purpose — rows carrying a device label the daemon no longer uses are exactly the ones worth clearing, and a `(team, name)` lookup pinned to the local device cannot reach them.  Liveness is not consulted: `online` degrades to a multi-day `last_seen_at` window for runtimes that register without a pid or a tmux pane, so gating on it would refuse the rows that most need removing.

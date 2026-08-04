@@ -4,7 +4,10 @@ import { openDb } from '../storage/db.js'
 import { applySchema } from '../storage/schema.js'
 import { makeAuthHook } from './auth.js'
 import { mountMcp } from '../mcp/transport.js'
-import { mountRestApi } from './rest-api.js'
+import {
+  mountRestApi,
+  type OpencodeRuntimeControlService,
+} from './rest-api.js'
 import { runCleanup } from './cleanup.js'
 import { SseFanout } from './sse-fanout.js'
 import { ChannelWakeFanout } from './channel-wake-fanout.js'
@@ -14,7 +17,12 @@ import { clearAllCodexRecoverySchedules } from '../mcp/codex-recovery-poke.js'
 import { clearAllCodexSeedingSchedules } from '../mcp/codex-seeding-poke.js'
 import {
   clearAllOpencodeRecoveryPromptSchedules,
+  OpencodeRuntimeRecoveryService,
 } from '../mcp/opencode-runtime-recovery.js'
+import { AgentsRepo } from '../storage/agents-repo.js'
+import { RegisterAgentService } from '../mcp/register-agent.js'
+import { RegisterOpencodeSelfService } from '../mcp/register-opencode-self.js'
+import { dispatchOpencodeServerPoke } from '../mcp/opencode-server-dispatch.js'
 import { resolveLocalDeviceLabel } from './local-device.js'
 import { bindHostCoversIpv4Loopback, classifyPeerAddress, type SessionOriginInfo } from './network-origin.js'
 
@@ -33,6 +41,7 @@ export interface ServerOpts {
   paneVisibleProbe?: (paneId: string) => boolean
   fanout?: SseFanout
   channelWakeFanout?: ChannelWakeFanout
+  runtimeControlService?: OpencodeRuntimeControlService
 }
 export interface StartOpts extends ServerOpts {
   port: number
@@ -77,6 +86,25 @@ export async function buildServer(opts: ServerOpts): Promise<FastifyInstance> {
   const version = '0.1.0'
   const fanout = opts.fanout ?? new SseFanout()
   const channelWakeFanout = opts.channelWakeFanout ?? new ChannelWakeFanout()
+  const runtimeRegisterSvc = new RegisterAgentService(db, {
+    localDevice: context.localDevice,
+  })
+  const runtimeOpencodeSvc = new RegisterOpencodeSelfService(
+    runtimeRegisterSvc
+  )
+  const runtimeControlService = opts.runtimeControlService
+    ?? new OpencodeRuntimeRecoveryService(
+      new AgentsRepo(db),
+      {
+        localDevice: context.localDevice,
+        probeExactSession: args => runtimeOpencodeSvc.validateExactSession(
+          args.base_url,
+          args.session_id,
+          args.auth_token_ref
+        ),
+        sendRecoveryPrompt: args => dispatchOpencodeServerPoke(args),
+      }
+    )
   app.addHook('onRequest', makeAuthHook(opts.token))
   app.addHook('onRequest', async (req) => {
     ;(req as typeof req & { xatsPeer?: SessionOriginInfo }).xatsPeer =
@@ -92,7 +120,11 @@ export async function buildServer(opts: ServerOpts): Promise<FastifyInstance> {
   // Loopback-only REST lifeboat. Mounted after the auth + origin-classification
   // onRequest hooks (above) and alongside mountMcp. Receives the same
   // channelWakeFanout used for send fan-out so /api/send pokes identically.
-  mountRestApi(app, db, { channelWakeFanout, context })
+  mountRestApi(app, db, {
+    channelWakeFanout,
+    context,
+    runtimeControlService,
+  })
   app.get('/health', async () => ({
     ok: true,
     version,

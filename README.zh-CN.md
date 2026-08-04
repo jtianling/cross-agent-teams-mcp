@@ -299,6 +299,32 @@ curl -s 'http://127.0.0.1:<port>/api/agents?team=default'
 curl -s -X DELETE http://127.0.0.1:<port>/api/agents/<agent_id>
 ```
 
+**OpenCode runtime control.**  launcher 可以通过两个独立的 sessionless endpoint
+预留 runtime generation, 并提交精确的 OpenCode session.  它们复用救生艇路由的
+loopback 与 bearer-token gate.  identity key 只允许出现在 JSON body 中.
+
+```text
+POST /api/runtime/opencode/reserve
+{"identity_key":"<key>","runtime_generation":2,"protocol_version":1}
+
+POST /api/runtime/opencode/commit
+{"identity_key":"<key>","runtime_generation":2,"protocol_version":1,
+ "base_url":"http://127.0.0.1:4096","session_id":"ses_exact"}
+```
+
+两个 body 都是 strict object, 且必须提供 `protocol_version`.  通过 schema 后,
+service outcome 一律以 HTTP `200` 原样返回, 包括 body 为 `ok:false` 的 domain
+failure.  无效 JSON 或 schema input 返回 HTTP `400`, envelope 为
+`{"ok":false,"error":"invalid_request","detail":"..."}`.  storage failure 与
+unexpected adapter failure 分别返回稳定的 HTTP `503 storage_unavailable` 和 HTTP
+`500 internal_error` envelope, 且都带 `ok:false`.  鉴权失败和 remote peer 拒绝仍在
+service 运行前返回 HTTP `401` 与 `403`.  commit 响应保持
+`connection_bound:false`, 必须由精确的 OpenCode session 自行 reconnect.
+
+这些 endpoint 不新增 daemon discovery.  launcher 必须已经知道 daemon endpoint,
+或从现有 pid file 读取 `port`; 配置了 bearer token 时另行提供.  不暴露新的
+discovery endpoint 或 Unix socket.
+
 REST 上刻意没有 `register_agent` — 创建或重新绑定身份正是这个接口要规避的 takeover 陷阱, 所以 agent 必须先 (通过 MCP) 注册过一次, 才能用这个救生艇.
 
 **删除注册行.**  `DELETE /api/agents/<agent_id>` 只删这一行, 成功返回 `{"deleted":true,"agent_id":...,"team":...,"name":...}`; id 匹配不到任何行时返回 `404 {"error":"unknown_agent"}`, 所以重复删除会明确告诉你"本来就没了".  它按 `agent_id` 而不是 `(team, name)` 寻址是刻意的 —— 带着 daemon 已经不再使用的 device 标签的那些行, 正是最值得清理的, 而绑定到本机 device 的 `(team, name)` 查找根本够不着它们.  也刻意不看存活状态: 对于注册时既没有 pid 也没有 tmux pane 的 runtime, `online` 会退化成一个以天计的 `last_seen_at` 窗口, 拿它当门槛只会把最该删的行挡在外面.
