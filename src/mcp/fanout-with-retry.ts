@@ -32,6 +32,17 @@ export async function runFanoutWithRetry(args: {
     retry: {
       messageId: args.messageId,
       sentAt: args.sentAt,
+      // The cursor only advances past an event when get_inbox has returned
+      // it, so cursor >= event_id means the recipient has seen this mail and
+      // a pending wake-up retry would announce mail the inbox no longer has.
+      alreadyReadFn: (agentId: string) => {
+        const row = db.prepare(
+          `SELECT m.event_id AS event_id, a.last_processed_event_id AS cursor
+           FROM messages m, agents a
+           WHERE m.id=? AND a.agent_id=?`
+        ).get(args.messageId, agentId) as { event_id: number; cursor: number } | undefined
+        return row !== undefined && row.cursor >= row.event_id
+      },
       lookupAgentFn: (agentId: string) => db.prepare(
         'SELECT agent_id, tmux_pane_id, last_seen_at FROM agents WHERE agent_id=?'
       ).get(agentId) as { agent_id: string; tmux_pane_id: string | null; last_seen_at: string } | undefined,

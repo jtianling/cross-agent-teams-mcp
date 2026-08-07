@@ -27,10 +27,17 @@ export interface RetryContext {
   // `void` keeps pre-existing callers valid and is read as "delivered".
   pokeFn: (args: RetryPokeArgs) => Promise<{ ok: true } | { ok: false; reason?: string } | void>
   lookupAgentFn: (agentId: string) => RetryAgentLookup | undefined
+  /**
+   * Read-receipt check run at the start of every tick: returns true when the
+   * recipient's get_inbox cursor has already passed this message's event_id,
+   * meaning the mail was read while the retry was pending and waking the
+   * recipient now would only produce a phantom "new mail" notification.
+   */
+  alreadyReadFn?: () => boolean
   updateStatusFn?: (args: {
     agentId: string
     wake_status: 'delivered' | 'retrying' | 'skipped' | 'failed'
-    skip_reason?: 'guard_failed' | 'no_pane' | 'recipient_active' | 'retry_exhausted' | TerminalSkipReason | null
+    skip_reason?: 'guard_failed' | 'no_pane' | 'recipient_active' | 'retry_exhausted' | 'already_read' | TerminalSkipReason | null
     retry_attempts?: number
     delivered_at?: string | null
   }) => void
@@ -93,6 +100,18 @@ async function tick(key: string): Promise<void> {
   if (!entry) return
   const { ctx } = entry
   try {
+    // The recipient already read the mail while the retry was pending: a
+    // wake-up now would announce mail its inbox no longer has.
+    if (ctx.alreadyReadFn?.()) {
+      ctx.updateStatusFn?.({
+        agentId: ctx.agentId,
+        wake_status: 'skipped',
+        skip_reason: 'already_read',
+        retry_attempts: entry.attempt,
+      })
+      retryMap.delete(key)
+      return
+    }
     const agent = ctx.lookupAgentFn(ctx.agentId)
     if (!agent || !agent.tmux_pane_id) {
       ctx.updateStatusFn?.({

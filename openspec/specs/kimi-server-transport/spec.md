@@ -269,6 +269,8 @@ The wire-log check is a heuristic for TUI-side activity, which the REST probe ca
 
 A kimi poke that returned `kimi_session_busy` (from the precondition gate or from a `SESSION_BUSY` injection rejection) SHALL be retried on the delays already used for tmux guard failures — 30s, 180s, 600s — re-running the full precondition check on each attempt.
 
+Each retry tick MUST first check whether the recipient's `last_processed_event_id` cursor has already passed the originating message's `event_id` (the mail was returned by a `get_inbox` while the retry was pending); if so the tick SHALL mark the delivery status `skipped` with `skip_reason='already_read'` and stop the gradient without running the precondition check — a wake-up then would only announce mail the recipient's inbox no longer holds.
+
 Retries SHALL be scheduled through a kimi-specific path. The existing tmux scheduler cannot serve them: it requires a pane id and abandons any agent whose `tmux_pane_id` is null, which is every kimi-code agent.
 
 `kimi_pending_interaction` SHALL NOT be retried. The blocking condition is an unanswered human approval; it keeps the turn active indefinitely, so retrying only exhausts the gradient without any possibility of success.
@@ -293,6 +295,14 @@ When the gradient is exhausted the daemon SHALL take no further action: it MUST 
 - **GIVEN** a kimi poke that returned `kimi_pending_interaction`
 - **WHEN** the dispatcher result is processed
 - **THEN** no retry is scheduled for that recipient
+
+#### Scenario: Mail read while a kimi retry is pending stops the gradient
+
+- **GIVEN** a kimi poke deferred with `kimi_session_busy` and a retry scheduled
+- **AND** before the next tick the recipient's `get_inbox` has advanced its `last_processed_event_id` past the message's `event_id`
+- **WHEN** the next retry tick fires
+- **THEN** no precondition check or injection is attempted
+- **AND** the delivery status is `skipped` with `skip_reason='already_read'`
 
 ### Requirement: Injected turns are observed but never aborted
 

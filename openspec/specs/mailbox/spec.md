@@ -321,10 +321,11 @@ This Requirement applies uniformly to `send_message` (including cross-team), `br
 
 Each retry tick MUST:
 
-1. Look up the recipient's current `tmux_pane_id` and `last_seen_at` from the database (no team filter — `agent_id` is globally unique).
-2. If the recipient no longer exists or has no pane id: mark the delivery status `failed` with `skip_reason='no_pane'` and stop retrying for that recipient.
-3. If `last_seen_at > sent_at` of the originating message: mark the delivery status `skipped` with `skip_reason='recipient_active'` and stop retrying.
-4. Otherwise: invoke `runQuietGuard(pane_id)`.  Pass → fire poke with the hint-format wake-up prompt AND the internal `skipGuard` flag set (the tick has already run the quiet-guard, so the poke primitive MUST NOT re-run it — this avoids a redundant second `POKE_QUIET_MS` wait), mark delivery status `delivered`, set `delivered_at`, and stop remaining retries.  Fail → increment `retry_attempts`; if attempts remain, keep status `retrying`; if no attempts remain, mark status `failed` with `skip_reason='retry_exhausted'`.
+1. If the recipient's `last_processed_event_id` cursor has already passed the originating message's `event_id` (i.e. a `get_inbox` has returned the mail while the retry was pending): mark the delivery status `skipped` with `skip_reason='already_read'` and stop retrying — a wake-up would only announce mail the recipient's inbox no longer holds.
+2. Look up the recipient's current `tmux_pane_id` and `last_seen_at` from the database (no team filter — `agent_id` is globally unique).
+3. If the recipient no longer exists or has no pane id: mark the delivery status `failed` with `skip_reason='no_pane'` and stop retrying for that recipient.
+4. If `last_seen_at > sent_at` of the originating message: mark the delivery status `skipped` with `skip_reason='recipient_active'` and stop retrying.
+5. Otherwise: invoke `runQuietGuard(pane_id)`.  Pass → fire poke with the hint-format wake-up prompt AND the internal `skipGuard` flag set (the tick has already run the quiet-guard, so the poke primitive MUST NOT re-run it — this avoids a redundant second `POKE_QUIET_MS` wait), mark delivery status `delivered`, set `delivered_at`, and stop remaining retries.  Fail → increment `retry_attempts`; if attempts remain, keep status `retrying`; if no attempts remain, mark status `failed` with `skip_reason='retry_exhausted'`.
 
 The sending tool's response (`send_message`, `broadcast`, or `broadcast_to_role`) MUST include:
 
@@ -362,6 +363,15 @@ The daemon MUST clear all pending retry timers on shutdown (e.g. Fastify `onClos
 - **AND** no poke fires on or after t=235s
 - **AND** the retry map has no entry after the stop
 - **AND** the delivery status for B is `skipped` with `skip_reason='recipient_active'`
+
+#### Scenario: Mail read while retry pending cancels the wake-up
+
+- **GIVEN** a retry is scheduled for recipient B on message M
+- **AND** before the next tick, B calls `get_inbox` and its `last_processed_event_id` advances past M's `event_id`
+- **WHEN** the next retry tick fires
+- **THEN** no guard check and no poke is attempted
+- **AND** the retry map has no entry for M/B afterwards
+- **AND** the delivery status for B is `skipped` with `skip_reason='already_read'`
 
 #### Scenario: All 3 retries guard_fail, message remains in mailbox only
 

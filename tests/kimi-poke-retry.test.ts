@@ -144,6 +144,24 @@ describe('kimi-poke-retry', () => {
     expect(calls).toBe(0)
     expect(__peekKimiRetryMap().size).toBe(0)
   })
+
+  it('stops the ladder without attempting when the mail was already read', async () => {
+    let calls = 0
+    const statusCalls: StatusCall[] = []
+    scheduleKimiRetry(
+      makeCtx({
+        alreadyReadFn: () => true,
+        attemptFn: async () => { calls += 1; return { ok: true } },
+        updateStatusFn: s => { statusCalls.push(s) },
+      })
+    )
+    await vi.advanceTimersByTimeAsync(30_000 + 180_000 + 600_000)
+    expect(calls).toBe(0)
+    expect(__peekKimiRetryMap().size).toBe(0)
+    expect(statusCalls).toEqual([
+      { agentId: 'K', wake_status: 'skipped', skip_reason: 'already_read', retry_attempts: 0 },
+    ])
+  })
 })
 
 describe('fanoutAutoPoke kimi deferral scheduling', () => {

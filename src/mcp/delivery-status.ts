@@ -7,6 +7,7 @@ export type DeliverySkipReason =
   | 'auto_poke_disabled'
   | 'recipient_active'
   | 'retry_exhausted'
+  | 'already_read'
 
 export interface DeliveryStatusRow {
   agent_id: string

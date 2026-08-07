@@ -157,4 +157,23 @@ describe('poke-retry core', () => {
     await vi.advanceTimersByTimeAsync(800_000)
     expect(pokeCalls.length).toBe(0)
   })
+
+  it('alreadyReadFn true at tick → no guard/poke, status skipped already_read', async () => {
+    let guardCalls = 0
+    const pokeCalls: PokeCall[] = []
+    const statusCalls: StatusCall[] = []
+    scheduleRetry(makeCtx({
+      alreadyReadFn: () => true,
+      paneGuardFn: async () => { guardCalls += 1; return 'pass' },
+      pokeFn: async (a) => { pokeCalls.push({ paneId: a.paneId, body: a.body, targetAgentId: a.targetAgentId }) },
+      updateStatusFn: (s) => { statusCalls.push(s) }
+    }))
+    await vi.advanceTimersByTimeAsync(30_000 + 180_000 + 600_000)
+    expect(guardCalls).toBe(0)
+    expect(pokeCalls.length).toBe(0)
+    expect(__peekRetryMap().size).toBe(0)
+    expect(statusCalls).toEqual([
+      { agentId: 'B', wake_status: 'skipped', skip_reason: 'already_read', retry_attempts: 0 }
+    ])
+  })
 })

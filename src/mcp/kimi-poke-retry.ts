@@ -14,10 +14,17 @@ export interface KimiRetryContext {
   messageId: string
   /** Re-runs the full precondition check and, if it passes, the injection. */
   attemptFn: () => Promise<KimiPokeAttemptResult>
+  /**
+   * Read-receipt check run at the start of every tick: returns true when the
+   * recipient's get_inbox cursor has already passed this message's event_id.
+   * A deferred wake-up whose mail was already read only produces a phantom
+   * "new mail" notification against an empty inbox, so the gradient stops.
+   */
+  alreadyReadFn?: () => boolean
   updateStatusFn?: (args: {
     agentId: string
-    wake_status: 'delivered' | 'retrying' | 'failed'
-    skip_reason?: 'kimi_session_busy' | 'retry_exhausted' | null
+    wake_status: 'delivered' | 'retrying' | 'skipped' | 'failed'
+    skip_reason?: 'kimi_session_busy' | 'retry_exhausted' | 'already_read' | null
     retry_attempts?: number
     delivered_at?: string | null
   }) => void
@@ -58,6 +65,18 @@ async function tick(key: string): Promise<void> {
   if (!entry) return
   const { ctx } = entry
   try {
+    // Read while the retry was pending: the wake-up would announce mail the
+    // recipient's inbox no longer holds.
+    if (ctx.alreadyReadFn?.()) {
+      ctx.updateStatusFn?.({
+        agentId: ctx.agentId,
+        wake_status: 'skipped',
+        skip_reason: 'already_read',
+        retry_attempts: entry.attempt,
+      })
+      retryMap.delete(key)
+      return
+    }
     const result = await ctx.attemptFn()
     if (result.ok) {
       ctx.updateStatusFn?.({

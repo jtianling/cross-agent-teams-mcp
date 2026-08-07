@@ -44,6 +44,12 @@ export interface RetryScheduleCtx {
   messageId: string
   sentAt: string
   lookupAgentFn: (agentId: string) => RetryAgentLookup | undefined
+  /**
+   * Read-receipt check evaluated at every retry tick: true when the
+   * recipient's get_inbox cursor has passed this message's event_id (the
+   * mail was already read, so a wake-up would be a phantom notification).
+   */
+  alreadyReadFn?: (agentId: string) => boolean
   scheduleRetryFn?: (ctx: RetryContext) => void
   scheduleKimiRetryFn?: (ctx: KimiRetryContext) => void
   // Widened over RetryContext's own union so the same callback can serve both
@@ -130,6 +136,7 @@ export async function fanoutAutoPoke(args: {
         scheduleKimiFn({
           agentId: res.agent_id,
           messageId: args.retry.messageId,
+          alreadyReadFn: () => args.retry?.alreadyReadFn?.(res.agent_id) ?? false,
           attemptFn: async () => {
             const out = await pokeFn({
               team: args.team,
@@ -155,6 +162,7 @@ export async function fanoutAutoPoke(args: {
           team: args.team,
           sentAt: args.retry.sentAt,
           paneId: res.paneId,
+          alreadyReadFn: () => args.retry?.alreadyReadFn?.(res.agent_id) ?? false,
           paneGuardFn: runQuietGuard,
           // Retry ticks take a fresh snapshot: this round's is long stale by
           // then. An explicitly injected loader still wins.
