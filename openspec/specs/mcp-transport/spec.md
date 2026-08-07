@@ -346,3 +346,50 @@ The GC MUST NOT emit orphan-reap log lines by default. When an explicit MCP tran
 - **WHEN** the GC reaps `sess-O`
 - **THEN** the SSE fanout no longer holds a sink for `sess-O`
 - **AND** the channel-wake fanout no longer holds a sink for `sess-O`'s session id
+
+### Requirement: Handshake-level kimi identity rebind via request headers
+
+kimi-code session-scoped MCP connections attach identity headers to `initialize` and every subsequent request: `X-Kimi-Session-Id` (required, the kimi session id) and `X-Kimi-Base-Url` (optional, the kimi server base URL). When an MCP session is not bound to an agent and a POST request carries `X-Kimi-Session-Id`, the daemon SHALL attempt to bind the session to the already-registered agent that claims the identity, so that a client reconnect, MCP config hot-reload, or daemon restart does not surface `unknown_agent` to an agent that previously registered.
+
+The bind attempt MUST:
+
+1. Reverse-lookup candidate agent rows on the local device with a `kimi-server` delivery claiming the presented `session_id` — by `(base_url, session_id)` when `X-Kimi-Base-Url` is present, or by `session_id` alone when it is absent (the unique matching row then supplies the base_url to probe). Zero matches → no bind; multiple matches → no bind (fail closed).
+2. Probe-validate the live kimi session before binding, reusing exactly the reconnect path's `validateKimiSession` semantics (GET `<base_url>/api/v1/sessions/<session_id>`, payload id must match and must not be archived; bearer resolution is the row's `auth_token_ref`, else the kimi token file). Any probe failure → no bind (fail closed).
+3. On success, associate the connection with the agent row using the same semantics as `reconnect`: attach the SSE fanout and set the session's `agentIdHolder` (no registry mutation), and record the connection in the cross-session ledger under the kimi runtime key so it SHARES the identity with live connections of the same kimi session instead of taking them over.
+
+The daemon MUST NOT synthesize identity from any channel other than these explicit headers (no clientInfo sniffing, no source-IP heuristics). A failed or skipped bind MUST NOT produce an error response: the session stays unregistered and the normal `register_agent` / `reconnect` paths remain available, with the `unknown_agent` recovery hint as the fallback guidance.
+
+Bind attempts SHALL be memoized per `(session, presented identity)`: terminal outcomes (`bound`, `no_match`, `ambiguous`) are recorded so each identity is probed at most once per session, while a `probe_failed` outcome MAY be retried by a later request. A non-`initialize` POST on an unbound session MUST await any in-flight bind attempt before the request is dispatched, so the first tool call after reconnect cannot race the probe into a spurious `unknown_agent`.
+
+#### Scenario: Fresh session binds at initialize via identity headers
+
+- **GIVEN** agent `kimi-1` is registered on the local device with a `kimi-server` delivery `{base_url: B, session_id: S}` and the kimi server at `B` reports session `S` as live
+- **WHEN** a new MCP client initializes with headers `X-Kimi-Session-Id: S` and `X-Kimi-Base-Url: B`
+- **THEN** the new session is bound to `kimi-1`'s `agent_id` without any `register_agent` call
+- **AND** a subsequent `get_inbox` on that session succeeds instead of returning `unknown_agent`
+
+#### Scenario: Base-url header absent binds via unique session id reverse lookup
+
+- **GIVEN** exactly one local `kimi-server` agent row claims session id `S`
+- **WHEN** a new MCP client initializes with only `X-Kimi-Session-Id: S`
+- **THEN** the daemon probes the base_url stored on that row and, on success, binds the session to that agent
+
+#### Scenario: Ambiguous session id fails closed
+
+- **GIVEN** two local `kimi-server` agent rows on different base_urls both claim session id `S`
+- **WHEN** a new MCP client initializes with only `X-Kimi-Session-Id: S`
+- **THEN** the session remains unbound
+- **AND** no kimi server is probed
+
+#### Scenario: Probe failure leaves the session unbound and is retriable
+
+- **GIVEN** one local `kimi-server` agent row claims `(B, S)` but the kimi server at `B` reports `S` missing
+- **WHEN** a new MCP client presents `X-Kimi-Session-Id: S`
+- **THEN** the session remains unbound and business tools return `unknown_agent` with the recovery hint
+- **AND** once the kimi server reports `S` live again, a later request on the same session retries the bind and succeeds
+
+#### Scenario: No identity headers means no bind attempt
+
+- **GIVEN** a new MCP session whose requests carry neither `X-Kimi-Session-Id` nor `X-Kimi-Base-Url`
+- **WHEN** it calls any business tool
+- **THEN** no reverse lookup or probe is performed and the existing unregistered-session behavior is unchanged

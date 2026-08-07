@@ -7,6 +7,11 @@ import { echoSchema, echoHandler } from './echo.js'
 import { sendControlPlaneReject } from './control-plane-reject.js'
 import { registerBusinessTools, type AgentIdHolder } from './tools.js'
 import { RegisterAgentService } from './register-agent.js'
+import { AgentsRepo } from '../storage/agents-repo.js'
+import {
+  attemptKimiHandshakeBind,
+  readKimiHandshakeHeaders,
+} from './kimi-handshake-bind.js'
 import type { SseFanout, SseSink } from '../daemon/sse-fanout.js'
 import type { ChannelWakeFanout } from '../daemon/channel-wake-fanout.js'
 import type { DaemonContext } from '../daemon/server.js'
@@ -18,6 +23,16 @@ interface Session {
   sink: SseSink
   sessionId: string
   agentIdHolder: AgentIdHolder
+  onRegisterSuccess: (agentId: string, team: string) => void
+  /**
+   * Handshake-level identity bind state (X-Kimi-Session-Id / X-Kimi-Base-Url
+   * headers). `attempted` records identity keys with a terminal outcome
+   * (bound / no_match / ambiguous) so each identity is tried once; a
+   * probe_failed outcome is NOT recorded and may be retried by a later
+   * request. `inFlight` lets subsequent requests await an ongoing bind
+   * instead of racing it into unknown_agent.
+   */
+  handshake: { attempted: Set<string>; inFlight?: Promise<void> }
   registeredTeam?: string
   createdAt: number
   lastActivityAt: number
@@ -279,6 +294,8 @@ export function mountMcp(
           sink,
           sessionId: sid,
           agentIdHolder,
+          onRegisterSuccess,
+          handshake: { attempted: new Set() },
           createdAt: now,
           lastActivityAt: now,
           clientInfo: undefined,
@@ -325,10 +342,64 @@ export function mountMcp(
       sink,
       sessionId: '',
       agentIdHolder,
+      onRegisterSuccess,
+      handshake: { attempted: new Set() },
       createdAt: now,
       lastActivityAt: now,
       originInfo: { origin: 'local', remote_addr: null },
     }
+  }
+
+  const handshakeRepo = new AgentsRepo(db)
+
+  /**
+   * Handshake-level identity rebind for kimi-code session-scoped connections.
+   * Runs when an unbound session presents X-Kimi-Session-Id; terminal
+   * outcomes are memoized per identity so the cheap path is a Set lookup.
+   * Awaiting an in-flight bind before dispatch keeps the first post-init
+   * tools/call from racing the probe into unknown_agent.
+   */
+  async function ensureKimiHandshakeBind(
+    session: Session,
+    req: FastifyRequest
+  ): Promise<void> {
+    if (session.agentIdHolder.current !== undefined) return
+    if (session.handshake.inFlight) {
+      await session.handshake.inFlight
+      return
+    }
+    const identity = readKimiHandshakeHeaders(
+      req.headers as Record<string, unknown>
+    )
+    if (!identity) return
+    const key = `${identity.base_url ?? ''} ${identity.session_id}`
+    if (session.handshake.attempted.has(key)) return
+    const run = attemptKimiHandshakeBind({
+      identity,
+      connection_id: session.sessionId,
+      repo: handshakeRepo,
+      registerSvc,
+      onRegisterSuccess: session.onRegisterSuccess,
+      localDevice: context.localDevice,
+      log,
+    })
+    const tracked = run
+      .then(outcome => {
+        if (outcome !== 'probe_failed') session.handshake.attempted.add(key)
+      })
+      .catch(error => {
+        log(
+          `mcp handshake bind error: sid=${session.sessionId} ` +
+          `cause=${error instanceof Error ? error.message : String(error)}`
+        )
+      })
+      .finally(() => {
+        if (session.handshake.inFlight === tracked) {
+          session.handshake.inFlight = undefined
+        }
+      })
+    session.handshake.inFlight = tracked
+    await tracked
   }
 
   function authHashFor(req: FastifyRequest): string | null {
@@ -388,6 +459,13 @@ export function mountMcp(
       session.lastActivityAt = Date.now()
     }
 
+    // Handshake-level identity: a non-init request on a stored (unbound)
+    // session awaits any in-flight bind, or starts one when it carries the
+    // kimi identity headers — before the tool dispatch below can hit
+    // unknown_agent. Init requests are handled after handleRequest, once the
+    // session id exists.
+    if (!isInit) await ensureKimiHandshakeBind(session, req)
+
     if (body?.method === 'initialize') {
       const params = body.params as { clientInfo?: { name?: unknown; version?: unknown } } | undefined
       const clientInfo = params?.clientInfo
@@ -401,6 +479,9 @@ export function mountMcp(
       const initialized = sessions.get(session.transport.sessionId)
       if (initialized) {
         initialized.originInfo = originInfo
+        // The initialize response is already written; start the bind in the
+        // background and let the next request await it via inFlight.
+        void ensureKimiHandshakeBind(initialized, req)
       }
     }
     return reply

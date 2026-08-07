@@ -584,6 +584,43 @@ export class AgentsRepo {
   }
 
   /**
+   * Session-id-only kimi reverse lookup, for handshake-level identity bind:
+   * the X-Kimi-Base-Url header may be absent, in which case the unique local
+   * row claiming the session id supplies the base_url to probe. The caller
+   * fails closed on zero or multiple matches. Same scoping and canonical JS
+   * comparison rules as findByKimiSession; rows without a payload base_url
+   * cannot be probed and are dropped.
+   */
+  findKimiBySessionId(
+    session_id: string,
+    localDevice: string
+  ): Array<KimiSessionMatch & { base_url: string }> {
+    const rows = this.db.prepare(
+      `SELECT agent_id, device, team, name, role, last_seen_at,
+         CASE
+           WHEN json_valid(delivery_payload)
+           THEN json_extract(delivery_payload, '$.base_url')
+         END AS payload_base_url
+       FROM agents
+       WHERE device = ?
+         AND role != '__channel_proxy__'
+         AND delivery_kind = 'kimi-server'
+         AND CASE
+           WHEN json_valid(delivery_payload)
+           THEN json_extract(delivery_payload, '$.session_id')
+         END = ?
+       ORDER BY last_seen_at DESC`
+    ).all(localDevice, session_id) as Array<
+      KimiSessionMatch & { payload_base_url: string | null }
+    >
+    return rows.flatMap(({ payload_base_url, ...match }) =>
+      typeof payload_base_url === 'string' && payload_base_url.length > 0
+        ? [{ ...match, base_url: payload_base_url }]
+        : []
+    )
+  }
+
+  /**
    * Broad base_url-only kimi lookup. Used to decide whether a reconnect
    * base_url targets a kimi server; never used to auto-pick a session.
    * Same canonical JS comparison as findByKimiSession.
