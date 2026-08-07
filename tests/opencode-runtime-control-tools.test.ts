@@ -133,7 +133,7 @@ describe('OpenCode runtime control tools', () => {
       expect(parseTool(await client.callTool({
         name: 'get_inbox',
         arguments: {},
-      }))).toEqual({ error: 'unknown_agent' })
+      }))).toMatchObject({ error: 'unknown_agent' })
       expect(promptBodies).toHaveLength(1)
       expect(promptBodies[0]).toMatchObject({ noReply: false })
       expect(JSON.stringify(promptBodies[0])).not.toContain('control-secret')

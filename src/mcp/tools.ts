@@ -589,11 +589,20 @@ export function registerBusinessTools(
     } catch { /* best-effort */ }
   }
 
-  function requireAgent(): string | { error: 'unknown_agent' } {
+  const UNKNOWN_AGENT_RECOVERY_HINT =
+    'This MCP session is not bound to an agent. Bindings are per-connection: a daemon restart, an MCP client reconnect, or an MCP config hot-reload drops the binding while your registration persists. ' +
+    'Recover with reconnect (your agent_id and delivery are preserved): ' +
+    'kimi-code → reconnect({ agent_type: "kimi-code", base_url: $KIMI_XATS_BASE_URL, session_id: $KIMI_XATS_SESSION_ID }); ' +
+    'opencode → reconnect({ agent_type: "opencode", base_url: $OPENCODE_XATS_BASE_URL, session_id }); ' +
+    'codex → reconnect({ thread_id: $CODEX_THREAD_ID }); ' +
+    'claude-code → reconnect({ ui_pid: $PPID }). ' +
+    'If you have never registered, call register_agent instead.'
+
+  function requireAgent(): string | { error: 'unknown_agent'; hint: string } {
     const c = caller()
-    if (!c) return { error: 'unknown_agent' }
+    if (!c) return { error: 'unknown_agent', hint: UNKNOWN_AGENT_RECOVERY_HINT }
     const row = agents.findById(c)
-    if (!row) return { error: 'unknown_agent' }
+    if (!row) return { error: 'unknown_agent', hint: UNKNOWN_AGENT_RECOVERY_HINT }
     return c
   }
 

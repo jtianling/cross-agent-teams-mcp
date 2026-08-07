@@ -236,7 +236,7 @@ describe('identity-key OpenCode runtime reconnect', () => {
       expect(parseTool(await client.callTool({
         name: 'get_inbox',
         arguments: {},
-      }))).toEqual({ error: 'unknown_agent' })
+      }))).toMatchObject({ error: 'unknown_agent' })
     } finally {
       await transport.close()
       await client.close()
@@ -289,7 +289,7 @@ describe('identity-key OpenCode runtime reconnect', () => {
       expect(parseTool(await client.callTool({
         name: 'get_inbox',
         arguments: {},
-      }))).toEqual({ error: 'unknown_agent' })
+      }))).toMatchObject({ error: 'unknown_agent' })
     } finally {
       await transport.close()
       await client.close()

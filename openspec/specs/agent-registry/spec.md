@@ -604,6 +604,17 @@ Before the session has called `register_agent` successfully, `agentIdHolder.curr
 - **WHEN** it calls `list_agents` (or any business tool)
 - **THEN** the call is rejected (unregistered)
 
+### Requirement: unknown_agent responses carry a recovery hint
+
+When a business tool rejects a call because the caller's MCP session is not bound to a registered agent (`unknown_agent`), the error payload MUST include a `hint` field. The hint MUST state that session→agent bindings are per-connection and are dropped by a daemon restart, an MCP client reconnect, or an MCP config hot-reload while the registration itself persists, and MUST prescribe recovery via `reconnect` with the runtime-specific lookup key: kimi-code → `base_url` + `session_id`; opencode → `base_url` (+ `session_id`); codex → `thread_id`; claude-code → `ui_pid`. The hint MUST direct never-registered callers to `register_agent` instead.
+
+#### Scenario: unknown_agent response includes reconnect guidance per agent type
+
+- **GIVEN** a fresh MCP session that has not called `register_agent`
+- **WHEN** it calls `get_inbox` (or any business tool)
+- **THEN** the response is `{ error: 'unknown_agent', hint: <string> }`
+- **AND** the hint mentions `reconnect`, the per-agent-type lookup keys (`kimi-code`, `claude-code`), and `register_agent`
+
 ### Requirement: Agents table includes delivery_kind and delivery_payload columns
 
 The `agents` table SHALL include two additional columns for persisting the agent's `DeliverySpec`, see `agent-delivery/spec.md`: `delivery_kind TEXT NOT NULL DEFAULT 'none'` and `delivery_payload TEXT`, nullable and storing a JSON string when non-null.  These two columns together are the authoritative storage for the delivery channel.  `delivery_kind` defaults to `'none'` so that rows inserted by code paths that do not yet supply delivery remain valid.

@@ -68,7 +68,7 @@ describe('unregister_self', () => {
       name: 'get_inbox',
       arguments: {},
     }))
-    expect(inbox).toEqual({ error: 'unknown_agent' })
+    expect(inbox).toMatchObject({ error: 'unknown_agent' })
 
     const reregistered = await parseTool(await client.callTool({
       name: 'register_agent',
@@ -166,7 +166,11 @@ describe('unregister_self', () => {
       name: 'unregister_self',
       arguments: {},
     }))
-    expect(result).toEqual({ error: 'unknown_agent' })
+    expect(result).toMatchObject({ error: 'unknown_agent' })
+    expect(result.hint).toContain('reconnect')
+    expect(result.hint).toContain('kimi-code')
+    expect(result.hint).toContain('claude-code')
+    expect(result.hint).toContain('register_agent')
 
     await transport.terminateSession()
     await client.close()
