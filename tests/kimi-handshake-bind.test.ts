@@ -199,7 +199,24 @@ describe('kimi handshake-level identity bind', () => {
     })
     cleanups.push(async () => { await t.close(); await c.close() })
 
-    expect(await getInbox(c)).toMatchObject({ error: 'unknown_agent' })
+    const inbox = await getInbox(c)
+    expect(inbox).toMatchObject({ error: 'unknown_agent' })
+    // The rebind failure must be distinguishable from "never registered".
+    expect(inbox.hint).toContain('handshake rebind')
+    expect(inbox.hint).toContain('reason=no_match')
+  })
+
+  it('returns the generic recovery hint when no handshake identity was presented', async () => {
+    const dir = tmp(); cleanups.push(() => rmSync(dir, { recursive: true, force: true }))
+    const dbPath = join(dir, 'data.db')
+    const h = await bootDaemon(dbPath); cleanups.push(h.close)
+
+    const { c, t } = await connectWithHeaders(h.port, {})
+    cleanups.push(async () => { await t.close(); await c.close() })
+
+    const inbox = await getInbox(c)
+    expect(inbox).toMatchObject({ error: 'unknown_agent' })
+    expect(inbox.hint).not.toContain('handshake rebind')
   })
 
   it('stays unbound on probe failure and retries on a later request', async () => {
@@ -243,6 +260,9 @@ describe('kimi handshake-level identity bind', () => {
 
     expect(await getInbox(c)).toMatchObject({ error: 'unknown_agent' })
     expect(kimi.probes).toHaveLength(0)
+
+    const inbox = await getInbox(c)
+    expect(inbox.hint).toContain('reason=ambiguous')
   })
 
   it('binds on the first header-bearing non-init request', async () => {

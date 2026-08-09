@@ -39,6 +39,7 @@ export type KimiServerDispatchResult =
         | 'kimi_inject_failed'
         | 'kimi_session_busy'
         | 'kimi_pending_interaction'
+        | 'kimi_session_archived'
       detail?: unknown
       transport_used?: 'kimi-server'
     }
@@ -127,6 +128,17 @@ export async function dispatchKimiServerPoke(
       headers: auth.headers,
       fetch: fetchImpl,
     })
+    if (decision.decision === 'archived') {
+      emitGateRecord(deps.logGate, {
+        event: 'kimi_poke_deferred',
+        session_id: input.delivery.session_id,
+        outcome: 'kimi_session_archived',
+      })
+      return {
+        error: 'kimi_session_archived',
+        transport_used: 'kimi-server',
+      }
+    }
     if (decision.decision === 'pending_interaction') {
       emitGateRecord(deps.logGate, {
         event: 'kimi_poke_deferred',

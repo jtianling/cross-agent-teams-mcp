@@ -385,6 +385,43 @@ export class AgentsRepo {
     })
   }
 
+  /**
+   * Release the runtime addresses an abandoned row keeps claiming when its
+   * identity_key migrates away. A rename inserts a NEW row for the new
+   * (device, team, name), so without this the old row still answers the same
+   * reverse look-up and every recovery path that demands a unique match
+   * degrades to `ambiguous` — silently, in the kimi handshake case.
+   *
+   * Each address is released only when the incoming registration actually
+   * claims it (`releaseDelivery` / `releaseUiPid` are decided by the caller).
+   * An identity_key can arrive from a runtime that never owned it — a shared
+   * engine whose per-pane env leaks one pane's key to every session is the
+   * known case — and there the holder is a live, unrelated agent whose own
+   * address must survive losing the key. The row always keeps its mailbox and
+   * cursor either way.
+   */
+  releaseIdentityClaim(
+    agent_id: string,
+    scope: { releaseDelivery: boolean; releaseUiPid: boolean }
+  ): void {
+    this.runGuardedLegacyWrite(agent_id, () => {
+      this.db.prepare(
+        `UPDATE agents
+            SET identity_key = NULL,
+                runtime_ui_pid = CASE WHEN ? THEN NULL ELSE runtime_ui_pid END,
+                delivery_kind = CASE WHEN ? THEN 'none' ELSE delivery_kind END,
+                delivery_payload =
+                  CASE WHEN ? THEN NULL ELSE delivery_payload END
+          WHERE agent_id = ?`
+      ).run(
+        scope.releaseUiPid ? 1 : 0,
+        scope.releaseDelivery ? 1 : 0,
+        scope.releaseDelivery ? 1 : 0,
+        agent_id
+      )
+    })
+  }
+
   bindIdentityKey(agent_id: string, identity_key: string): void {
     this.runGuardedLegacyWrite(agent_id, () => {
       this.db.prepare(

@@ -219,6 +219,43 @@ describe('createKimiSessionPrecheck', () => {
     expect(await run()).toEqual({ decision: 'defer', reason: 'main_turn_active' })
   })
 
+  // kimi treats `archived` as list visibility, not admission control: a prompt
+  // posted to an abandoned session is accepted and queued unseen. This gate is
+  // the only thing that turns that silent misroute into a reported skip.
+  it('refuses an archived session ahead of every other signal', async () => {
+    const { run } = precheckWith({
+      body: envelope({
+        archived: true,
+        main_turn_active: true,
+        pending_interaction: 'approval',
+      }),
+      sessionsRoot: makeSessionsRoot({ ageMs: 10 * 60_000 }),
+    })
+    expect(await run()).toEqual({ decision: 'archived' })
+  })
+
+  it('proceeds when archived is explicitly false', async () => {
+    const { run } = precheckWith({
+      body: envelope({
+        archived: false,
+        main_turn_active: false,
+        pending_interaction: 'none',
+      }),
+      sessionsRoot: makeSessionsRoot({ ageMs: 10 * 60_000 }),
+    })
+    expect(await run()).toEqual({ decision: 'proceed' })
+  })
+
+  // Fail-open is the whole gate's contract: an unreadable probe must not become
+  // a delivery outage.
+  it('proceeds when the probe cannot answer whether the session is archived', async () => {
+    const { run } = precheckWith({
+      status: 500,
+      sessionsRoot: makeSessionsRoot({ ageMs: 10 * 60_000 }),
+    })
+    expect(await run()).toEqual({ decision: 'proceed' })
+  })
+
   it('reports pending_interaction ahead of main_turn_active', async () => {
     const { run } = precheckWith({
       body: envelope({ main_turn_active: true, pending_interaction: 'approval' }),

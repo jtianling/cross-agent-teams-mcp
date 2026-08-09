@@ -428,6 +428,24 @@ describe('dispatchKimiServerPoke precondition gate', () => {
     expect(postCalls(calls)).toHaveLength(0)
   })
 
+  it('returns kimi_session_archived and issues NO POST', async () => {
+    const { result, calls } = await runGated({
+      session: {
+        body: sessionEnvelope({
+          archived: true,
+          main_turn_active: false,
+          pending_interaction: 'none',
+        }),
+      },
+      sessionsRoot: makeSessionsRoot(),
+    })
+    expect(result).toEqual({
+      error: 'kimi_session_archived',
+      transport_used: 'kimi-server',
+    })
+    expect(postCalls(calls)).toHaveLength(0)
+  })
+
   it('defers with reason tui_recent_write on a recent wire-log write', async () => {
     const { result, calls } = await runGated({
       session: {

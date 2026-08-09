@@ -11,6 +11,7 @@ import { AgentsRepo } from '../storage/agents-repo.js'
 import {
   attemptKimiHandshakeBind,
   readKimiHandshakeHeaders,
+  type KimiHandshakeBindOutcome,
 } from './kimi-handshake-bind.js'
 import type { SseFanout, SseSink } from '../daemon/sse-fanout.js'
 import type { ChannelWakeFanout } from '../daemon/channel-wake-fanout.js'
@@ -30,9 +31,15 @@ interface Session {
    * (bound / no_match / ambiguous) so each identity is tried once; a
    * probe_failed outcome is NOT recorded and may be retried by a later
    * request. `inFlight` lets subsequent requests await an ongoing bind
-   * instead of racing it into unknown_agent.
+   * instead of racing it into unknown_agent. `lastFailure` keeps the most
+   * recent non-bound outcome so the unknown_agent hint can distinguish
+   * "rebind failed" from "never registered".
    */
-  handshake: { attempted: Set<string>; inFlight?: Promise<void> }
+  handshake: {
+    attempted: Set<string>
+    inFlight?: Promise<void>
+    lastFailure?: KimiHandshakeBindOutcome
+  }
   registeredTeam?: string
   createdAt: number
   lastActivityAt: number
@@ -332,7 +339,12 @@ export function mountMcp(
       context,
       onUnregisterSuccess,
       registerSvc,
-      log
+      log,
+      () => {
+        const sid = sessionIdForCaller
+        if (!sid) return undefined
+        return sessions.get(sid)?.handshake.lastFailure
+      }
     )
     server.connect(transport)
     const now = Date.now()
@@ -385,6 +397,11 @@ export function mountMcp(
     })
     const tracked = run
       .then(outcome => {
+        if (outcome === 'bound') {
+          session.handshake.lastFailure = undefined
+        } else {
+          session.handshake.lastFailure = outcome
+        }
         if (outcome !== 'probe_failed') session.handshake.attempted.add(key)
       })
       .catch(error => {

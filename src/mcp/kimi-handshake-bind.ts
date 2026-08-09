@@ -1,5 +1,6 @@
 import type { AgentsRepo } from '../storage/agents-repo.js'
 import type { RegisterAgentService } from './register-agent.js'
+import { sharedRuntimeKey } from './register-agent.js'
 import { validateKimiSession } from './reconnect.js'
 import { canonicalKimiBaseUrl } from './kimi-session-state.js'
 
@@ -73,7 +74,13 @@ export async function attemptKimiHandshakeBind(
         args.localDevice
       )
     : args.repo.findKimiBySessionId(args.identity.session_id, args.localDevice)
-  if (candidates.length === 0) return 'no_match'
+  if (candidates.length === 0) {
+    args.log?.(
+      `mcp handshake bind skipped: sid=${args.connection_id} ` +
+      `session_id=${args.identity.session_id} reason=no_match`
+    )
+    return 'no_match'
+  }
   if (candidates.length > 1) {
     args.log?.(
       `mcp handshake bind skipped: sid=${args.connection_id} ` +
@@ -84,7 +91,14 @@ export async function attemptKimiHandshakeBind(
   }
   const match = candidates[0]
   const row = args.repo.findById(match.agent_id)
-  if (!row || row.delivery.kind !== 'kimi-server') return 'no_match'
+  if (!row || row.delivery.kind !== 'kimi-server') {
+    args.log?.(
+      `mcp handshake bind skipped: sid=${args.connection_id} ` +
+      `session_id=${args.identity.session_id} reason=no_match ` +
+      `detail=stale_row agent=${match.agent_id}`
+    )
+    return 'no_match'
+  }
   const base_url = canonicalKimiBaseUrl(row.delivery.base_url)
   const probe = await validateKimiSession({
     base_url,
@@ -110,7 +124,8 @@ export async function attemptKimiHandshakeBind(
   })
   args.log?.(
     `mcp handshake bind: sid=${args.connection_id} ` +
-    `agent=${row.agent_id} team=${row.team} name=${row.name}`
+    `agent=${row.agent_id} team=${row.team} name=${row.name} ` +
+    `runtime_key=${sharedRuntimeKey('kimi-code', row.delivery) ?? '-'}`
   )
   return 'bound'
 }

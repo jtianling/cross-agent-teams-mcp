@@ -26,12 +26,14 @@ export const DEFAULT_KIMI_SESSIONS_ROOT = join(homedir(), '.kimi-code', 'session
 export interface KimiSessionSignal {
   main_turn_active?: boolean
   pending_interaction?: string
+  archived?: boolean
 }
 
 export type KimiPrecheckDecision =
   | { decision: 'proceed'; wire_age_ms?: number }
   | { decision: 'defer'; reason: 'main_turn_active' | 'tui_recent_write' }
   | { decision: 'pending_interaction'; pending_interaction: string }
+  | { decision: 'archived' }
 
 export interface KimiPrecheckArgs {
   base_url: string
@@ -135,6 +137,9 @@ export async function probeKimiSessionState(
   if (typeof data.pending_interaction === 'string') {
     signal.pending_interaction = data.pending_interaction
   }
+  if (typeof data.archived === 'boolean') {
+    signal.archived = data.archived
+  }
   return signal
 }
 
@@ -195,10 +200,17 @@ export function isWireLogRecent(args: {
 }
 
 /**
- * Precondition gate. Precedence: pending_interaction (never retried) →
- * main_turn_active → recent TUI write → proceed. Deliberately gated on
- * main_turn_active and not on `busy`, which also counts background tasks that
- * do not conflict with an injected prompt.
+ * Precondition gate. Precedence: archived (never retried) → pending_interaction
+ * (never retried) → main_turn_active → recent TUI write → proceed. Deliberately
+ * gated on main_turn_active and not on `busy`, which also counts background
+ * tasks that do not conflict with an injected prompt.
+ *
+ * `archived` comes first and is the only permanent refusal: kimi treats the
+ * flag as list visibility, not admission control, so a prompt posted to an
+ * abandoned session is accepted and queued where nobody is watching. Nothing
+ * downstream would surface that, which makes this gate the only place a stale
+ * delivery coordinate stops being a silent misroute. It stays fail-OPEN like
+ * the rest: an unreadable probe yields no flag and injection proceeds.
  */
 export function createKimiSessionPrecheck(opts: {
   sessionsRoot?: string
@@ -208,6 +220,7 @@ export function createKimiSessionPrecheck(opts: {
 } = {}): KimiPrecheckFn {
   return async (args) => {
     const signal = await probeKimiSessionState(args)
+    if (signal.archived === true) return { decision: 'archived' }
     if (signal.pending_interaction !== undefined && signal.pending_interaction !== 'none') {
       return {
         decision: 'pending_interaction',

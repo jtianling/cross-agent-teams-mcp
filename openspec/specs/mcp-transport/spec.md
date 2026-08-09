@@ -349,7 +349,9 @@ The GC MUST NOT emit orphan-reap log lines by default. When an explicit MCP tran
 
 ### Requirement: Handshake-level kimi identity rebind via request headers
 
-kimi-code session-scoped MCP connections attach identity headers to `initialize` and every subsequent request: `X-Kimi-Session-Id` (required, the kimi session id) and `X-Kimi-Base-Url` (optional, the kimi server base URL). When an MCP session is not bound to an agent and a POST request carries `X-Kimi-Session-Id`, the daemon SHALL attempt to bind the session to the already-registered agent that claims the identity, so that a client reconnect, MCP config hot-reload, or daemon restart does not surface `unknown_agent` to an agent that previously registered.
+When an MCP session is not bound to an agent and a POST request carries the identity header `X-Kimi-Session-Id` (the kimi session id, optionally accompanied by `X-Kimi-Base-Url`, the kimi server base URL), the daemon SHALL attempt to bind the session to the already-registered agent that claims that identity, so that a client reconnect, MCP config hot-reload, or daemon restart does not surface `unknown_agent` to an agent that previously registered. Clients that send these headers attach them to `initialize` and to every subsequent request.
+
+Sending the headers is a CLIENT-SIDE capability that this requirement does NOT assume any kimi build has. It needs a kimi supporting session-scoped MCP entries (`scope: "session"`) plus `${VAR}` interpolation in header values resolved from a per-session environment overlay. A kimi lacking either omits the headers, or would send a literal `${...}`; both land on the "no bind, no error" path below, so the daemon stays correct against any kimi. Nothing here describes kimi's own behaviour in general — do not read it as a claim about upstream kimi.
 
 The bind attempt MUST:
 

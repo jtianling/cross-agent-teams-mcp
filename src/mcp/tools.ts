@@ -163,7 +163,7 @@ const SEND_MESSAGE_DESC = [
   'REPLY RULE: when replying to a message returned by get_inbox, treat its `from_device` as authoritative — if it differs from your own device, you MUST send to `from_name + ":" + from_device` (bare `from_name` would resolve on YOUR device and miss the actual sender). Same-device replies can use the bare name. The safe fallback for unknown device is send_message_by_id({to_agent_id: from_agent_id, ...}).',
   'For multi-recipient use broadcast (same-team) or broadcast_to_role (same-team, by role).',
   '除非用户明确指定 to_team, 不要跨 team 沟通 (explicitly set to_team only when user asks).',
-  'Reports poked, poke_skip_reasons (no_pane, guard_failed, tmux_unavailable, pane_reassigned, self, kimi_session_busy, kimi_pending_interaction); on guard_failed and kimi_session_busy daemon retries at 30s/180s/600s (retry_scheduled, retry_delays_s); stops early on poked.  kimi_session_busy / kimi_pending_interaction mean the kimi session was mid-turn or waiting on a human approval so the wake-up was NOT injected — the mailbox row is written regardless and the recipient sees it on its next get_inbox; kimi_pending_interaction is never retried.  pane_reassigned means the recorded tmux pane is no longer hosted by the target (another agent took it over, or the target process is gone), so nothing was injected; it is never retried and the mailbox row is still written.',
+  'Reports poked, poke_skip_reasons (no_pane, guard_failed, tmux_unavailable, pane_reassigned, self, kimi_session_busy, kimi_pending_interaction, kimi_session_archived); on guard_failed and kimi_session_busy daemon retries at 30s/180s/600s (retry_scheduled, retry_delays_s); stops early on poked.  kimi_session_busy / kimi_pending_interaction mean the kimi session was mid-turn or waiting on a human approval so the wake-up was NOT injected — the mailbox row is written regardless and the recipient sees it on its next get_inbox; kimi_pending_interaction is never retried.  kimi_session_archived means the target\'s kimi session is archived, so the wake-up was NOT injected and never will be for these coordinates; it is never retried and the mailbox row is still written.  It is a permanent condition, not a deferral: the recipient\'s registered session_id is stale and it must re-register before pokes can land.  pane_reassigned means the recorded tmux pane is no longer hosted by the target (another agent took it over, or the target process is gone), so nothing was injected; it is never retried and the mailbox row is still written.',
   'Auto-poke injects only a SHORT wake-up hint (新邮件 from <sender> → <recipient_name>@<recipient_team>, 请调 get_inbox 查看), NOT the body — read bodies via get_inbox.  The → segment names who the wake-up was addressed to, so a pane that receives one but finds an empty get_inbox can tell at a glance it was not the intended recipient.',
   'Delivery is NOT filtered by online/idle; direct and fan-out deliveries write mailbox rows for offline targets. The list_agents `online` flag reflects process liveness.',
   'DO NOT pre-verify the recipient via list_agents before calling send_message — this rule applies to BOTH same-team and cross-team sends (list_agents is caller-team scoped and CANNOT see cross-team agents, so a cross-team pre-check always falsely reports "missing"; for same-team sends the pre-check is pure waste).',
@@ -174,7 +174,7 @@ const SEND_MESSAGE_BY_ID_DESC = [
   'Private 1→1 message to another agent by agent_id (UUID).  Use this when you already hold the target\'s agent_id; prefer send_message (by name) otherwise.',
   'Same-team only: the recipient must belong to the caller\'s team.  For cross-team sends use send_message with to_team.',
   'By default auto-poke=true with quiet-guard (auto_poke:false opts out), and need_reply=true.  Set need_reply:false for FYI/no-response-needed messages.',
-  'Reports poked, poke_skip_reasons (no_pane, guard_failed, tmux_unavailable, pane_reassigned, self, kimi_session_busy, kimi_pending_interaction); on guard_failed and kimi_session_busy daemon retries at 30s/180s/600s (retry_scheduled, retry_delays_s); stops early on poked.  kimi_session_busy / kimi_pending_interaction mean the kimi session was mid-turn or waiting on a human approval so the wake-up was NOT injected — the mailbox row is written regardless and the recipient sees it on its next get_inbox; kimi_pending_interaction is never retried.  pane_reassigned means the recorded tmux pane is no longer hosted by the target (another agent took it over, or the target process is gone), so nothing was injected; it is never retried and the mailbox row is still written.',
+  'Reports poked, poke_skip_reasons (no_pane, guard_failed, tmux_unavailable, pane_reassigned, self, kimi_session_busy, kimi_pending_interaction, kimi_session_archived); on guard_failed and kimi_session_busy daemon retries at 30s/180s/600s (retry_scheduled, retry_delays_s); stops early on poked.  kimi_session_busy / kimi_pending_interaction mean the kimi session was mid-turn or waiting on a human approval so the wake-up was NOT injected — the mailbox row is written regardless and the recipient sees it on its next get_inbox; kimi_pending_interaction is never retried.  kimi_session_archived means the target\'s kimi session is archived, so the wake-up was NOT injected and never will be for these coordinates; it is never retried and the mailbox row is still written.  It is a permanent condition, not a deferral: the recipient\'s registered session_id is stale and it must re-register before pokes can land.  pane_reassigned means the recorded tmux pane is no longer hosted by the target (another agent took it over, or the target process is gone), so nothing was injected; it is never retried and the mailbox row is still written.',
   'Auto-poke injects only a SHORT wake-up hint (新邮件 from <sender> → <recipient_name>@<recipient_team>, 请调 get_inbox 查看), NOT the body — read bodies via get_inbox.  The → segment names who the wake-up was addressed to, so a pane that receives one but finds an empty get_inbox can tell at a glance it was not the intended recipient.',
   'Delivery is NOT filtered by online/idle — offline targets still receive the mailbox row.'
 ].join(' ')
@@ -211,7 +211,15 @@ const RECONNECT_DESC = [
     'restarted pane both holds a key and no longer remembers its ' +
     '(team, name), so the later branches would capture the case and fail. ' +
     'On a `need_register` result, ask the user for (team, name) as usual ' +
-    'and pass the same `identity_key` on that `register_agent` call.',
+    'and pass the same `identity_key` on that `register_agent` call. ' +
+    'kimi-code must check before using this branch: under a server-hosted ' +
+    'kimi engine the tool process is spawned by the shared long-lived ' +
+    'server, so `printenv XATS_IDENTITY_KEY` reads the value exported by the ' +
+    'shell that launched that SERVER — the same value for every session on ' +
+    'it, naming another pane, and recovering with it would take over that ' +
+    'agent. With an in-process engine the value is your own and this branch ' +
+    'is correct. When you cannot tell which engine you are on, skip it and ' +
+    'recover by (base_url, session_id) instead.',
   'Otherwise pass exactly one runtime lookup key: Claude Code passes `ui_pid=$PPID`; ' +
     'Codex CLI and Mac Codex App pass ' +
     '`thread_id=$CODEX_THREAD_ID`; opencode passes ' +
@@ -374,6 +382,9 @@ export function createAutoPokeImpl(
     if (err === 'kimi_pending_interaction') {
       return { ok: false, reason: 'kimi_pending_interaction' }
     }
+    if (err === 'kimi_session_archived') {
+      return { ok: false, reason: 'kimi_session_archived' }
+    }
     if (err === 'runtime_recovering') {
       return { ok: false, reason: 'runtime_recovering' }
     }
@@ -473,7 +484,8 @@ export function registerBusinessTools(
   context?: DaemonContext,
   onUnregisterSuccess?: UnregisterSuccessHook,
   injectedRegisterSvc?: RegisterAgentService,
-  log?: (line: string) => void
+  log?: (line: string) => void,
+  getHandshakeFailure?: () => string | undefined
 ): void {
   const agents = new AgentsRepo(db)
   const events = new EventsOutbox(db)
@@ -598,11 +610,22 @@ export function registerBusinessTools(
     'claude-code → reconnect({ ui_pid: $PPID }). ' +
     'If you have never registered, call register_agent instead.'
 
+  function unknownAgentHint(): string {
+    const failure = getHandshakeFailure?.()
+    if (failure === undefined) return UNKNOWN_AGENT_RECOVERY_HINT
+    return (
+      'This MCP session is not bound to an agent, and the automatic handshake rebind was attempted and FAILED ' +
+      `(reason=${failure}; the daemon log records the failing connection and session id). ` +
+      'This differs from "never registered": a registration may still exist but could not be re-associated. ' +
+      UNKNOWN_AGENT_RECOVERY_HINT
+    )
+  }
+
   function requireAgent(): string | { error: 'unknown_agent'; hint: string } {
     const c = caller()
-    if (!c) return { error: 'unknown_agent', hint: UNKNOWN_AGENT_RECOVERY_HINT }
+    if (!c) return { error: 'unknown_agent', hint: unknownAgentHint() }
     const row = agents.findById(c)
-    if (!row) return { error: 'unknown_agent', hint: UNKNOWN_AGENT_RECOVERY_HINT }
+    if (!row) return { error: 'unknown_agent', hint: unknownAgentHint() }
     return c
   }
 
@@ -1051,7 +1074,7 @@ export function registerBusinessTools(
     identity_key: z.string().min(1).refine(v => v.trim().length > 0, {
       message: 'identity_key must not be empty',
     }).optional().describe(
-      'Opaque per-pane value from `$XATS_IDENTITY_KEY`, minted by the launcher. Pass it on EVERY registration, including the first one — it is what lets this identity be recovered after the pane is restarted. Applies to every agent_type.'
+      'Opaque per-pane value from `$XATS_IDENTITY_KEY`, minted by the launcher. Pass it on EVERY registration, including the first one — it is what lets this identity be recovered after the pane is restarted. Applies to every agent_type, with a caveat for kimi-code: kimi never scopes this variable per session, so under a server-hosted kimi engine it names another pane and must be omitted. Pass it from kimi only when the launcher states the value is this pane\'s.'
     ),
     claude_ui_pid: z.number().int().positive().optional().describe(
       "Internal field for the cross-agent-teams-mcp channel proxy.  Stores the proxy's parent Claude Code UI pid (`process.ppid`) so that Claude Code hosts registering in the same lineage can auto-bind their claude-channel delivery.  Only valid when role='__channel_proxy__'; rejected otherwise."
@@ -1755,7 +1778,7 @@ export function registerBusinessTools(
         '4. `printenv CLAUDECODE` non-empty OR `printenv CLAUDE_CODE_ENTRYPOINT` non-empty → `agent_type="claude-code"`; pass `$PPID` as `ui_pid` to enable channel auto-bind.',
         '5. None of the above → `agent_type="custom"` with `agent_type_name="<the harness you are running under, e.g. cursor, opencode, ...>"` (`agent_type_name` is required when `agent_type="custom"`). Detect the harness name from your runtime environment if you can — e.g. `printenv CURSOR_TRACE_ID` non-empty means cursor — but do NOT guess from system-wide signals like "binary X exists on PATH": such probes detect what the user has installed, not what runtime you are inside, and pick the wrong agent type. When unsure, prefer `agent_type_name="unknown"` over a wrong guess.',
         'Calling this tool again with the same `(device, team, name)` identity reuses the existing `agent_id` and refreshes `tmux_pane_id` and `model`; no duplicate row is created.',
-        'IDENTITY KEY (not part of the DETECTION sequence above — it says nothing about which runtime you are, and applies to every `agent_type`): run `printenv XATS_IDENTITY_KEY`; when it is non-empty, pass that value as `identity_key` on EVERY `register_agent` call, including the very first one. The key is the launcher-minted, restart-stable handle that later lets `reconnect({identity_key})` recover this identity after the pane is restarted — a restart changes `ui_pid`, `thread_id`, and the session id, so no other lookup can. Omitting it on the first registration silently disables recovery for this pane: nothing fails, every later recovery just returns `need_register`. When the key is already held by another live pane the call is rejected with `identity_key_conflict` naming that pane\'s team and name, and no row is written.',
+        'IDENTITY KEY (not part of the DETECTION sequence above — it says nothing about which runtime you are, and applies to every `agent_type`): run `printenv XATS_IDENTITY_KEY`; when it is non-empty, pass that value as `identity_key` on EVERY `register_agent` call, including the very first one. The key is the launcher-minted, restart-stable handle that later lets `reconnect({identity_key})` recover this identity after the pane is restarted — a restart changes `ui_pid`, `thread_id`, and the session id, so no other lookup can. Omitting it on the first registration silently disables recovery for this pane: nothing fails, every later recovery just returns `need_register`. When the key is already held by another live pane the call is rejected with `identity_key_conflict` naming that pane\'s team and name, and no row is written. CAVEAT for `agent_type="kimi-code"`: whether this variable is yours depends on where your tools run. With an in-process kimi engine the TUI spawns them and the value is the one your launcher exported — correct, pass it. Under a SERVER-HOSTED kimi engine they are spawned by the long-lived shared server instead, so `printenv` returns whatever the shell that launched that SERVER exported: the same value for every session on it, naming a DIFFERENT pane, and passing it would claim another agent\'s key. kimi does not scope this variable per session in either mode. So pass it only when the launcher that started this pane states the key is session-scoped; when you cannot tell, omit it — losing recovery is recoverable, claiming someone else\'s identity is not.',
         'Use `agent_type="custom"` for unsupported agent harnesses; provide `agent_type_name` for observability.',
         'opencode sessions: pass `agent_type="opencode"` and `base_url` (from `$OPENCODE_XATS_BASE_URL`, set by the `free-xats-opencode` launcher). Omit `session_id` — the daemon auto-resolves it via `<base_url>/session` (most recently updated). `auth_token_ref` is optional; set only when `OPENCODE_SERVER_PASSWORD` is configured on the opencode server. The schema REQUIRES `base_url` (parseable `http://` or `https://` URL) when `agent_type="opencode"`; missing/malformed `base_url` is rejected before any HTTP probe runs.',
         'kimi-code sessions: pass `agent_type="kimi-code"`, `base_url` (from `$KIMI_XATS_BASE_URL`, set by the `xats-kimi` launcher), and `session_id` (REQUIRED — from `$KIMI_XATS_SESSION_ID`, which the launcher exports after pre-creating the session via the kimi server REST API; the daemon does NOT auto-resolve it and does NOT health-check the server at register time. Do NOT fall back to `~/.kimi-code/session_index.jsonl` guessing: with several kimi sessions in one directory its last `workDir` match can be a different session, and pokes then wake that wrong session while reporting delivered). `auth_token_ref` is optional; when omitted the daemon reads the bearer token from `~/.kimi-code/server.token` at poke time. The schema REQUIRES `base_url` (parseable `http://` or `https://` URL) and a non-empty `session_id` when `agent_type="kimi-code"`; missing/malformed values are rejected before any row is written.',

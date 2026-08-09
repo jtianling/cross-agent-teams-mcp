@@ -228,6 +228,52 @@ describe('RegisterAgentService kimi session share', () => {
     if ('error' in second) throw new Error('unexpected error')
     expect(closes).toEqual(['conn-1'])
   })
+
+  it('logs successful connection binds with agent and runtime key', () => {
+    let lines: string[] = []
+    const { svc } = setup({ log: line => { lines = [...lines, line] } })
+    const res = registerKimi(svc, 'conn-1', KIMI_SESSION_A)
+    if ('error' in res) throw new Error('unexpected error')
+
+    const bind = lines.find(line => line.includes('register_agent bind'))
+    expect(bind).toBeDefined()
+    expect(bind).toContain('sid=conn-1')
+    expect(bind).toContain(`agent=${res.agent_id}`)
+    expect(bind).toContain('team=default name=kimi-1')
+    // The runtime key carries the canonical base_url and the session id.
+    expect(bind).toContain(KIMI_SESSION_A)
+  })
+
+  it('warns when a second agent row claims the same kimi session', () => {
+    let lines: string[] = []
+    const { svc } = setup({ log: line => { lines = [...lines, line] } })
+    registerKimi(svc, 'conn-1', KIMI_SESSION_A)
+
+    const second = svc.register({
+      connection_id: 'conn-2',
+      agent_type: 'kimi-code',
+      name: 'kimi-2',
+      delivery: kimiDelivery(KIMI_SESSION_A),
+    })
+    if ('error' in second) throw new Error('unexpected error')
+
+    const warn = lines.find(line => line.includes('register_agent warn'))
+    expect(warn).toBeDefined()
+    expect(warn).toContain(KIMI_SESSION_A)
+    expect(warn).toContain('(default/kimi-1)')
+    expect(warn).toContain('(default/kimi-2)')
+  })
+
+  it('does not warn when the same row re-registers its own session', () => {
+    let lines: string[] = []
+    const { svc } = setup({ log: line => { lines = [...lines, line] } })
+    registerKimi(svc, 'conn-1', KIMI_SESSION_A)
+    lines = []
+
+    const second = registerKimi(svc, 'conn-2', KIMI_SESSION_A)
+    if ('error' in second) throw new Error('unexpected error')
+    expect(lines.some(line => line.includes('register_agent warn'))).toBe(false)
+  })
 })
 
 interface Connected {

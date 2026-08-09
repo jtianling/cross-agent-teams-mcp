@@ -116,7 +116,7 @@ function identityKey(device: string, team: string, name: string): string {
   return `${device}\u0000${team}\u0000${name}`
 }
 
-function sharedRuntimeKey(
+export function sharedRuntimeKey(
   agentType: AgentType | undefined,
   delivery: DeliverySpec | undefined
 ): string | undefined {
@@ -130,6 +130,45 @@ function sharedRuntimeKey(
     return `${canonicalKimiBaseUrl(delivery.base_url)}\u0000${delivery.session_id}`
   }
   return undefined
+}
+
+/**
+ * The address a delivery makes a row answer to in reverse look-ups. Two
+ * deliveries of different kinds never collide, and `none` addresses nothing.
+ */
+function runtimeAddress(delivery: DeliverySpec | undefined): string | undefined {
+  if (delivery === undefined || delivery.kind === 'none') return undefined
+  const key = (...parts: string[]): string =>
+    [delivery.kind, ...parts].join('\u0000')
+  if (delivery.kind === 'codex-appserver') return key(delivery.thread_id)
+  if (delivery.kind === 'claude-channel') {
+    return key(delivery.channel_session_id)
+  }
+  if (delivery.kind === 'kimi-server') {
+    return key(canonicalKimiBaseUrl(delivery.base_url), delivery.session_id)
+  }
+  // opencode rows persist the caller's spelling, so the lookup compares it raw.
+  return key(delivery.base_url, delivery.session_id)
+}
+
+/**
+ * What an abandoned identity_key holder must give up. Only the addresses the
+ * incoming registration itself claims: a key presented by a runtime that never
+ * owned it must not strip a live unrelated agent of its own delivery.
+ */
+export function planIdentityClaimRelease(args: {
+  holder: { delivery?: DeliverySpec; runtime_ui_pid: number | null }
+  incoming: { delivery?: DeliverySpec; runtime_ui_pid?: number }
+}): { releaseDelivery: boolean; releaseUiPid: boolean } {
+  const holderAddress = runtimeAddress(args.holder.delivery)
+  const incomingAddress = runtimeAddress(args.incoming.delivery)
+  return {
+    releaseDelivery:
+      holderAddress !== undefined && holderAddress === incomingAddress,
+    releaseUiPid:
+      args.holder.runtime_ui_pid !== null
+      && args.holder.runtime_ui_pid === args.incoming.runtime_ui_pid,
+  }
 }
 
 export function validateNameLabel(name: string): { ok: string } | { error: 'invalid_name_label' } {
@@ -331,8 +370,20 @@ export class RegisterAgentService {
       ) {
         return { error: 'opencode_runtime_coordinates_required' as const }
       }
-      if (identityKeyPlan?.kind === 'migrate') {
-        this.repo.clearIdentityKey(identityKeyPlan.from_agent_id)
+      if (identityKeyPlan?.kind === 'migrate' && migratingHolder) {
+        this.repo.releaseIdentityClaim(
+          identityKeyPlan.from_agent_id,
+          planIdentityClaimRelease({
+            holder: {
+              delivery: migratingHolder.delivery,
+              runtime_ui_pid: migratingHolder.runtime_ui_pid,
+            },
+            incoming: {
+              delivery: validated?.ok,
+              runtime_ui_pid: input.runtime_ui_pid,
+            },
+          })
+        )
       }
       return this.repo.register({
         agent_type: input.agent_type,
@@ -353,6 +404,15 @@ export class RegisterAgentService {
     })
     const result = write()
     if ('error' in result) return result
+    if (validated?.ok.kind === 'kimi-server') {
+      this.warnOnKimiSessionConflict(
+        validated.ok,
+        resolvedDevice.ok,
+        result.agent_id,
+        team,
+        input.name
+      )
+    }
     this.bindConnection({
       key: identityKey(resolvedDevice.ok, team, input.name),
       connectionId: input.connection_id,
@@ -360,8 +420,37 @@ export class RegisterAgentService {
       device: resolvedDevice.ok,
       team,
       name: input.name,
+      agentId: result.agent_id,
     })
     return result
+  }
+
+  /**
+   * One kimi session must back exactly one agent row. A second live row
+   * claiming the same (base_url, session_id) is how poke/inbox cross-wiring
+   * starts, so register_agent warns loudly instead of failing closed — the
+   * registration itself stays valid.
+   */
+  private warnOnKimiSessionConflict(
+    delivery: Extract<DeliverySpec, { kind: 'kimi-server' }>,
+    device: string,
+    selfAgentId: string,
+    team: string,
+    name: string
+  ): void {
+    const others = this.repo
+      .findByKimiSession(delivery.base_url, delivery.session_id, device)
+      .filter(match => match.agent_id !== selfAgentId)
+    if (others.length === 0) return
+    const holders = others
+      .map(match => `${match.agent_id}(${match.team}/${match.name})`)
+      .join(',')
+    this.log(
+      `register_agent warn: kimi session claimed by multiple agent rows: ` +
+      `session_id=${delivery.session_id} ` +
+      `base_url=${canonicalKimiBaseUrl(delivery.base_url)} ` +
+      `holders=${holders} new=${selfAgentId}(${team}/${name})`
+    )
   }
 
   private registerInitialOpencodeRuntime(args: {
@@ -394,6 +483,7 @@ export class RegisterAgentService {
       device: args.device,
       team: args.team,
       name: args.input.name,
+      agentId: result.agent_id,
     })
     return result
   }
@@ -535,6 +625,7 @@ export class RegisterAgentService {
     device: string
     team: string
     name: string
+    agentId?: string
   }): void {
     this.removeConnectionFromOtherIdentities(
       input.connectionId,
@@ -553,6 +644,12 @@ export class RegisterAgentService {
         [input.connectionId, input.runtimeKey] as const,
       ])
       this.storeBindings(input.key, next)
+      this.log(
+        `register_agent bind: sid=${input.connectionId} ` +
+        `agent=${input.agentId ?? '-'} device=${input.device} ` +
+        `team=${input.team} name=${input.name} ` +
+        `runtime_key=${input.runtimeKey ?? '-'}`
+      )
       return
     }
     const failed = prior.flatMap(([connectionId, runtimeKey]) => {
@@ -572,6 +669,12 @@ export class RegisterAgentService {
         ...failed,
         [input.connectionId, input.runtimeKey] as const,
       ])
+    )
+    this.log(
+      `register_agent bind: sid=${input.connectionId} ` +
+      `agent=${input.agentId ?? '-'} device=${input.device} ` +
+      `team=${input.team} name=${input.name} ` +
+      `runtime_key=${input.runtimeKey ?? '-'}`
     )
   }
 
