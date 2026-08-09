@@ -7,6 +7,7 @@ import { mountMcp } from '../mcp/transport.js'
 import {
   mountRestApi,
   type OpencodeRuntimeControlService,
+  type KimiRuntimeControlService as KimiRuntimeControlPort,
 } from './rest-api.js'
 import { runCleanup } from './cleanup.js'
 import { SseFanout } from './sse-fanout.js'
@@ -20,6 +21,8 @@ import {
   OpencodeRuntimeRecoveryService,
 } from '../mcp/opencode-runtime-recovery.js'
 import { AgentsRepo } from '../storage/agents-repo.js'
+import { KimiRuntimeControlService } from '../mcp/kimi-runtime-control.js'
+import { validateKimiSession } from '../mcp/reconnect.js'
 import { RegisterAgentService } from '../mcp/register-agent.js'
 import { RegisterOpencodeSelfService } from '../mcp/register-opencode-self.js'
 import { dispatchOpencodeServerPoke } from '../mcp/opencode-server-dispatch.js'
@@ -42,6 +45,7 @@ export interface ServerOpts {
   fanout?: SseFanout
   channelWakeFanout?: ChannelWakeFanout
   runtimeControlService?: OpencodeRuntimeControlService
+  kimiRuntimeControlService?: KimiRuntimeControlPort
 }
 export interface StartOpts extends ServerOpts {
   port: number
@@ -105,6 +109,11 @@ export async function buildServer(opts: ServerOpts): Promise<FastifyInstance> {
         sendRecoveryPrompt: args => dispatchOpencodeServerPoke(args),
       }
     )
+  const kimiRuntimeControlService = opts.kimiRuntimeControlService
+    ?? new KimiRuntimeControlService(new AgentsRepo(db), {
+      localDevice: context.localDevice,
+      probeSession: args => validateKimiSession(args),
+    })
   app.addHook('onRequest', makeAuthHook(opts.token))
   app.addHook('onRequest', async (req) => {
     ;(req as typeof req & { xatsPeer?: SessionOriginInfo }).xatsPeer =
@@ -124,6 +133,7 @@ export async function buildServer(opts: ServerOpts): Promise<FastifyInstance> {
     channelWakeFanout,
     context,
     runtimeControlService,
+    kimiRuntimeControlService,
   })
   app.get('/health', async () => ({
     ok: true,

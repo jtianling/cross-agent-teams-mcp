@@ -25,6 +25,8 @@ import {
   commitOpencodeRuntimeRestSchema,
   reserveOpencodeRuntimeRestSchema,
 } from '../mcp/opencode-runtime-control-schema.js'
+import type { CommitKimiRuntimeRestInput } from '../mcp/kimi-runtime-control-schema.js'
+import { commitKimiRuntimeRestSchema } from '../mcp/kimi-runtime-control-schema.js'
 
 // Loopback-only, sessionless REST surface. Lifeboat routes reuse the MCP data
 // services without touching session bindings. Runtime control routes reuse the
@@ -33,6 +35,11 @@ export interface RestApiDeps {
   channelWakeFanout?: ChannelWakeFanout
   context?: DaemonContext
   runtimeControlService: OpencodeRuntimeControlService
+  kimiRuntimeControlService: KimiRuntimeControlService
+}
+
+export interface KimiRuntimeControlService {
+  commit(input: CommitKimiRuntimeRestInput): Promise<unknown>
 }
 
 export interface OpencodeRuntimeControlService {
@@ -47,6 +54,7 @@ interface RestCtx {
   sendSvc: SendMessageService
   inboxSvc: GetInboxService
   runtimeControlService: OpencodeRuntimeControlService
+  kimiRuntimeControlService: KimiRuntimeControlService
 }
 
 const identitySchema = z.object({
@@ -273,6 +281,27 @@ async function handleRuntimeCommit(
   }
 }
 
+async function handleKimiRuntimeCommit(
+  ctx: RestCtx,
+  req: FastifyRequest,
+  reply: FastifyReply
+): Promise<void> {
+  const parsed = commitKimiRuntimeRestSchema.safeParse(req.body)
+  if (!parsed.success) {
+    await sendInvalidRuntimeRequest(
+      reply,
+      'Request body does not match schema'
+    )
+    return
+  }
+  try {
+    const result = await ctx.kimiRuntimeControlService.commit(parsed.data)
+    await reply.send(result)
+  } catch (error) {
+    await sendRuntimeFailure(reply, error)
+  }
+}
+
 export function mountRestApi(
   app: FastifyInstance,
   db: Database.Database,
@@ -294,6 +323,7 @@ export function mountRestApi(
     sendSvc,
     inboxSvc,
     runtimeControlService: deps.runtimeControlService,
+    kimiRuntimeControlService: deps.kimiRuntimeControlService,
   }
 
   // Loopback gate for every /api/* route. Runs after the global token-auth and
@@ -314,5 +344,10 @@ export function mountRestApi(
     '/api/runtime/opencode/commit',
     { errorHandler: runtimeRouteErrorHandler },
     (req, reply) => handleRuntimeCommit(ctx, req, reply)
+  )
+  app.post(
+    '/api/runtime/kimi/commit',
+    { errorHandler: runtimeRouteErrorHandler },
+    (req, reply) => handleKimiRuntimeCommit(ctx, req, reply)
   )
 }

@@ -220,3 +220,60 @@ The endpoint MUST NOT gate removal on whether the target appears live. In partic
 - **WHEN** a loopback caller issues `DELETE /api/agents/` for that row's id
 - **THEN** the removal succeeds and is not refused on liveness grounds
 
+
+### Requirement: POST /api/runtime/kimi/commit refreshes a kimi identity's coordinates for its launcher
+
+The daemon SHALL expose a loopback-only `POST /api/runtime/kimi/commit` accepting `{ protocol_version, identity_key, base_url, session_id }` that updates which kimi session an already-registered identity is delivered to, and SHALL NOT create an identity (it has no `name` and cannot).
+
+The route exists because the agent cannot do this itself: kimi never scopes `XATS_IDENTITY_KEY` per session, so under a server-hosted engine an agent reading its own environment gets another pane's key. Only the launcher knows which key belongs to which pane, and this route is how it says so without the key entering the pane.
+
+The daemon SHALL resolve the target row by `identity_key` first, and when no row holds that key, by `(base_url, session_id)` — adopting the key onto the single matching row. The fallback is what lets a key reach a row at all, since the agent registers itself without one.
+
+It SHALL probe-validate the live session (`validateKimiSession` semantics) and persist the new delivery ONLY when the requested coordinates differ from the stored ones, reporting `probed: false` on the idempotent path so a caller cannot read `state: "committed"` as proof the session is alive. It SHALL check for another row claiming the requested coordinates on EVERY call including the idempotent one, since this is the only place the one-session-one-row rule can be enforced without locking a pane out of registering.
+
+The route SHALL NOT refresh `last_seen_at` (a launcher action is not agent activity, and the poke retry path reads that column as "the recipient was active"), SHALL NOT alter any MCP connection binding, and SHALL NOT expose or accept a `runtime_generation` — there is no reserve step and no fence, and the field's absence is the signal.
+
+Outcomes are `{ ok: true, state: "committed", changed, probed, agent_id, name, team, base_url, session_id }`; `{ ok: true, need_register: true }` when neither lookup resolves; `session_not_found` (retryable); and `protocol_version_mismatch`, `agent_type_conflict`, `missing_auth_token`, `session_claimed_by_other_agent` (all fail closed, never retried).
+
+#### Scenario: The first commit adopts the key onto the row the coordinates name
+
+- **GIVEN** a registered kimi agent `k1` with delivery `{base_url: B, session_id: S1}` and no `identity_key`
+- **WHEN** a loopback caller commits `{identity_key: K, base_url: B, session_id: S1}`
+- **THEN** the response is `ok: true` with `changed: false` and `probed: false`
+- **AND** row `k1` holds `identity_key` `K`
+- **AND** no kimi session was probed
+
+#### Scenario: A later commit moves the identity to a new session
+
+- **GIVEN** row `k1` holds `identity_key` `K` and delivery `{base_url: B, session_id: S1}`
+- **WHEN** a loopback caller commits `{identity_key: K, base_url: B, session_id: S2}`
+- **THEN** the session `S2` is probed and the row's delivery becomes `{B, S2}`
+- **AND** the response carries `changed: true` and `probed: true`
+- **AND** `(B, S1)` no longer resolves to any row
+
+#### Scenario: A refused probe leaves the working coordinates in place
+
+- **GIVEN** row `k1` holds `identity_key` `K` and delivery `{base_url: B, session_id: S1}`
+- **AND** the kimi server reports `S2` missing or archived
+- **WHEN** a loopback caller commits `{identity_key: K, base_url: B, session_id: S2}`
+- **THEN** the response is `session_not_found` and the row still delivers to `S1`
+
+#### Scenario: Coordinates already claimed by another agent are refused
+
+- **GIVEN** row `k1` holds `identity_key` `K`, and a different row `k2` claims `(B, S2)`
+- **WHEN** a loopback caller commits `{identity_key: K, base_url: B, session_id: S2}`
+- **THEN** the response is `session_claimed_by_other_agent` naming `k2`
+- **AND** `k1` still holds the key and neither row's delivery changed
+
+#### Scenario: An unknown key with unknown coordinates never creates a row
+
+- **GIVEN** no local row holds `identity_key` `K` and none claims `(B, S1)`
+- **WHEN** a loopback caller commits `{identity_key: K, base_url: B, session_id: S1}`
+- **THEN** the response is `{ok: true, need_register: true, state: "unregistered"}`
+- **AND** no agent row is created
+
+#### Scenario: A commit does not make the agent look active
+
+- **GIVEN** row `k1` holds `identity_key` `K` with a recorded `last_seen_at`
+- **WHEN** a loopback caller commits new coordinates for `K`
+- **THEN** `last_seen_at` is unchanged
