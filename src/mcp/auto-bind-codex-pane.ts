@@ -61,6 +61,12 @@ export interface AutoBindCodexPaneInput {
    *  existing proof (foreground carrier, identity-key ownership, snapshot
    *  equality, in-transaction re-arbitration) still has to pass. */
   targetPaneId?: string
+  /** Whether `targetPaneId` came from a recovery nonce the daemon minted, wrote
+   *  into that pane and has now consumed.  It is passed rather than inferred
+   *  from `targetPaneId` being set: it authorises rotating the caller's own
+   *  stale identity key, so a future targeting source with weaker provenance
+   *  must not inherit that authority by accident. */
+  targetPaneFromNonce?: boolean
   identityKeyAttach?: IdentityKeyAttachDeps
   onConsumed?: (pane_id: string) => void
   log?: (line: string) => void
@@ -519,7 +525,12 @@ function evaluateRow(
   // and points the caller's seat at another pane.
   const claim = row.identity_key === null
     ? { foreign: false as const }
-    : classifyRowClaim({ row, caller: caller(), deps: input.identityKeyAttach })
+    : classifyRowClaim({
+        row,
+        caller: caller(),
+        deps: input.identityKeyAttach,
+        nonceTargeted: input.targetPaneFromNonce === true,
+      })
   if (claim.foreign) {
     input.log?.(
       `auto-bind skip (debug): pane=${paneId} ` +
@@ -641,6 +652,7 @@ function reArbitrateClaim(
     row: chosen.row,
     caller: input.identityKeyAttach?.findCaller(input.callerAgentId),
     deps: input.identityKeyAttach,
+    nonceTargeted: input.targetPaneFromNonce === true,
   })
   if (!claim.foreign) return true
   input.log?.(
@@ -668,6 +680,8 @@ function applyConsumedKeyOrThrow(
     callerAgentId: input.callerAgentId,
     key,
     ui_pid: chosen.ui_pid,
+    pane_id: chosen.pane_id,
+    nonceTargeted: input.targetPaneFromNonce === true,
     deps: input.identityKeyAttach,
   })
   if ('refused' in attached) {
@@ -707,17 +721,32 @@ type CallerIdentity = {
  * identity is provably gone (positive pid that is NOT running).  A keyless
  * row contradicts nothing; missing attach deps (legacy/in-process callers)
  * keep the pre-change behaviour.
+ *
+ * The caller's OWN stale key is the one exception, and only under a nonce.  A
+ * launcher re-mints its per-pane key whenever the seat is rebuilt, so a caller
+ * can legitimately arrive holding a previous generation's key; refusing on that
+ * alone left the pair unable to converge, since this attach is the only writer
+ * of the key for a runtime that cannot read it from its own environment.  The
+ * nonce, not liveness, is what reopens it: the same token already authorises
+ * taking the pane and evicting its incumbent, which is strictly more than
+ * overwriting one column on the caller's own row.  The holder arbitration below
+ * still runs — a caller may discard its own key, never take a live stranger's.
  */
 function classifyRowClaim(args: {
   row: { identity_key: string | null }
   caller: CallerIdentity | undefined
   deps: IdentityKeyAttachDeps | undefined
+  nonceTargeted: boolean
 }): { foreign: false } | { foreign: true; reason: string } {
   const key = args.row.identity_key
   if (key === null || args.deps === undefined || args.caller === undefined) {
     return { foreign: false }
   }
-  if (args.caller.identity_key !== null && args.caller.identity_key !== key) {
+  if (
+    args.caller.identity_key !== null
+    && args.caller.identity_key !== key
+    && !args.nonceTargeted
+  ) {
     return { foreign: true, reason: 'identity_key_contradiction' }
   }
   const holder = args.deps.findByIdentityKey(key)[0]
@@ -747,6 +776,8 @@ function attachConsumedIdentityKey(args: {
   callerAgentId: string
   key: string
   ui_pid: number
+  pane_id: string
+  nonceTargeted: boolean
   deps: IdentityKeyAttachDeps
 }): { ok: true } | { refused: string } {
   const { deps } = args
@@ -754,7 +785,9 @@ function attachConsumedIdentityKey(args: {
   if (!caller) {
     return { refused: `reason=caller_row_missing caller=${args.callerAgentId}` }
   }
-  if (caller.identity_key !== null && caller.identity_key !== args.key) {
+  const rotating =
+    caller.identity_key !== null && caller.identity_key !== args.key
+  if (rotating && !args.nonceTargeted) {
     return {
       refused: `reason=caller_holds_different_key caller=${args.callerAgentId}`,
     }
@@ -772,5 +805,22 @@ function attachConsumedIdentityKey(args: {
     }
   }
   deps.applyPlan(plan, args.callerAgentId, args.key)
+  if (rotating) {
+    // Replacing a key silently is indistinguishable from refusing to, and this
+    // class of defect is otherwise only visible by reading the live database.
+    // Prefixes identify a key across log lines and DB rows without rebuilding
+    // it, which is what keeps the recovery credential out of the log.
+    deps.log?.(
+      `identity_key rotated (debug): pane=${args.pane_id} ` +
+      `caller=${args.callerAgentId} ` +
+      `from=${keyPrefix(caller.identity_key)} to=${keyPrefix(args.key)}`
+    )
+  }
   return { ok: true }
+}
+
+/** First 8 characters of a key: enough to correlate log lines with DB rows,
+ *  never enough to reconstruct the credential. */
+function keyPrefix(key: string | null): string {
+  return key === null ? '-' : key.slice(0, 8)
 }

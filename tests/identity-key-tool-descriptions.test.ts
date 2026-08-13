@@ -72,6 +72,23 @@ describe('identity key tool descriptions', () => {
     await transport.close(); await client.close(); db.close(); await server.close()
   })
 
+  it('warns codex that the readable key belongs to the app-server, not the caller', async () => {
+    // A codex tool call runs inside the shared app-server, so the variable it
+    // can read names another pane.  Left unsaid, a caller passing it in good
+    // faith claims a key that is not its own.
+    const { dir, db, server, client, transport, tools } = await listTools()
+    cleanups.push(dir)
+    const desc = tools.find(t => t.name === 'register_agent')!.description!
+
+    const caveat = desc.slice(desc.indexOf('CAVEAT for `agent_type="codex"`'))
+    expect(caveat).not.toBe('')
+    expect(caveat).toContain('app-server')
+    expect(caveat).toMatch(/do NOT pass `identity_key`/)
+    expect(caveat).toContain('pre_register_codex_pane')
+
+    await transport.close(); await client.close(); db.close(); await server.close()
+  })
+
   it('reconnect presents the identity-key branch before the remembers branches', async () => {
     const { dir, db, server, client, transport, tools } = await listTools()
     cleanups.push(dir)
