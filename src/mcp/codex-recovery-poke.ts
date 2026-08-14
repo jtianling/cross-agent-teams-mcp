@@ -258,8 +258,18 @@ type DeclaredHolderRefusal =
   | 'holder_alive'
   | 'holder_liveness_unknown'
 
+// Names the release condition rather than predicting when it arrives.  The
+// earlier wording ("...until this identity registers with a positive pid")
+// reads as "wait and it clears", which is true for a codex or claude-code
+// holder and false for the runtimes that never record a pid at all: an
+// identity living on kimi-code or opencode meets this refusal on every later
+// seat rebuild, and clearing it takes operator action.  Hiding that behind an
+// optimistic string would bury exactly the "a human has to step in" state this
+// mechanism exists to eliminate.
 const HOLDER_LIVENESS_UNKNOWN_CONSEQUENCE =
-  'consequence=will_not_auto_recover_until_identity_registers_with_positive_pid'
+  'consequence=blocked_until_this_identity_registers_with_a_positive_pid '
+  + 'note=runtimes_that_never_record_one(kimi-code,opencode,tty-bound_codex)'
+  + '_do_not_clear_this_without_operator_action'
 
 function holderRefusalLogSuffix(reason: string | undefined): string {
   return reason === 'holder_liveness_unknown'

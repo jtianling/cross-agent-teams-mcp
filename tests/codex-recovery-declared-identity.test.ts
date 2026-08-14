@@ -21,8 +21,13 @@ const SHELL_LINE = '555 555 555 Ss -zsh'
 const FG_CODEX_LINE =
   '91131 91131 91131 S+ codex --remote ws://127.0.0.1:8799 ' +
   '-c xats.agent_id="U1"'
+// The refusal must name its release condition AND the fact that some runtimes
+// never satisfy it; a string promising recovery "later" would read as
+// wait-and-see for an identity that in fact needs a human.
 const UNKNOWN_CONSEQUENCE =
-  'consequence=will_not_auto_recover_until_identity_registers_with_positive_pid'
+  'consequence=blocked_until_this_identity_registers_with_a_positive_pid '
+  + 'note=runtimes_that_never_record_one(kimi-code,opencode,tty-bound_codex)'
+  + '_do_not_clear_this_without_operator_action'
 
 const KEY_HOLDER: IdentityKeyMatch = {
   agent_id: 'key-holder',

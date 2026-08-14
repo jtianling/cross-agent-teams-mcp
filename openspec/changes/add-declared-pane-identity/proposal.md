@@ -32,6 +32,10 @@
 
 `src/mcp/pre-register-codex-pane.ts` 与其 schema、`src/mcp/codex-pane-pre-register-repo.ts`、`src/storage/schema.ts` (pre-reg 表新增两列及迁移)、`src/mcp/codex-recovery-poke.ts` (排程与每轮重解析的持有者判定)、`src/cli.ts` (flag 解析与 `PRE_REGISTER_FLAGS`)、`src/mcp/tools.ts` (工具描述), 以及对应单元测试.
 
-新增一处跨仓耦合: launcher 在录入期本地实现了同一套标签字符规则, 以便坏值根本进不了持久层.  **本仓库日后放宽或收紧 `validateNameLabel` / `validateTeamLabel` 时必须通知 launcher 侧**, 否则会出现"xats 允许但 launcher 输入框不让打"的错配.
+新增一处跨仓耦合, 而且它是**双向**的: launcher 在录入期本地实现了同一套标签字符规则, 以便坏值根本进不了持久层.
+
+放宽的方向只是错配 —— "xats 允许但 launcher 输入框不让打", 用户当场就能发现.  **收紧的方向则会静默地让 launcher 已有的校验失效**: launcher 放行了一个 daemon 现在会拒的字符, 而 launcher 的降级重试只能读退出码, 分不清"daemon 不认识这个 flag"和"daemon 认识但值非法", 于是那次调用退化成一次**不带声明、却看起来健康**的启动 —— 正是本变更要消灭的那个病, 从另一个入口回来.
+
+所以这不是一条礼貌性的知会义务, 是 launcher 侧的**正确性依赖**: 本仓库日后改动 `validateNameLabel` / `validateTeamLabel` 或声明标签的字符集时, 必须同步通知 launcher 侧.  本变更自身已经触发过这条一次 (标签在 review 后先后收紧了双引号与 U+2028/U+2029, launcher 侧据此同步).
 
 launcher 侧的实现不在本变更范围内.  发布之前 launcher 会一直走"未知 flag → 降级重试"的路径, 属预期行为: `rejectUnknownPreRegisterFlags` 在联系 daemon 之前 `exit(2)`, 所以过渡期不会产生重复的 pre-reg 落库.
