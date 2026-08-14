@@ -164,12 +164,16 @@ describe('PreRegisterCodexPaneService', () => {
         pane_id: '%10',
         xats_agent_id: 'U1',
         identity_key: 'K1',
+        team: null,
+        agent_name: null,
         expires_at: '2026-01-01T00:02:00.000Z',
       },
       {
         pane_id: '%10',
         xats_agent_id: 'U2',
         identity_key: null,
+        team: null,
+        agent_name: null,
         expires_at: '2026-01-01T00:02:00.000Z',
       },
     ])

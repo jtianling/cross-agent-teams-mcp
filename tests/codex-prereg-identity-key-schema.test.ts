@@ -16,6 +16,15 @@ function createLegacyPreRegTable(db: Database.Database): void {
   )`)
 }
 
+function createIdentityKeyPreRegTable(db: Database.Database): void {
+  db.exec(`CREATE TABLE codex_pane_pre_registrations (
+    pane_id TEXT PRIMARY KEY,
+    xats_agent_id TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    identity_key TEXT
+  )`)
+}
+
 function columnNames(db: Database.Database): string[] {
   const cols = db.pragma(
     'table_info(codex_pane_pre_registrations)'
@@ -23,24 +32,26 @@ function columnNames(db: Database.Database): string[] {
   return cols.map(c => c.name)
 }
 
-describe('codex_pane_pre_registrations identity_key column', () => {
+describe('codex_pane_pre_registrations optional columns', () => {
   const dirs: string[] = []
   afterEach(() => {
     dirs.forEach(d => rmSync(d, { recursive: true, force: true }))
     dirs.length = 0
   })
 
-  it('a fresh database carries a nullable identity_key column', () => {
+  it('a fresh database carries all nullable optional columns', () => {
     const dir = tmp(); dirs.push(dir)
     const db = openDb(join(dir, 'data.db'))
     applySchema(db)
     const cols = db.pragma(
       'table_info(codex_pane_pre_registrations)'
     ) as Array<{ name: string; type: string; notnull: number }>
-    const col = cols.find(c => c.name === 'identity_key')
-    expect(col).toBeDefined()
-    expect(col?.type).toBe('TEXT')
-    expect(col?.notnull).toBe(0)
+    for (const name of ['identity_key', 'team', 'agent_name']) {
+      const col = cols.find(c => c.name === name)
+      expect(col).toBeDefined()
+      expect(col?.type).toBe('TEXT')
+      expect(col?.notnull).toBe(0)
+    }
     db.close()
   })
 
@@ -55,11 +66,37 @@ describe('codex_pane_pre_registrations identity_key column', () => {
 
     applySchema(db, { localDevice: 'local' })
 
-    expect(columnNames(db)).toContain('identity_key')
+    expect(columnNames(db)).toEqual(expect.arrayContaining([
+      'identity_key', 'team', 'agent_name',
+    ]))
     const row = db.prepare(
-      `SELECT identity_key FROM codex_pane_pre_registrations WHERE pane_id='%10'`
-    ).get() as { identity_key: string | null }
-    expect(row.identity_key).toBeNull()
+      `SELECT identity_key, team, agent_name
+       FROM codex_pane_pre_registrations WHERE pane_id='%10'`
+    ).get() as Record<string, string | null>
+    expect(row).toEqual({ identity_key: null, team: null, agent_name: null })
+    db.close()
+  })
+
+  it('heals the production shape that already carries identity_key', () => {
+    const dir = tmp(); dirs.push(dir)
+    const db = openDb(join(dir, 'data.db'))
+    createIdentityKeyPreRegTable(db)
+    db.prepare(
+      `INSERT INTO codex_pane_pre_registrations
+         (pane_id, xats_agent_id, expires_at, identity_key)
+       VALUES ('%10', 'U1', '2999-01-01T00:00:00Z', 'K1')`
+    ).run()
+
+    applySchema(db, { localDevice: 'local' })
+
+    expect(columnNames(db)).toEqual(expect.arrayContaining([
+      'identity_key', 'team', 'agent_name',
+    ]))
+    const row = db.prepare(
+      `SELECT identity_key, team, agent_name
+       FROM codex_pane_pre_registrations WHERE pane_id='%10'`
+    ).get()
+    expect(row).toEqual({ identity_key: 'K1', team: null, agent_name: null })
     db.close()
   })
 
@@ -72,7 +109,7 @@ describe('codex_pane_pre_registrations identity_key column', () => {
     let altered = 0
     const originalExec = db.exec.bind(db)
     db.exec = ((sql: string) => {
-      if (/codex_pane_pre_registrations ADD COLUMN identity_key/i.test(sql)) {
+      if (/codex_pane_pre_registrations ADD COLUMN/i.test(sql)) {
         altered += 1
       }
       return originalExec(sql)

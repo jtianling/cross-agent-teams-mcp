@@ -6,6 +6,9 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { openDb } from '../src/storage/db.js'
 import { applySchema } from '../src/storage/schema.js'
+import { AgentsRepo } from '../src/storage/agents-repo.js'
+import { findDeclaredIdentityHolder } from '../src/mcp/tools.js'
+import { insertAgent } from './helpers/insert-agent.js'
 import {
   __peekCodexRecoverySchedules,
   clearAllCodexRecoverySchedules,
@@ -33,6 +36,41 @@ describe('pre_register_codex_pane recovery wiring', () => {
     clearAllCodexRecoverySchedules()
     cleanups.forEach(d => rmSync(d, { recursive: true, force: true }))
     cleanups.length = 0
+  })
+
+  it('declared lookup is device-scoped and includes a proxy holder', () => {
+    const db = openDb(':memory:')
+    applySchema(db, { localDevice: 'local' })
+    insertAgent(db, {
+      agent_id: 'remote-holder',
+      device: 'remote',
+      team: 'monkeys',
+      name: 'mvr-coder',
+      runtime_ui_pid: 1111,
+    })
+    insertAgent(db, {
+      agent_id: 'local-proxy',
+      device: 'local',
+      team: 'monkeys',
+      name: 'mvr-coder',
+      role: '__channel_proxy__',
+      runtime_ui_pid: 2222,
+      last_seen_at: '2026-01-01T00:00:00.000Z',
+    })
+
+    expect(findDeclaredIdentityHolder(
+      new AgentsRepo(db),
+      'local',
+      'monkeys',
+      'mvr-coder'
+    )).toMatchObject({
+      agent_id: 'local-proxy',
+      device: 'local',
+      role: '__channel_proxy__',
+      runtime_ui_pid: 2222,
+      last_seen_at: '2026-01-01T00:00:00.000Z',
+    })
+    db.close()
   })
 
   it('stores the key and schedules nothing on a key miss', async () => {

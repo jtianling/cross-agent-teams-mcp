@@ -4,6 +4,7 @@ import { z } from 'zod'
 import {
   AgentsRepo,
   sameIdentityRowSnapshot,
+  type IdentityKeyMatch,
   type IdentityRowSnapshot,
   type OpencodeRuntimeRow,
 } from '../storage/agents-repo.js'
@@ -470,6 +471,30 @@ function seatCarrierGone(seat: InheritSeat): boolean {
   return pid !== null && pid > 0 && !isAlive(pid)
 }
 
+export function findDeclaredIdentityHolder(
+  agents: AgentsRepo,
+  localDevice: string,
+  team: string,
+  name: string
+): IdentityKeyMatch | undefined {
+  // Unlike key lookup, a declared identity intentionally includes channel
+  // proxies: their rows must pass the same conservative liveness gate rather
+  // than being misclassified as an absent, first-assignment identity.
+  const identity = agents.findByIdentity({ device: localDevice, team, name })
+  if (identity === undefined) return undefined
+  const holder = agents.findById(identity.agent_id)
+  if (holder === undefined) return undefined
+  return {
+    agent_id: holder.agent_id,
+    device: holder.device,
+    team: holder.team,
+    name: holder.name,
+    role: holder.role,
+    runtime_ui_pid: holder.runtime_ui_pid,
+    last_seen_at: holder.last_seen_at,
+  }
+}
+
 export function registerBusinessTools(
   server: McpServer,
   db: Database.Database,
@@ -523,6 +548,12 @@ export function registerBusinessTools(
     repo: codexPanePreRegRepo,
     findByIdentityKey: key =>
       agents.findByIdentityKey(key, recoveryLocalDevice),
+    findByDeclaredIdentity: (team, name) => findDeclaredIdentityHolder(
+      agents,
+      recoveryLocalDevice,
+      team,
+      name
+    ),
     localDevice: recoveryLocalDevice,
     log,
   }
@@ -1723,7 +1754,18 @@ export function registerBusinessTools(
         'When the codex agent later calls `register_agent({agent_type:"codex"})` without `ui_pid`, the daemon uses the pending row to resolve the correct UI pid and auto-bind the pane.',
         'Callable without a prior `register_agent` — launchers have no agent identity yet.',
         'Optional `identity_key` is the launcher-minted restart-stable identity handle. It MUST NEVER appear on any process argv and never in model context; the CLI reads the launcher-exported environment variable and forwards it only over the authenticated HTTP channel.',
-        'When the key matches a known identity whose runtime process is dead, the daemon schedules a recovery poke: once a codex `--remote` process with the pre-registered uuid appears on the pane, it guides the agent to re-register under the recovered (team, name). The poke text never contains the key.',
+        'Optional `team` and `agent_name` carry the launcher-declared ' +
+        'identity for this pane. They may be supplied independently; the ' +
+        'daemon trims them, validates their label characters, and only a ' +
+        'complete pair can address recovery.',
+        'When the key matches a known identity whose runtime process is ' +
+        'dead, or the key misses and a complete declaration has no holder ' +
+        'or a holder with a confirmed dead process, the daemon schedules a ' +
+        'recovery poke. Once a codex `--remote` process with the ' +
+        'pre-registered uuid appears on the pane, the poke guides it to ' +
+        're-register under the recovered (team, name). The poke text never ' +
+        'contains the key. A declared holder with no positive runtime pid ' +
+        'is liveness-unknown and conservatively blocks recovery.',
         'TTL defaults to 120 seconds and is capped at 600; pending rows are garbage-collected opportunistically.',
       ].join(' '),
       inputSchema: preRegisterCodexPaneInputSchema,
@@ -1775,6 +1817,22 @@ export function registerBusinessTools(
       title: 'Register agent',
       description: [
         'Register this session as an agent in a team. This is the unified registration entry point.',
+        'DECLARED IDENTITY (applies to every `agent_type`, and is not a ' +
+        'runtime-detection signal): read `XATS_TEAM` and `XATS_AGENT_NAME` ' +
+        'from the environment. Pass each non-empty value unchanged as its ' +
+        'corresponding `team` or `name` argument. When both are present, ' +
+        'register with that complete identity instead of asking a human. ' +
+        'They are the launcher\'s declaration of who this pane is, and are ' +
+        'what lets that identity survive a seat rebuild after the pane\'s ' +
+        '`identity_key` has been re-minted and no runtime lookup can recover ' +
+        'the old identity.',
+        'Codex is the exception that MUST NOT read `XATS_TEAM` or ' +
+        '`XATS_AGENT_NAME` itself: codex tool calls execute inside the shared ' +
+        'app-server, so those readable values belong to the shell that ' +
+        'launched the server, not to the caller pane. The codex launcher ' +
+        'delivers this pane\'s declaration out-of-band through ' +
+        '`pre_register_codex_pane`, exactly as it does for ' +
+        '`XATS_IDENTITY_KEY`.',
         'DETECTION (run these probes BEFORE choosing `agent_type=`, in order; first match wins):',
         '1. `printenv KIMI_XATS_BASE_URL` non-empty → `agent_type="kimi-code"`; pass that value as `base_url`, and pass `session_id` from `printenv KIMI_XATS_SESSION_ID`. The `xats-kimi` launcher pre-creates the session via the kimi server REST API and exports BOTH variables, so the session id is exact — do NOT derive it from `~/.kimi-code/session_index.jsonl` (its last `workDir`-matching entry can belong to a DIFFERENT kimi session in the same directory; pokes bound that way are delivered to the wrong session). `session_id` is REQUIRED for kimi-code — the daemon does NOT auto-resolve it. These env vars are set ONLY by the `xats-kimi` launcher, so their presence is itself the runtime assertion that the caller is kimi-code.',
         '2. `printenv OPENCODE_XATS_BASE_URL` non-empty → `agent_type="opencode"`; pass that value as `base_url`. Do NOT pass `session_id` — the daemon auto-resolves it as the most recently updated session on that base_url. The env var is set ONLY by the `free-xats-opencode` launcher, so its presence is itself the runtime assertion that the caller is opencode.',

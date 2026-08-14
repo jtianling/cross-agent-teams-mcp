@@ -22,19 +22,26 @@ endpoint 并绑定 tmux 身份.
 
 1. 如果之前 alias 过同名命令, 用 `unalias` 保护
 2. 生成一个 per-launch UUID
-3. 在 tmux 环境下调用 `pre-register-codex-pane`, 然后 `exec codex ...`
+3. 在 tmux 环境下调用 `pre-register-codex-pane`, 有声明时传
+   `--team` / `--agent-name`, 然后 `exec codex ...`
 
 ```zsh
 free-xats-codex() {
   unalias free-xats-codex 2>/dev/null
 
   local uuid
+  local -a declared_identity_args
   uuid=$(uuidgen)
+  [[ -n "${XATS_TEAM:-}" ]] \
+    && declared_identity_args+=(--team "$XATS_TEAM")
+  [[ -n "${XATS_AGENT_NAME:-}" ]] \
+    && declared_identity_args+=(--agent-name "$XATS_AGENT_NAME")
 
   if [[ -n "$TMUX_PANE" ]]; then
     cross-agent-teams-mcp pre-register-codex-pane \
       --pane "$TMUX_PANE" \
       --agent-id "$uuid" \
+      "${declared_identity_args[@]}" \
       >/dev/null 2>&1 \
       || echo "[xats] pre-register failed (continuing without pane claim)" >&2
   else
@@ -51,7 +58,11 @@ free-xats-codex() {
 
 ## 行为说明
 
-- **tmux 内启动**: 先发一条 pre-register 给 daemon (pane_id + UUID + 120s TTL), 再 `exec codex`.  codex agent 跑起来之后调用 `register_agent({client:"codex", ...})` 时, daemon 会用 pending pre-reg 自动解析 UI pid 并绑定 `tmux_pane_id`.
+- **tmux 内启动**: 先发一条 pre-register 给 daemon (pane_id + UUID +
+  可选的 `XATS_TEAM` / `XATS_AGENT_NAME` 声明 + 120s TTL), 再 `exec codex`.
+  codex agent 跑起来之后调用 `register_agent({client:"codex", ...})` 时,
+  daemon 会用 pending pre-reg 自动解析 UI pid 并绑定 `tmux_pane_id`.  当 key
+  无法恢复旧身份时, 完整声明还能让 daemon 发出带 `(team, name)` 的恢复通知.
 - **非 tmux 启动 (SSH 纯终端 / CI 等)**: 打印 `[xats] pre-register skipped: not in tmux`, 然后 `exec codex`.  CLI 仍连接常驻的 8799 runtime, 不会看到 App 的 8800 session; 只是没有自动绑定 pane.
 - **pre-register 调用失败 (daemon 没跑起来等)**: 打印一行错误到 stderr, 但不阻塞 `exec codex`.  同样退回到现有 no-pane 路径.
 - **TTL 过期 / pane 里没有预期的 UUID**: daemon 端会跳过这条 pre-reg, 也不会误绑到其它 pane, 最坏情况是回退到 no-pane hint.
@@ -60,7 +71,8 @@ free-xats-codex() {
 
 以上函数是**推荐写法**, 不是强制.  `~/.zshrc` 是用户个人配置, 本仓库默认不会动它.  你可以自由调整 `ws_url` / `codex` 参数 / 是否 `exec`.  但请保留三个关键点:
 
-1. 在 tmux 内调用 `cross-agent-teams-mcp pre-register-codex-pane --pane "$TMUX_PANE" --agent-id "$uuid"` (忽略失败)
+1. 在 tmux 内调用 `cross-agent-teams-mcp pre-register-codex-pane --pane "$TMUX_PANE" --agent-id "$uuid"` (忽略失败).  已配置声明时再传
+   `--team "$XATS_TEAM" --agent-name "$XATS_AGENT_NAME"`.
 2. 启动 codex 时带上 `-c xats.agent_id="\"$uuid\""`, 这样 daemon 才能用 argv UUID 反向校验 pane
 3. `-C "$PWD"` 必须保留 — `codex --remote` 默认会用 app-server 的 cwd, 不是 TUI 的; 不带 `-C "$PWD"` 的话, 无论你在哪个目录跑 launcher, codex session 都会落到 app-server 启动时的那个目录
 

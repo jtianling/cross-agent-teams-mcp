@@ -3,7 +3,7 @@ import { readPidTty } from '../daemon/pid-tty.js'
 import { listTmuxPaneRows, type TmuxPaneRow } from '../daemon/tmux-pane-list.js'
 
 export interface PaneHostRow {
-  agent_id: string
+  agent_id: string | null
   device: string
   runtime_ui_pid: number | null
 }
@@ -19,7 +19,11 @@ export type PaneHostVerdict =
   | { ok: false; reason: 'undecidable' }
 
 export interface FindPaneClaimantsFn {
-  (args: { device: string; paneId: string; excludeAgentId: string }): PaneHostRow[]
+  (args: {
+    device: string
+    paneId: string
+    excludeAgentId: string | null
+  }): PaneHostRow[]
 }
 
 export interface VerifyPaneHostArgs {
@@ -31,7 +35,7 @@ export interface VerifyPaneHostArgs {
   readPidTty?: (pid: number) => Promise<string | null>
   findPaneClaimants?: FindPaneClaimantsFn
   /** Current DB truth for `(agent_id, pane)`, checked against a stale cached row. */
-  stillOwnsPane?: (agentId: string, paneId: string) => boolean
+  stillOwnsPane?: (agentId: string | null, paneId: string) => boolean
 }
 
 const VERIFIED: PaneHostVerdict = { ok: true }

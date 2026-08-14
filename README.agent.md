@@ -354,8 +354,13 @@ xats-codex-app() {
 
 _xats-codex() {
     local xats_agent_id ws_url
+    local -a declared_identity_args
     xats_agent_id="$(uuidgen)"
     ws_url="ws://127.0.0.1:8799"
+    [[ -n "${XATS_TEAM:-}" ]] \
+        && declared_identity_args+=(--team "$XATS_TEAM")
+    [[ -n "${XATS_AGENT_NAME:-}" ]] \
+        && declared_identity_args+=(--agent-name "$XATS_AGENT_NAME")
 
     if ! nc -z 127.0.0.1 8799 >/dev/null 2>&1; then
         echo "[xats] codex app-server not running, starting it" >&2
@@ -381,6 +386,7 @@ _xats-codex() {
         npx -y cross-agent-teams-mcp pre-register-codex-pane \
             --pane "$TMUX_PANE" \
             --agent-id "$xats_agent_id" \
+            "${declared_identity_args[@]}" \
             >/dev/null 2>&1 \
             || echo "[xats] pre-register failed (continuing without pane claim)" >&2
     fi

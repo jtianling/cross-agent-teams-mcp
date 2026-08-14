@@ -68,7 +68,9 @@ const DDL = [
     pane_id TEXT PRIMARY KEY,
     xats_agent_id TEXT NOT NULL,
     expires_at TEXT NOT NULL,
-    identity_key TEXT
+    identity_key TEXT,
+    team TEXT,
+    agent_name TEXT
   )`
 ]
 
@@ -292,7 +294,7 @@ function migrateAgentsPrevPaneColumn(db: Database.Database): void {
   db.exec(`ALTER TABLE agents ADD COLUMN prev_tmux_pane_id TEXT`)
 }
 
-function migrateCodexPreRegIdentityKeyColumn(db: Database.Database): void {
+function migrateCodexPreRegColumns(db: Database.Database): void {
   const tableExists = db
     .prepare(
       `SELECT name FROM sqlite_master WHERE type='table' AND name='codex_pane_pre_registrations'`
@@ -302,8 +304,16 @@ function migrateCodexPreRegIdentityKeyColumn(db: Database.Database): void {
   const cols = db.pragma(
     'table_info(codex_pane_pre_registrations)'
   ) as Array<{ name: string }>
-  if (cols.some(c => c.name === 'identity_key')) return
-  db.exec(`ALTER TABLE codex_pane_pre_registrations ADD COLUMN identity_key TEXT`)
+  const existing = new Set(cols.map(c => c.name))
+  if (!existing.has('identity_key')) {
+    db.exec(`ALTER TABLE codex_pane_pre_registrations ADD COLUMN identity_key TEXT`)
+  }
+  if (!existing.has('team')) {
+    db.exec(`ALTER TABLE codex_pane_pre_registrations ADD COLUMN team TEXT`)
+  }
+  if (!existing.has('agent_name')) {
+    db.exec(`ALTER TABLE codex_pane_pre_registrations ADD COLUMN agent_name TEXT`)
+  }
 }
 
 function migrateMessagesNeedReplyColumn(db: Database.Database): void {
@@ -349,7 +359,7 @@ export function applySchema(
   migrateAgentsRegisterGenerationColumn(db)
   migrateAgentsOpencodeRuntimeGenerationColumn(db)
   migrateAgentsPrevPaneColumn(db)
-  migrateCodexPreRegIdentityKeyColumn(db)
+  migrateCodexPreRegColumns(db)
   migrateMessagesNeedReplyColumn(db)
   migrateAgentsCursorWatermark(db)
 }

@@ -130,8 +130,25 @@ function parseIdentityKeyEnvFlag(
   return { present: true, varName: next }
 }
 
+function parseDeclaredIdentityFlag(
+  argv: readonly string[],
+  flag: '--team' | '--agent-name'
+): string | undefined {
+  const i = argv.indexOf(flag)
+  if (i < 0) return undefined
+  const next = argv[i + 1]
+  if (next !== undefined && !next.startsWith('--')) return next
+  console.error(JSON.stringify({
+    ok: false,
+    error: 'invalid_arguments',
+    detail: `${flag} requires a value`,
+  }))
+  process.exit(2)
+}
+
 const PRE_REGISTER_FLAGS = new Set([
-  '--pane', '--agent-id', '--ttl', '--identity-key-env', '--port', '--token',
+  '--pane', '--agent-id', '--ttl', '--identity-key-env', '--team',
+  '--agent-name', '--port', '--token',
 ])
 
 /**
@@ -161,12 +178,19 @@ async function runPreRegisterCodexPane(): Promise<void> {
   const pane = parseArg('--pane')
   const agentId = parseArg('--agent-id')
   const ttlRaw = parseArg('--ttl')
+  const team = parseDeclaredIdentityFlag(process.argv, '--team')
+  const agentName = parseDeclaredIdentityFlag(process.argv, '--agent-name')
   const keyEnvFlag = parseIdentityKeyEnvFlag(process.argv)
   const tokenExplicit = parseArg('--token')
   const portExplicit = parseArg('--port')
 
   if (!pane || !agentId) {
-    console.error('usage: cross-agent-teams-mcp pre-register-codex-pane --pane <pane_id> --agent-id <uuid> [--identity-key-env [VAR]] [--ttl <seconds>] [--port <n>] [--token <t>]')
+    console.error(
+      'usage: cross-agent-teams-mcp pre-register-codex-pane ' +
+      '--pane <pane_id> --agent-id <uuid> [--identity-key-env [VAR]] ' +
+      '[--team <team>] [--agent-name <name>] [--ttl <seconds>] ' +
+      '[--port <n>] [--token <t>]'
+    )
     process.exit(2)
   }
 
@@ -230,6 +254,8 @@ async function runPreRegisterCodexPane(): Promise<void> {
     if (identityKey !== undefined) {
       args.identity_key = identityKey
     }
+    if (team !== undefined) args.team = team
+    if (agentName !== undefined) args.agent_name = agentName
     if (ttlRaw !== undefined) {
       const ttl = Number(ttlRaw)
       if (!Number.isInteger(ttl) || ttl <= 0) {
