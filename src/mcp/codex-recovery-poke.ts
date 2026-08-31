@@ -15,6 +15,10 @@ import { pokeWroteContent, tmuxPokeImpl } from './poke.js'
 import type { TmuxPokeResult } from './transport-dispatch.js'
 import { runQuietGuard } from './poke-guard.js'
 import {
+  isCodexComposerReady,
+  PROMPT_NOT_READY,
+} from './codex-prompt-readiness.js'
+import {
   loadTmuxPaneSnapshot,
   verifyPaneHost,
   type PaneHostVerdict,
@@ -50,6 +54,7 @@ export interface CodexRecoveryDeps {
     content: string
     skipGuard?: boolean
     confirmOwnership?: () => boolean
+    requireReady?: (paneTail: string) => boolean
   }) => Promise<TmuxPokeResult>
   verifyPaneHost?: (args: {
     paneId: string
@@ -385,7 +390,14 @@ interface ProbeState {
   detectedPidsLogged: Set<number>
 }
 
-type TransientReason = 'guard_failed' | 'carrier_backgrounded'
+type TransientReason =
+  | 'guard_failed'
+  | 'carrier_backgrounded'
+  | typeof PROMPT_NOT_READY
+
+/** Send-stage refusals that return the generation to the polling loop.  The
+ *  quiet guard's own failure is handled before the send and is not one. */
+const SEND_TRANSIENT_REASONS = ['carrier_backgrounded', PROMPT_NOT_READY] as const
 
 /**
  * A closure belongs to the live generation only while its messageId is still
@@ -623,15 +635,20 @@ async function sendRecoveryPoke(state: ProbeState, pid: number): Promise<void> {
   state.resumeLogged.delete('guard_failed')
   const outcome = await sendAfterGuard(state, pid)
   if (!outcome.sent) {
-    // A backgrounded codex is equally transient: the row is still current
-    // and the holder unchanged, so the generation returns to the polling
-    // loop.  A cancelled or superseded generation resumes nothing and
-    // falls through to retire only itself.
-    if (outcome.reason === 'carrier_backgrounded') {
-      logTransientResume(state, 'carrier_backgrounded')
+    // A backgrounded codex and a pane that is not showing a codex composer are
+    // equally transient: the row is still current and the holder unchanged, so
+    // the generation returns to the polling loop.  A cancelled or superseded
+    // generation resumes nothing and falls through to retire only itself.
+    const transient = SEND_TRANSIENT_REASONS.find(r => r === outcome.reason)
+    // Every other send-stage reason passed on this attempt, so its streak
+    // marker clears and a later relapse logs anew.
+    for (const reason of SEND_TRANSIENT_REASONS) {
+      if (reason !== transient) state.resumeLogged.delete(reason)
+    }
+    if (transient !== undefined) {
+      logTransientResume(state, transient)
       if (resumeProbePolling(state)) return
     } else {
-      state.resumeLogged.delete('carrier_backgrounded')
       rlog(deps,
         `codex-recovery cancelled: pane=${row.pane_id} ` +
         `reason=${outcome.reason}` +
@@ -761,6 +778,9 @@ async function sendAfterGuard(
     content: buildCodexRecoveryPokeContent({ ...holder, nonce }),
     skipGuard: true,
     confirmOwnership,
+    // The quiet guard passed on a motionless pane; that is not evidence the
+    // pane can be typed into, and the write ends in an unconditional Enter.
+    requireReady: isCodexComposerReady,
   })
   // Any outcome that left the notice in the pane counts as delivered, not just
   // the successful one: the seeding trigger reads this to leave such a pane

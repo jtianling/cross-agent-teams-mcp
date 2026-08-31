@@ -22,6 +22,7 @@ import {
   type TmuxPokeResult,
 } from './transport-dispatch.js'
 import { runQuietGuard } from './poke-guard.js'
+import { PROMPT_NOT_READY } from './codex-prompt-readiness.js'
 import {
   memoizePaneSnapshot,
   verifyPaneHost,
@@ -174,6 +175,10 @@ export async function tmuxPokeImpl(args: {
   content: string
   skipGuard?: boolean
   confirmOwnership?: () => boolean
+  /** Optional readiness allowlist over the pre-write pane tail, supplied by
+   *  the codex-side callers.  Omitting it leaves the sequence unchanged: the
+   *  quiet guard also serves panes whose ready state is not a codex composer. */
+  requireReady?: (paneTail: string) => boolean
 }): Promise<TmuxPokeResult> {
   if (!(await isTmuxAvailable())) {
     return { error: 'tmux_unavailable', detail: 'tmux binary not available on PATH' }
@@ -197,6 +202,13 @@ export async function tmuxPokeImpl(args: {
       return { error: 'pane_reassigned' }
     }
     const pane_tail_before = await runStage('capture_before', () => capturePaneTail(args.pane_id, TAIL_LINES))
+    // Evaluated on the capture the primitive already takes, so the predicate
+    // costs no extra tmux call and sits closer to the write than any caller
+    // could get. A capture that throws never reaches here and is classified by
+    // the catch below, which is the same fail-closed outcome.
+    if (args.requireReady && !args.requireReady(pane_tail_before)) {
+      return { error: PROMPT_NOT_READY }
+    }
     await runStage('load_buffer', () => loadBuffer(bufName, args.content))
     bufferPending = true
     // Final ownership read: capture/load above awaited, so the earlier check no

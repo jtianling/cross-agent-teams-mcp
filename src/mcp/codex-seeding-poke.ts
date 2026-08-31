@@ -21,6 +21,10 @@ import {
   mintCodexRecoveryNonce,
 } from './codex-recovery-nonce.js'
 import { pokeWroteContent, tmuxPokeImpl } from './poke.js'
+import {
+  isCodexComposerReady,
+  PROMPT_NOT_READY,
+} from './codex-prompt-readiness.js'
 import type { TmuxPokeResult } from './transport-dispatch.js'
 import { describeRedactedError } from './log-redact.js'
 
@@ -62,6 +66,7 @@ export interface CodexSeedingDeps {
     pane_id: string
     content: string
     confirmOwnership?: () => boolean
+    requireReady?: (paneTail: string) => boolean
   }) => Promise<TmuxPokeResult>
   log?: (line: string) => void
 }
@@ -419,6 +424,9 @@ async function sendSeedingPoke(
     pane_id: row.pane_id,
     content: buildCodexSeedingPokeContent({ nonce }),
     confirmOwnership,
+    // A quiet pane is not evidence it can be typed into, and the write ends in
+    // an unconditional Enter that a blocking menu would read as its answer.
+    requireReady: isCodexComposerReady,
   })
   // Asked of the primitive, which is the only side that knows which stages run
   // after the paste: `ok`, a paste whose Enter never went, and a throw from a
@@ -432,11 +440,13 @@ async function sendSeedingPoke(
     return
   }
   const error = (result as { error: string }).error
-  // A busy pane and a backgrounded carrier are both transient: the row is
-  // still pending, so the generation returns to the polling loop and re-runs
-  // the full detect → confirm → paste sequence.  ownership_lost
-  // (pasted-but-unexecuted) stays terminal even when the carrier refused.
+  // A busy pane, a pane not showing a codex composer, and a backgrounded
+  // carrier are all transient: the row is still pending, so the generation
+  // returns to the polling loop and re-runs the full detect → confirm → paste
+  // sequence.  ownership_lost (pasted-but-unexecuted) stays terminal even when
+  // the carrier refused.
   const transient = error === 'guard_failed'
+    || error === PROMPT_NOT_READY
     || (error === 'pane_reassigned' && carrierBackgrounded)
   if (transient) {
     logOnce(state, `resume:${error}`,

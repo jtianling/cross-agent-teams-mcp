@@ -8,7 +8,9 @@ vi.mock('../src/daemon/tmux-cli.js', async (importOriginal) => {
   return {
     ...actual,
     isTmuxAvailable: vi.fn(async () => true),
-    capturePaneTail: vi.fn(async () => 'tail'),
+    // Composer-shaped: the codex-side callers now require positive
+    // evidence of an idle composer before anything is written.
+    capturePaneTail: vi.fn(async () => '\u203a Ask Codex to do anything'),
     loadBuffer: vi.fn(async () => {}),
     pasteBuffer: vi.fn(async () => {}),
     sendEnter: vi.fn(async () => {}),
