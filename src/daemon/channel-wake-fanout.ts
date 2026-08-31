@@ -22,15 +22,24 @@ export class ChannelWakeFanout {
     }
   }
 
+  /**
+   * Returns true only when the sink actually accepted the payload.
+   *
+   * A throwing sink used to be swallowed and still reported success, which made
+   * this the weakest "delivered" signal in the daemon: an agent whose channel
+   * had gone away still produced `poked: true`.  The entry is deliberately left
+   * attached on failure — a transient write error is not proof the subscriber
+   * is gone, and detaching here would race the proxy's own lifecycle.
+   */
   send(channel_session_id: string, payload: unknown): boolean {
     const entry = this.entries.get(channel_session_id)
     if (!entry) return false
     try {
       entry.sink(payload)
+      return true
     } catch {
-      // sink failure is the caller's concern; swallow to preserve map state
+      return false
     }
-    return true
   }
 
   has(channel_session_id: string): boolean {

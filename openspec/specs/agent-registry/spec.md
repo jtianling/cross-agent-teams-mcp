@@ -422,43 +422,6 @@ The hint-on-missing-pane-id semantics (see Requirement "register_agent response 
 - **WHEN** a caller invokes `register_agent({ agent_type: 'custom', name: 'alice', project_dir: '/tmp/my(proj)' })`
 - **THEN** the registration succeeds with team `my(proj)` (the derived basename is not character-validated)
 
-### Requirement: Sentinel migration advances stale zero cursors on schema apply
-
-`applySchema` SHALL run an idempotent one-shot migration that advances every `agents` row whose `last_processed_event_id = 0` to the current `MAX(event_id)` of the events table:
-
-```
-UPDATE agents
-   SET last_processed_event_id = COALESCE((SELECT MAX(event_id) FROM events), 0)
- WHERE last_processed_event_id = 0
-```
-
-The migration MUST be safe to run on every daemon boot. Once an agent's cursor has advanced past 0 (either via this migration, via a fresh registration, or via the new `get_inbox` auto-advance), this UPDATE WHERE-clause matches no rows and the migration is a no-op. There MUST be no separate migrations table or version flag — the `last_processed_event_id = 0` predicate is itself the sentinel.
-
-The migration MUST run BEFORE the daemon accepts any MCP traffic (i.e. inside `applySchema` or the bootstrap path it is part of), so that the very first `get_inbox()` call on this boot already sees a non-zero cursor and does not re-emit the entire historical mailbox.
-
-#### Scenario: Existing zero-cursor agent is advanced on first boot post-deploy
-
-- **GIVEN** before the deploy, an existing agent row has `last_processed_event_id = 0`
-- **AND** the events table has `MAX(event_id) = 500`
-- **WHEN** the daemon boots and `applySchema` runs
-- **THEN** that agent's `last_processed_event_id` is now `500`
-
-#### Scenario: Migration is idempotent on subsequent boots
-
-- **GIVEN** every agent row already has `last_processed_event_id > 0` after a prior boot ran the migration
-- **AND** new events have appeared since then, raising `MAX(event_id)` further
-- **WHEN** the daemon boots again and `applySchema` runs
-- **THEN** no agent row is modified (the WHERE clause matches zero rows)
-- **AND** existing cursors are NOT bumped to the new MAX (preserving each agent's own pace)
-
-#### Scenario: Migration on empty events table sets cursors to zero (no-op)
-
-- **GIVEN** an existing agent row with `last_processed_event_id = 0`
-- **AND** the events table is empty (`MAX(event_id) IS NULL`)
-- **WHEN** the daemon boots and `applySchema` runs
-- **THEN** the agent's `last_processed_event_id` remains `0` (COALESCE → 0)
-- **AND** no error is raised
-
 ### Requirement: Repeated register_agent for same identity updates metadata
 
 Any subsequent `register_agent` call for a `(team, name)` pair that already has a row in the agents table SHALL upsert metadata on that existing row without producing a new `agent_id`, regardless of whether the call originates from the same MCP session or a new one, and regardless of whether the `role` parameter on the subsequent call matches the persisted `role`.
@@ -2686,3 +2649,46 @@ These variables SHALL NOT be added as a branch of the numbered first-match-wins 
 - **WHEN** the description is inspected
 - **THEN** neither variable appears as a numbered branch of the `agent_type` DETECTION sequence
 - **AND** the existing `agent_type` probes are unchanged
+
+### Requirement: Schema apply MUST NOT modify any agent's inbox cursor
+
+`applySchema` and every migration it runs SHALL NOT write `agents.last_processed_event_id`.  The cursor has exactly two writers: `get_inbox`, which advances it in the same transaction that returns the rows, and the fresh-registration INSERT, which initialises it to `COALESCE((SELECT MAX(event_id) FROM events), 0)`.
+
+This restores the invariant the read-receipt predicate depends on: a cursor may only move because the owning agent read something, or because the row was just created.  A daemon restart MUST be unobservable in the cursor.
+
+A cursor legitimately sitting at `0` MUST be treated as a valid cursor, not as an uninitialised sentinel.  Any future need to bulk-initialise cursors MUST use an unambiguous marker (a nullable column, or an explicit flag) rather than matching on `= 0`.
+
+#### Scenario: Restart does not advance a legitimately zero cursor
+
+- **GIVEN** agent `B` registered while the `events` table was empty, so its `last_processed_event_id` is `0`
+- **AND** agent `A` then sent `B` a message, creating `event_id = 1`
+- **WHEN** the daemon restarts and `applySchema` runs
+- **THEN** `B`'s `last_processed_event_id` is still `0`
+- **AND** `B`'s next `get_inbox` returns that message
+
+#### Scenario: Restart does not advance a non-zero cursor
+
+- **GIVEN** an agent whose `last_processed_event_id` is `3`
+- **AND** the events table has since grown past `3`
+- **WHEN** the daemon restarts and `applySchema` runs
+- **THEN** that agent's `last_processed_event_id` is still `3`
+
+#### Scenario: Repeated schema applies leave every cursor untouched
+
+- **GIVEN** a database holding agents with a mix of zero and non-zero cursors, and a non-empty events table
+- **WHEN** `applySchema` runs several times
+- **THEN** every agent's `last_processed_event_id` holds the value it had before the first run
+
+#### Scenario: An emptied events table yields a valid zero cursor again
+
+- **GIVEN** a long-running database whose `events` rows have all aged past the retention TTL and been deleted
+- **WHEN** a new agent registers
+- **THEN** its `last_processed_event_id` is `0`
+- **AND** a subsequent `applySchema` leaves it at `0`
+
+#### Scenario: A fresh registration on an empty events table yields a valid zero cursor
+
+- **WHEN** an agent registers while the `events` table is empty
+- **THEN** its `last_processed_event_id` is `0`
+- **AND** that value is treated as a valid cursor by every later read, not as a sentinel to be rewritten
+

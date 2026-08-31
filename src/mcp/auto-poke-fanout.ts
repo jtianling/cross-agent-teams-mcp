@@ -16,6 +16,7 @@ export type AutoPokeSkipReason =
   | 'kimi_session_archived'
   | 'runtime_recovering'
   | 'pane_reassigned'
+  | 'channel_sink_failed'
 
 export interface AutoPokeArgs {
   team: string

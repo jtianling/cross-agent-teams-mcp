@@ -234,7 +234,9 @@ describe('tool descriptions: auto-poke and delivery status', () => {
     const tool = tools.find(t => t.name === 'send_message')
     const d = tool!.description!
     expect(d).toMatch(/offline|idle|not filtered/i)
-    expect(d).not.toMatch(/5 min/i)
+    // Word-bounded so it still rejects a stale "5 min" idle-window claim
+    // without firing on the unrelated "15 minutes" unread-alert deadline.
+    expect(d).not.toMatch(/\b5 min/i)
   })
 
   it('send_message_by_id is registered with id-based addressing', async () => {

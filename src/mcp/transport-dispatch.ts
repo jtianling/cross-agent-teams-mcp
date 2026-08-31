@@ -164,6 +164,7 @@ async function dispatchClaude(
     target.delivery.kind === 'claude-channel' &&
     (deps.channelWakeFanout?.has(target.delivery.channel_session_id) ?? false)
 
+  let sinkFailed = false
   if (target.delivery.kind === 'claude-channel' && channelSubscribed && deps.channelWakeFanout) {
     const result = sendChannelWake(
       deps.channelWakeFanout,
@@ -177,9 +178,21 @@ async function dispatchClaude(
         channel_session_id: target.delivery.channel_session_id,
       }
     }
+    sinkFailed = result.reason === 'sink_failed'
   }
 
   if (paneId) return dispatchTmux(deps, target, paneId, input.content, input.skipGuard)
+  // A subscribed sink that threw is NOT the same as having no transport: the
+  // subscriber is still attached and the next attempt may well land, whereas
+  // no_transport_available maps to a terminal `no_pane` skip that is never
+  // retried.  Collapsing the two would recreate, one layer up, the false
+  // signal that fixing the swallowed sink error was meant to remove.
+  if (sinkFailed) {
+    return {
+      error: 'channel_sink_failed',
+      detail: { channel_session_id: (target.delivery as { channel_session_id?: string }).channel_session_id },
+    }
+  }
   return {
     error: 'no_transport_available',
     detail: {

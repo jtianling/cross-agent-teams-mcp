@@ -51,7 +51,9 @@ const DDL = [
     subject TEXT,
     body TEXT NOT NULL,
     need_reply INTEGER NOT NULL DEFAULT 1,
-    sent_at TEXT NOT NULL
+    sent_at TEXT NOT NULL,
+    ack_deadline_at TEXT,
+    ack_alerted_at TEXT
   )`,
   `CREATE TABLE IF NOT EXISTS message_delivery_status (
     message_id TEXT NOT NULL,
@@ -327,19 +329,46 @@ function migrateMessagesNeedReplyColumn(db: Database.Database): void {
   db.exec(`ALTER TABLE messages ADD COLUMN need_reply INTEGER NOT NULL DEFAULT 1`)
 }
 
-// Sentinel one-shot migration: agents whose cursor is still at the schema
-// default of 0 are advanced to current MAX(event_id), so post-deploy boots
-// stop replaying the entire historical mailbox. The `last_processed_event_id = 0`
-// predicate is itself the sentinel — once register_agent (D4) initialises new
-// rows above 0 and get_inbox auto-advance pushes live agents forward, this
-// UPDATE matches no rows on subsequent boots.
-function migrateAgentsCursorWatermark(db: Database.Database): void {
+// Both columns are added nullable with no default and are never backfilled:
+// a pre-existing row therefore reads as "no watchdog armed", so upgrading can
+// never emit a retroactive unread alert for historical mail. The index is
+// created here rather than in DDL because DDL runs before this migration, so
+// on a legacy database the columns do not exist yet at that point.
+function migrateMessagesAckColumns(db: Database.Database): void {
+  const tableExists = db
+    .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='messages'`)
+    .get() as { name: string } | undefined
+  if (!tableExists) return
+  const cols = db.pragma('table_info(messages)') as Array<{ name: string }>
+  const existing = new Set(cols.map(c => c.name))
+  if (!existing.has('ack_deadline_at')) {
+    db.exec(`ALTER TABLE messages ADD COLUMN ack_deadline_at TEXT`)
+  }
+  if (!existing.has('ack_alerted_at')) {
+    db.exec(`ALTER TABLE messages ADD COLUMN ack_alerted_at TEXT`)
+  }
   db.exec(
-    `UPDATE agents
-        SET last_processed_event_id = COALESCE((SELECT MAX(event_id) FROM events), 0)
-      WHERE last_processed_event_id = 0`
+    `CREATE INDEX IF NOT EXISTS idx_messages_ack_pending
+       ON messages(ack_deadline_at) WHERE ack_alerted_at IS NULL`
   )
 }
+
+// There is deliberately NO cursor migration here.
+//
+// A previous one advanced every agent whose `last_processed_event_id` was 0 to
+// MAX(event_id) on each applySchema, so that rows predating the cursor column
+// would not replay the whole historical mailbox.  Its sentinel — the value 0 —
+// turned out to mean two different things: that legacy row, and a row that
+// `register_agent` legitimately initialised to 0 because MAX(event_id) was
+// evaluated while `events` was still empty.  The two are indistinguishable, so
+// the migration silently marked the second kind's unread mail as read on every
+// restart, which also suppressed the auto-poke retry and the unread-alert
+// watchdog (both read the same cursor predicate).
+//
+// The migration and that initialisation shipped together, so its legacy targets
+// were all advanced on the first boot after it landed; only the harm was left.
+// If bulk cursor initialisation is ever needed again, it must key off an
+// unambiguous marker — a nullable column or an explicit flag — never `= 0`.
 
 function dropLegacyTaskContractTables(db: Database.Database): void {
   db.exec(`DROP TABLE IF EXISTS tasks`)
@@ -361,5 +390,5 @@ export function applySchema(
   migrateAgentsPrevPaneColumn(db)
   migrateCodexPreRegColumns(db)
   migrateMessagesNeedReplyColumn(db)
-  migrateAgentsCursorWatermark(db)
+  migrateMessagesAckColumns(db)
 }

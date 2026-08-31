@@ -156,6 +156,28 @@ const bindRuntimeIdentityArgsSchema = bindRuntimeIdentitySchema.superRefine((val
   }
 })
 
+// The MCP tool layer, not SendMessageService, is where the 10-second default
+// lives: it is the agent-facing contract that wants it.  The REST fallback and
+// direct service callers pass no value and therefore never wait, which keeps a
+// non-agent HTTP client from stalling on a recipient that was never going to
+// read.  The 30-second ceiling keeps the wait inside the calling harness's own
+// tool-call timeout — past it the agent sees a tool error for a message that
+// WAS persisted, and resends.
+const AWAIT_ACK_S_SCHEMA = z.number().int().min(0).max(30).default(10)
+
+// Shared by both send tools: the read-acknowledgement contract and, more
+// importantly, the three things an agent must NOT conclude from it.  The
+// `not_yet` wording is load-bearing — an agent that reads a ten-second
+// `not_yet` as "the recipient is dead" and takes the work over itself creates
+// a costlier failure than the silent stall this feature exists to remove.
+const AWAIT_ACK_DESC = [
+  'Returns ack:{status:"read"|"not_yet", waited_ms} — a REAL receipt: status "read" means the recipient\'s own get_inbox actually returned this message, which no transport-level "poked" can prove.',
+  'await_ack_s controls the wait (default 10s, 0 disables, max 30).',
+  'ack.status "not_yet" is NOT a failure, NOT a timeout, and NOT a verdict — it only means the recipient had not read it during those few seconds.  DO NOT change your behaviour because of it: do not give up on the recipient, do not take over its work, do not poll, do not re-send.',
+  'If a message sent with need_reply (the default) is still unread 15 minutes later, the daemon ATTEMPTS to poke YOU with a separate delivery alert naming the recipient and the last delivery status.  A transient failure (your own pane busy, a channel write error) is retried on the following sweeps for about 10 minutes, but a hard failure is not retried and the attempt is then abandoned silently, so treat the alert as a strong heads-up rather than a guarantee.  A send with need_reply:false gets no alert at all — for those, the ack you get back is the only delivery signal there will ever be.',
+  'The mailbox row is written BEFORE the wait starts, so a timeout, a tool error, or any other failure of this call NEVER means the message was not sent — sending again would deliver it twice.',
+].join(' ')
+
 const SEND_MESSAGE_DESC = [
   'Private 1→1 message to another agent by name.  By default auto-poke=true with quiet-guard (auto_poke:false opts out), and need_reply=true.',
   'Set need_reply:false for FYI/no-response-needed messages; recipients see need_reply in get_inbox.',
@@ -164,20 +186,22 @@ const SEND_MESSAGE_DESC = [
   'REPLY RULE: when replying to a message returned by get_inbox, treat its `from_device` as authoritative — if it differs from your own device, you MUST send to `from_name + ":" + from_device` (bare `from_name` would resolve on YOUR device and miss the actual sender). Same-device replies can use the bare name. The safe fallback for unknown device is send_message_by_id({to_agent_id: from_agent_id, ...}).',
   'For multi-recipient use broadcast (same-team) or broadcast_to_role (same-team, by role).',
   '除非用户明确指定 to_team, 不要跨 team 沟通 (explicitly set to_team only when user asks).',
-  'Reports poked, poke_skip_reasons (no_pane, guard_failed, tmux_unavailable, pane_reassigned, self, kimi_session_busy, kimi_pending_interaction, kimi_session_archived); on guard_failed and kimi_session_busy daemon retries at 30s/180s/600s (retry_scheduled, retry_delays_s); stops early on poked.  kimi_session_busy / kimi_pending_interaction mean the kimi session was mid-turn or waiting on a human approval so the wake-up was NOT injected — the mailbox row is written regardless and the recipient sees it on its next get_inbox; kimi_pending_interaction is never retried.  kimi_session_archived means the target\'s kimi session is archived, so the wake-up was NOT injected and never will be for these coordinates; it is never retried and the mailbox row is still written.  It is a permanent condition, not a deferral: the recipient\'s registered session_id is stale and it must re-register before pokes can land.  pane_reassigned means the recorded tmux pane is no longer hosted by the target (another agent took it over, or the target process is gone), so nothing was injected; it is never retried and the mailbox row is still written.',
+  'Reports poked, poke_skip_reasons (no_pane, guard_failed, tmux_unavailable, pane_reassigned, channel_sink_failed, self, kimi_session_busy, kimi_pending_interaction, kimi_session_archived); on guard_failed and kimi_session_busy daemon retries at 30s/180s/600s (retry_scheduled, retry_delays_s); stops early on poked.  kimi_session_busy / kimi_pending_interaction mean the kimi session was mid-turn or waiting on a human approval so the wake-up was NOT injected — the mailbox row is written regardless and the recipient sees it on its next get_inbox; kimi_pending_interaction is never retried.  kimi_session_archived means the target\'s kimi session is archived, so the wake-up was NOT injected and never will be for these coordinates; it is never retried and the mailbox row is still written.  It is a permanent condition, not a deferral: the recipient\'s registered session_id is stale and it must re-register before pokes can land.  pane_reassigned means the recorded tmux pane is no longer hosted by the target (another agent took it over, or the target process is gone), so nothing was injected; it is never retried and the mailbox row is still written.  channel_sink_failed means the target\'s Claude channel subscriber was attached but its write threw, and no tmux pane was available to fall back to, so nothing was injected; the mailbox row is still written and the subscriber stays attached.',
   'Auto-poke injects only a SHORT wake-up hint (新邮件 from <sender> → <recipient_name>@<recipient_team>, 请调 get_inbox 查看), NOT the body — read bodies via get_inbox.  The → segment names who the wake-up was addressed to, so a pane that receives one but finds an empty get_inbox can tell at a glance it was not the intended recipient.',
   'Delivery is NOT filtered by online/idle; direct and fan-out deliveries write mailbox rows for offline targets. The list_agents `online` flag reflects process liveness.',
   'DO NOT pre-verify the recipient via list_agents before calling send_message — this rule applies to BOTH same-team and cross-team sends (list_agents is caller-team scoped and CANNOT see cross-team agents, so a cross-team pre-check always falsely reports "missing"; for same-team sends the pre-check is pure waste).',
-  'On miss send_message returns unknown_recipient cleanly with no side effects, so the correct pattern is "try send, then handle unknown_recipient" — never "list_agents first, then send".'
+  'On miss send_message returns unknown_recipient cleanly with no side effects, so the correct pattern is "try send, then handle unknown_recipient" — never "list_agents first, then send".',
+  AWAIT_ACK_DESC
 ].join(' ')
 
 const SEND_MESSAGE_BY_ID_DESC = [
   'Private 1→1 message to another agent by agent_id (UUID).  Use this when you already hold the target\'s agent_id; prefer send_message (by name) otherwise.',
   'Same-team only: the recipient must belong to the caller\'s team.  For cross-team sends use send_message with to_team.',
   'By default auto-poke=true with quiet-guard (auto_poke:false opts out), and need_reply=true.  Set need_reply:false for FYI/no-response-needed messages.',
-  'Reports poked, poke_skip_reasons (no_pane, guard_failed, tmux_unavailable, pane_reassigned, self, kimi_session_busy, kimi_pending_interaction, kimi_session_archived); on guard_failed and kimi_session_busy daemon retries at 30s/180s/600s (retry_scheduled, retry_delays_s); stops early on poked.  kimi_session_busy / kimi_pending_interaction mean the kimi session was mid-turn or waiting on a human approval so the wake-up was NOT injected — the mailbox row is written regardless and the recipient sees it on its next get_inbox; kimi_pending_interaction is never retried.  kimi_session_archived means the target\'s kimi session is archived, so the wake-up was NOT injected and never will be for these coordinates; it is never retried and the mailbox row is still written.  It is a permanent condition, not a deferral: the recipient\'s registered session_id is stale and it must re-register before pokes can land.  pane_reassigned means the recorded tmux pane is no longer hosted by the target (another agent took it over, or the target process is gone), so nothing was injected; it is never retried and the mailbox row is still written.',
+  'Reports poked, poke_skip_reasons (no_pane, guard_failed, tmux_unavailable, pane_reassigned, channel_sink_failed, self, kimi_session_busy, kimi_pending_interaction, kimi_session_archived); on guard_failed and kimi_session_busy daemon retries at 30s/180s/600s (retry_scheduled, retry_delays_s); stops early on poked.  kimi_session_busy / kimi_pending_interaction mean the kimi session was mid-turn or waiting on a human approval so the wake-up was NOT injected — the mailbox row is written regardless and the recipient sees it on its next get_inbox; kimi_pending_interaction is never retried.  kimi_session_archived means the target\'s kimi session is archived, so the wake-up was NOT injected and never will be for these coordinates; it is never retried and the mailbox row is still written.  It is a permanent condition, not a deferral: the recipient\'s registered session_id is stale and it must re-register before pokes can land.  pane_reassigned means the recorded tmux pane is no longer hosted by the target (another agent took it over, or the target process is gone), so nothing was injected; it is never retried and the mailbox row is still written.  channel_sink_failed means the target\'s Claude channel subscriber was attached but its write threw, and no tmux pane was available to fall back to, so nothing was injected; the mailbox row is still written and the subscriber stays attached.',
   'Auto-poke injects only a SHORT wake-up hint (新邮件 from <sender> → <recipient_name>@<recipient_team>, 请调 get_inbox 查看), NOT the body — read bodies via get_inbox.  The → segment names who the wake-up was addressed to, so a pane that receives one but finds an empty get_inbox can tell at a glance it was not the intended recipient.',
-  'Delivery is NOT filtered by online/idle — offline targets still receive the mailbox row.'
+  'Delivery is NOT filtered by online/idle — offline targets still receive the mailbox row.',
+  AWAIT_ACK_DESC
 ].join(' ')
 
 const BROADCAST_DESC = [
@@ -389,6 +413,7 @@ export function createAutoPokeImpl(
     if (err === 'runtime_recovering') {
       return { ok: false, reason: 'runtime_recovering' }
     }
+    if (err === 'channel_sink_failed') return { ok: false, reason: 'channel_sink_failed' }
     if (err === 'pane_reassigned') return { ok: false, reason: 'pane_reassigned' }
     if (err === 'tmux_unavailable') return { ok: false, reason: 'tmux_unavailable' }
     if (err === 'tmux_pane_not_set') return { ok: false, reason: 'no_pane' }
@@ -2718,7 +2743,8 @@ export function registerBusinessTools(
         subject: z.string().optional(),
         body: z.string().min(1),
         auto_poke: z.boolean().optional(),
-        need_reply: z.boolean().optional()
+        need_reply: z.boolean().optional(),
+        await_ack_s: AWAIT_ACK_S_SCHEMA
       }).strict()
     },
     async (args: {
@@ -2728,6 +2754,7 @@ export function registerBusinessTools(
       body: string
       auto_poke?: boolean
       need_reply?: boolean
+      await_ack_s?: number
     }) => {
       const who = requireAgent()
       if (typeof who !== 'string') return toText(who)
@@ -2746,7 +2773,8 @@ export function registerBusinessTools(
         subject: z.string().optional(),
         body: z.string().min(1),
         auto_poke: z.boolean().optional(),
-        need_reply: z.boolean().optional()
+        need_reply: z.boolean().optional(),
+        await_ack_s: AWAIT_ACK_S_SCHEMA
       }).strict()
     },
     async (args: {
@@ -2755,6 +2783,7 @@ export function registerBusinessTools(
       body: string
       auto_poke?: boolean
       need_reply?: boolean
+      await_ack_s?: number
     }) => {
       const who = requireAgent()
       if (typeof who !== 'string') return toText(who)
@@ -2834,7 +2863,8 @@ export function registerBusinessTools(
       description: [
         'Return wake-hint delivery status for a message sent by caller.',
         'Status describes auto-poke delivery only; mailbox persistence is already complete.',
-        'Only the original sender can read a message delivery status.'
+        'Only the original sender can read a message delivery status.',
+        'Each row carries both wake_status and read, and they are NOT interchangeable: wake_status only describes whether a transport accepted the auto-poke dispatch, while read is the actual receipt (the recipient\'s get_inbox cursor passed this message).  A row can be wake_status=delivered and read=false — the wake-up was injected but nobody consumed it.'
       ].join(' '),
       inputSchema: {
         message_id: z.string()

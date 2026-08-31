@@ -16,6 +16,13 @@ export interface DeliveryStatusRow {
   retry_attempts: number
   updated_at: string
   delivered_at: string | null
+  /**
+   * Derived at query time from the recipient's inbox cursor, never stored.
+   * `wake_status` reports whether a transport accepted the wake-up; this
+   * reports whether the recipient actually read the mail.  A recipient whose
+   * row is gone has no cursor and reads as false.
+   */
+  read: boolean
 }
 
 export function recordInitialDeliveryStatuses(
@@ -105,11 +112,20 @@ export class GetDeliveryStatusService {
     if (!owned) return { error: 'unknown_message' }
 
     const rows = this.db.prepare(
-      `SELECT agent_id, wake_status, skip_reason, retry_attempts, updated_at, delivered_at
-       FROM message_delivery_status
-       WHERE message_id=?
-       ORDER BY agent_id ASC`
-    ).all(args.message_id) as DeliveryStatusRow[]
-    return { message_id: args.message_id, statuses: rows }
+      `SELECT s.agent_id      AS agent_id,
+              s.wake_status   AS wake_status,
+              s.skip_reason   AS skip_reason,
+              s.retry_attempts AS retry_attempts,
+              s.updated_at    AS updated_at,
+              s.delivered_at  AS delivered_at,
+              CASE WHEN a.last_processed_event_id >= m.event_id THEN 1 ELSE 0 END AS read_flag
+         FROM message_delivery_status s
+         JOIN messages m ON m.id = s.message_id
+         LEFT JOIN agents a ON a.agent_id = s.agent_id
+        WHERE s.message_id=?
+        ORDER BY s.agent_id ASC`
+    ).all(args.message_id) as Array<Omit<DeliveryStatusRow, 'read'> & { read_flag: number | null }>
+    const statuses = rows.map(({ read_flag, ...rest }) => ({ ...rest, read: read_flag === 1 }))
+    return { message_id: args.message_id, statuses }
   }
 }

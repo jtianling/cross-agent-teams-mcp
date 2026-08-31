@@ -10,6 +10,7 @@ import {
   type KimiRuntimeControlService as KimiRuntimeControlPort,
 } from './rest-api.js'
 import { runCleanup } from './cleanup.js'
+import { createUnreadWatchdogRunner } from '../mcp/unread-watchdog.js'
 import { SseFanout } from './sse-fanout.js'
 import { ChannelWakeFanout } from './channel-wake-fanout.js'
 import { clearAllRetries } from '../mcp/poke-retry.js'
@@ -38,6 +39,7 @@ export interface ServerOpts {
   orphanGcIdleMs?: number
   orphanGcMaxAgeMs?: number
   orphanGcMaxSessions?: number
+  unreadWatchdogIntervalMs?: number
   mcpLog?: (line: string) => void
   /** Real tmux probe for pre-registration pane visibility.  Only the daemon
    *  entry point passes it; tests leave it unset and get `'unknown'`. */
@@ -59,6 +61,7 @@ export interface StartOpts extends ServerOpts {
 
 const DEFAULT_KEEP_ALIVE_TIMEOUT_MS = 120_000
 const DEFAULT_ORPHAN_GC_INTERVAL_MS = 60_000
+const DEFAULT_UNREAD_WATCHDOG_INTERVAL_MS = 60_000
 const DEFAULT_ORPHAN_GC_IDLE_MS = 300_000
 const DEFAULT_ORPHAN_GC_MAX_AGE_MS = 300_000
 const DEFAULT_ORPHAN_GC_MAX_SESSIONS = 500
@@ -166,9 +169,30 @@ export async function buildServer(opts: ServerOpts): Promise<FastifyInstance> {
   }, orphanGcIntervalMs)
   if (typeof orphanGcInterval.unref === 'function') orphanGcInterval.unref()
 
+  // Persisted-deadline sweep, not a per-message timer: a deadline that came due
+  // while the daemon was down is picked up by the immediate first run below.
+  const unreadWatchdogIntervalMs = opts.unreadWatchdogIntervalMs
+    ?? parsePositiveInt(process.env.UNREAD_WATCHDOG_INTERVAL_MS, DEFAULT_UNREAD_WATCHDOG_INTERVAL_MS)
+  const unreadWatchdog = createUnreadWatchdogRunner({
+    db,
+    channelWakeFanout,
+    localDevice: context.localDevice,
+    log: opts.mcpLog,
+  })
+  const runUnreadWatchdog = (): void => {
+    void unreadWatchdog.run().catch(() => { /* best-effort */ })
+  }
+  runUnreadWatchdog()
+  const unreadWatchdogInterval = setInterval(runUnreadWatchdog, unreadWatchdogIntervalMs)
+  if (typeof unreadWatchdogInterval.unref === 'function') unreadWatchdogInterval.unref()
+
   app.addHook('onClose', async () => {
     clearInterval(interval)
     clearInterval(orphanGcInterval)
+    clearInterval(unreadWatchdogInterval)
+    // Closes the gate before db.close(): a tick fired moments ago must not
+    // start alerting (and spawning tmux probes) for a server already down.
+    unreadWatchdog.stop()
     clearAllRetries()
     clearAllKimiRetries()
     // Before db.close(): recovery and seeding probe timers and in-flight sends

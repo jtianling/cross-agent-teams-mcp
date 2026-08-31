@@ -9,7 +9,7 @@ export interface ChannelWakeInput {
 
 export type SendChannelWakeResult =
   | { ok: true }
-  | { ok: false; reason: 'no_subscriber' }
+  | { ok: false; reason: 'no_subscriber' | 'sink_failed' }
 
 function sanitizeMeta(meta: Record<string, string>): Record<string, string> {
   const out: Record<string, string> = {}
@@ -33,6 +33,6 @@ export function sendChannelWake(
       meta: sanitizeMeta(input.meta)
     }
   }
-  fanout.send(channel_session_id, payload)
+  if (!fanout.send(channel_session_id, payload)) return { ok: false, reason: 'sink_failed' }
   return { ok: true }
 }

@@ -6,6 +6,8 @@ import type { AutoPokeSkipReason, FanoutDeps } from './auto-poke-fanout.js'
 import { parseDeliveryRow, type DeliverySpec } from '../lib/delivery-spec.js'
 import { runFanoutWithRetry } from './fanout-with-retry.js'
 import { recordInitialDeliveryStatuses } from './delivery-status.js'
+import { isMessageRead } from './message-read.js'
+import { ACK_DEADLINE_MS } from './unread-watchdog.js'
 
 export type { AutoPokeFn, AutoPokeSkipReason } from './auto-poke-fanout.js'
 
@@ -20,6 +22,23 @@ export interface SendInput {
   body: string
   auto_poke?: boolean
   need_reply?: boolean
+  /**
+   * Seconds to wait for the recipient to read the message before returning.
+   *
+   * Undefined means no wait at all — the 10-second default belongs to the MCP
+   * tool schema, not here.  Callers that are not agent-facing (the REST
+   * fallback, tests) would otherwise pay a ten-second stall on every send to a
+   * recipient that was never going to read, and the default exists to help
+   * agents, not HTTP clients.
+   */
+  await_ack_s?: number
+}
+
+export type AckStatus = 'read' | 'not_yet'
+
+export interface AckResult {
+  status: AckStatus
+  waited_ms: number
 }
 
 interface SuccessResult {
@@ -30,6 +49,7 @@ interface SuccessResult {
   poke_skip_reasons?: Array<{ agent_id: string; reason: AutoPokeSkipReason }>
   retry_scheduled: boolean
   retry_delays_s?: number[]
+  ack: AckResult
 }
 
 export type SendResult =
@@ -69,6 +89,41 @@ export function parseToAgentName(
     return { error: 'invalid_to_agent_name' }
   }
   return { ok: { name, device } }
+}
+
+export const ACK_POLL_INTERVAL_MS = 250
+
+function delay(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+/**
+ * Poll the read predicate until it holds or the window expires.
+ *
+ * Polling rather than a `get_inbox` callback keeps the read path and the send
+ * path uncoupled: the predicate is one primary-key lookup against a synchronous
+ * SQLite handle, so a full ten-second window costs at most forty of them.
+ *
+ * The loop can only return `not_yet` once `Date.now()` has passed the deadline,
+ * so `waited_ms` never under-reports the requested window.
+ */
+async function waitForRead(
+  db: Database.Database,
+  messageId: string,
+  agentId: string,
+  seconds: number
+): Promise<AckResult> {
+  if (!Number.isFinite(seconds) || seconds <= 0) return { status: 'not_yet', waited_ms: 0 }
+  const started = Date.now()
+  const deadline = started + seconds * 1000
+  for (;;) {
+    if (isMessageRead(db, messageId, agentId)) {
+      return { status: 'read', waited_ms: Date.now() - started }
+    }
+    const remaining = deadline - Date.now()
+    if (remaining <= 0) return { status: 'not_yet', waited_ms: Date.now() - started }
+    await delay(Math.min(ACK_POLL_INTERVAL_MS, remaining))
+  }
 }
 
 export class SendMessageService {
@@ -133,7 +188,10 @@ export class SendMessageService {
         skipped: [],
         autoPokeDisabled: true,
       })
-      return { ...baseResult, poked: false, retry_scheduled: false }
+      const ack = await waitForRead(
+        this.db, baseResult.message_id, rcpt.agent_id, input.await_ack_s ?? 0
+      )
+      return { ...baseResult, poked: false, retry_scheduled: false, ack }
     }
 
     const envelope = await runFanoutWithRetry({
@@ -146,11 +204,15 @@ export class SendMessageService {
       messageId: baseResult.message_id,
       sentAt: baseResult.sent_at
     })
+    const ack = await waitForRead(
+      this.db, baseResult.message_id, rcpt.agent_id, input.await_ack_s ?? 0
+    )
     return {
       message_id: baseResult.message_id,
       event_id: baseResult.event_id,
       recipients: baseResult.recipients,
-      ...envelope
+      ...envelope,
+      ack
     }
   }
 
@@ -168,14 +230,20 @@ export class SendMessageService {
           need_reply: needReply === 1,
         }
       })
-      const sent_at = new Date().toISOString()
+      const sentAtMs = Date.now()
+      const sent_at = new Date(sentAtMs).toISOString()
+      // Armed only for reply-expecting private sends, and independent of
+      // auto_poke / await_ack_s: the watchdog reports on receipt, not dispatch.
+      const ackDeadline = needReply === 1
+        ? new Date(sentAtMs + ACK_DEADLINE_MS).toISOString()
+        : null
       const id = randomUUID()
       this.db.prepare(
-        `INSERT INTO messages (id, event_id, from_team, to_team, from_agent_id, to_agent_id, to_role, subject, body, need_reply, sent_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?)`
+        `INSERT INTO messages (id, event_id, from_team, to_team, from_agent_id, to_agent_id, to_role, subject, body, need_reply, sent_at, ack_deadline_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`
       ).run(id, event_id, args.fromTeam, args.toTeam, args.from,
         args.toAgentId,
-        null, args.input.subject ?? null, args.input.body, needReply, sent_at)
+        null, args.input.subject ?? null, args.input.body, needReply, sent_at, ackDeadline)
       return { message_id: id, event_id, sent_at }
     })
     const { message_id, event_id, sent_at } = tx()

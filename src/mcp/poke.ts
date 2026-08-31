@@ -264,7 +264,51 @@ export async function poke(deps: PokeDeps, input: PokeInput): Promise<PokeResult
     return { error: 'prompt_too_long', detail: { max: PROMPT_MAX_BYTES, got: promptLen } }
   }
 
-  const target = deps.db
+  const target = loadTargetRow(deps.db, input.target_agent_id)
+  if (!target) return { error: 'unknown_target' }
+
+  if (target.agent_id === deps.callerAgentId) return { error: 'self_poke_denied' }
+
+  const callerRow = deps.db
+    .prepare(`SELECT team FROM agents WHERE agent_id = ?`)
+    .get(deps.callerAgentId) as { team: string } | undefined
+  if (!callerRow) return { error: 'unknown_agent' }
+  if (callerRow.team !== target.team && !deps.allowCrossTeam) {
+    return { error: 'cross_team_denied' }
+  }
+
+  return dispatchToTarget(deps, target, { prompt: input.prompt, skipGuard: input.skipGuard })
+}
+
+/**
+ * Poke a registered agent with no calling agent behind the request.
+ *
+ * The unread watchdog runs on the daemon's own schedule and targets the
+ * SENDER of a stalled message, so `poke`'s three caller checks are all
+ * inapplicable: there is no `callerAgentId` to be the sender's team-mate, the
+ * self-poke rule would reject waking an agent about its own message, and the
+ * cross-team rule has no caller team to compare against.  Loading the target
+ * row and routing it is shared with `poke` so transport selection, pane-host
+ * verification and the pre-write ownership recheck cannot drift apart.
+ */
+export async function pokeAsDaemon(
+  deps: Omit<PokeDeps, 'callerAgentId' | 'allowCrossTeam'>,
+  input: { target_agent_id: string; prompt: string }
+): Promise<PokeResult> {
+  const promptLen = Buffer.byteLength(input.prompt, 'utf8')
+  if (promptLen > PROMPT_MAX_BYTES) {
+    return { error: 'prompt_too_long', detail: { max: PROMPT_MAX_BYTES, got: promptLen } }
+  }
+  const target = loadTargetRow(deps.db, input.target_agent_id)
+  if (!target) return { error: 'unknown_target' }
+  return dispatchToTarget({ ...deps, callerAgentId: null }, target, { prompt: input.prompt })
+}
+
+function loadTargetRow(
+  db: Database.Database,
+  agentId: string
+): TargetRow | undefined {
+  return db
     .prepare(
       `SELECT
          agent_id,
@@ -279,19 +323,14 @@ export async function poke(deps: PokeDeps, input: PokeInput): Promise<PokeResult
        FROM agents
        WHERE agent_id = ?`
     )
-    .get(input.target_agent_id) as TargetRow | undefined
-  if (!target) return { error: 'unknown_target' }
+    .get(agentId) as TargetRow | undefined
+}
 
-  if (target.agent_id === deps.callerAgentId) return { error: 'self_poke_denied' }
-
-  const callerRow = deps.db
-    .prepare(`SELECT team FROM agents WHERE agent_id = ?`)
-    .get(deps.callerAgentId) as { team: string } | undefined
-  if (!callerRow) return { error: 'unknown_agent' }
-  if (callerRow.team !== target.team && !deps.allowCrossTeam) {
-    return { error: 'cross_team_denied' }
-  }
-
+async function dispatchToTarget(
+  deps: PokeDeps,
+  target: TargetRow,
+  input: { prompt: string; skipGuard?: boolean }
+): Promise<PokeResult> {
   // Legacy callers may not have ChannelWakeFanout. Keep the historical tmux-only
   // fallback for plain targets, but still allow non-tmux transports that are
   // fully described by the target row itself.
