@@ -391,7 +391,7 @@ async function dispatchToTarget(
 
 function findPaneClaimants(
   db: Database.Database,
-  args: { device: string; paneId: string; excludeAgentId: string | null }
+  args: { device: string; paneId: string; excludeAgentId: string }
 ): PaneHostRow[] {
   return db
     .prepare(
@@ -399,7 +399,7 @@ function findPaneClaimants(
        FROM agents
        WHERE device = ? AND tmux_pane_id = ? AND agent_id != ?`
     )
-    .all(args.device, args.paneId, args.excludeAgentId ?? '') as PaneHostRow[]
+    .all(args.device, args.paneId, args.excludeAgentId) as PaneHostRow[]
 }
 
 /**
@@ -436,10 +436,9 @@ function confirmCodexForegroundCarrier(
 
 function stillOwnsPane(
   db: Database.Database,
-  agentId: string | null,
+  agentId: string,
   paneId: string
 ): boolean {
-  if (agentId === null) return false
   const row = db
     .prepare(`SELECT 1 AS held FROM agents WHERE agent_id = ? AND tmux_pane_id = ?`)
     .get(agentId, paneId) as { held: number } | undefined

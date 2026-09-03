@@ -72,57 +72,21 @@ describe('identity key tool descriptions', () => {
     await transport.close(); await client.close(); db.close(); await server.close()
   })
 
-  it('documents declared identity variables for every agent type', async () => {
+  it('names no declared-identity variables on either tool', async () => {
     const { dir, db, server, client, transport, tools } = await listTools()
     cleanups.push(dir)
-    const desc = tools.find(t => t.name === 'register_agent')!.description!
+    const register = tools.find(t => t.name === 'register_agent')!
+    const preRegister = tools.find(t => t.name === 'pre_register_codex_pane')!
 
-    expect(desc).toContain('XATS_TEAM')
-    expect(desc).toContain('XATS_AGENT_NAME')
-    expect(desc).toContain('applies to every `agent_type`')
-    expect(desc).toContain('launcher\'s declaration')
-    expect(desc).toContain('seat rebuild')
-    expect(desc).toContain('Pass each non-empty value unchanged')
-    expect(desc).toContain('register with that complete identity')
-
-    await transport.close(); await client.close(); db.close(); await server.close()
-  })
-
-  it('keeps declared identity out of detection and explains codex', async () => {
-    const { dir, db, server, client, transport, tools } = await listTools()
-    cleanups.push(dir)
-    const desc = tools.find(t => t.name === 'register_agent')!.description!
-    const start = desc.indexOf('DETECTION (')
-    const end = desc.indexOf('Calling this tool again')
-    const detectionBlock = desc.slice(start, end)
-
-    expect(detectionBlock).not.toContain('XATS_TEAM')
-    expect(detectionBlock).not.toContain('XATS_AGENT_NAME')
-    expect(detectionBlock).toContain('1. `printenv KIMI_XATS_BASE_URL`')
-    expect(detectionBlock).toContain('2. `printenv OPENCODE_XATS_BASE_URL`')
-    expect(detectionBlock).toContain('3. `printenv CODEX_THREAD_ID`')
-    expect(detectionBlock).toContain('4. `printenv CLAUDECODE`')
-
-    const codex = desc.slice(desc.indexOf('Codex is the exception'))
-    expect(codex).toContain('shared app-server')
-    expect(codex).toContain('pre_register_codex_pane')
-
-    await transport.close(); await client.close(); db.close(); await server.close()
-  })
-
-  it('documents declared recovery on pre_register_codex_pane', async () => {
-    const { dir, db, server, client, transport, tools } = await listTools()
-    cleanups.push(dir)
-    const tool = tools.find(t => t.name === 'pre_register_codex_pane')!
-    expect(tool.inputSchema).toMatchObject({
-      properties: expect.objectContaining({
-        team: expect.anything(),
-        agent_name: expect.anything(),
-      }),
-    })
-    expect(tool.description).toContain('complete declaration')
-    expect(tool.description).toContain('key misses')
-    expect(tool.description).toContain('liveness-unknown')
+    for (const tool of [register, preRegister]) {
+      expect(tool.description).not.toContain('XATS_TEAM')
+      expect(tool.description).not.toContain('XATS_AGENT_NAME')
+    }
+    const properties = (preRegister.inputSchema as {
+      properties: Record<string, unknown>
+    }).properties
+    expect(properties).not.toHaveProperty('team')
+    expect(properties).not.toHaveProperty('agent_name')
 
     await transport.close(); await client.close(); db.close(); await server.close()
   })

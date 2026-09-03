@@ -97,7 +97,6 @@ describe('codex recovery composite confirm through the real poke primitive', () 
     return {
       repo,
       findByIdentityKey: () => [HOLDER],
-      findByDeclaredIdentity: () => undefined,
       localDevice: 'local',
       // Holder pid (4242) stays dead; the confirm's target-side evidence now
       // comes from the foreground carrier probe, which tracks codexAlive.
@@ -127,8 +126,6 @@ describe('codex recovery composite confirm through the real poke primitive', () 
         pane_id: '%1972',
         xats_agent_id: 'U1',
         identity_key: 'K1',
-        team: null,
-        agent_name: null,
         expires_at: '2999-01-01T00:00:00.000Z',
       },
       deps

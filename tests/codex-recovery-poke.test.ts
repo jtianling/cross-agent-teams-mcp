@@ -99,7 +99,6 @@ describe('codex recovery poke', () => {
     return {
       repo,
       findByIdentityKey: () => [HOLDER],
-      findByDeclaredIdentity: () => undefined,
       localDevice: 'local',
       isProcessAlive: () => false,
       listPanes: async () => [{ pane_id: '%1972', tty: 'ttys001' }],
@@ -126,8 +125,6 @@ describe('codex recovery poke', () => {
         pane_id: '%1972',
         xats_agent_id: 'U1',
         identity_key: identityKey,
-        team: null,
-        agent_name: null,
         expires_at: '2999-01-01T00:00:00.000Z',
       },
       deps

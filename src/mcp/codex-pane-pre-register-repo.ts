@@ -5,8 +5,6 @@ export interface CodexPanePreRegRow {
   xats_agent_id: string
   expires_at: string
   identity_key: string | null
-  team: string | null
-  agent_name: string | null
 }
 
 export interface UpsertInput {
@@ -14,8 +12,6 @@ export interface UpsertInput {
   xats_agent_id: string
   expires_at: string
   identity_key?: string
-  team?: string | null
-  agent_name?: string | null
 }
 
 export class CodexPanePreRegRepo {
@@ -25,30 +21,25 @@ export class CodexPanePreRegRepo {
     this.db
       .prepare(
         `INSERT INTO codex_pane_pre_registrations
-           (pane_id, xats_agent_id, expires_at, identity_key, team, agent_name)
-         VALUES (?, ?, ?, ?, ?, ?)
+           (pane_id, xats_agent_id, expires_at, identity_key)
+         VALUES (?, ?, ?, ?)
          ON CONFLICT(pane_id) DO UPDATE SET
            xats_agent_id = excluded.xats_agent_id,
            expires_at = excluded.expires_at,
-           identity_key = excluded.identity_key,
-           team = excluded.team,
-           agent_name = excluded.agent_name`
+           identity_key = excluded.identity_key`
       )
       .run(
         input.pane_id,
         input.xats_agent_id,
         input.expires_at,
-        input.identity_key ?? null,
-        input.team ?? null,
-        input.agent_name ?? null
+        input.identity_key ?? null
       )
   }
 
   listUnexpired(now: string): CodexPanePreRegRow[] {
     return this.db
       .prepare(
-        `SELECT pane_id, xats_agent_id, expires_at, identity_key,
-                team, agent_name
+        `SELECT pane_id, xats_agent_id, expires_at, identity_key
          FROM codex_pane_pre_registrations
          WHERE expires_at > ?`
       )
@@ -58,8 +49,7 @@ export class CodexPanePreRegRepo {
   getByPaneId(pane_id: string): CodexPanePreRegRow | undefined {
     return this.db
       .prepare(
-        `SELECT pane_id, xats_agent_id, expires_at, identity_key,
-                team, agent_name
+        `SELECT pane_id, xats_agent_id, expires_at, identity_key
          FROM codex_pane_pre_registrations
          WHERE pane_id = ?`
       )
@@ -71,8 +61,7 @@ export class CodexPanePreRegRepo {
       .prepare(
         `DELETE FROM codex_pane_pre_registrations
          WHERE pane_id = ?
-         RETURNING pane_id, xats_agent_id, expires_at, identity_key,
-                   team, agent_name`
+         RETURNING pane_id, xats_agent_id, expires_at, identity_key`
       )
       .get(pane_id) as CodexPanePreRegRow | undefined
     return row
@@ -89,8 +78,7 @@ export class CodexPanePreRegRepo {
         `DELETE FROM codex_pane_pre_registrations
          WHERE pane_id = ? AND xats_agent_id = ?
            AND identity_key IS ? AND expires_at = ?
-         RETURNING pane_id, xats_agent_id, expires_at, identity_key,
-                   team, agent_name`
+         RETURNING pane_id, xats_agent_id, expires_at, identity_key`
       )
       .get(
         row.pane_id,

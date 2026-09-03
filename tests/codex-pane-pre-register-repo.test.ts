@@ -40,8 +40,6 @@ describe('CodexPanePreRegRepo identity_key', () => {
       pane_id: '%10',
       xats_agent_id: 'U1',
       identity_key: 'K1',
-      team: null,
-      agent_name: null,
       expires_at: '2999-01-01T00:00:00Z',
     })
   })
@@ -72,8 +70,6 @@ describe('CodexPanePreRegRepo identity_key', () => {
       pane_id: '%10',
       xats_agent_id: 'B',
       identity_key: null,
-      team: null,
-      agent_name: null,
       expires_at: '2999-01-02T00:00:00Z',
     })
   })
@@ -99,8 +95,6 @@ describe('CodexPanePreRegRepo identity_key', () => {
       pane_id: '%10',
       xats_agent_id: 'U1',
       identity_key: 'K1',
-      team: null,
-      agent_name: null,
       expires_at: '2999-01-01T00:00:00Z',
     })
     const taken = repo.takeByPaneId('%10')
@@ -108,8 +102,6 @@ describe('CodexPanePreRegRepo identity_key', () => {
       pane_id: '%10',
       xats_agent_id: 'U1',
       identity_key: 'K1',
-      team: null,
-      agent_name: null,
       expires_at: '2999-01-01T00:00:00Z',
     })
     expect(repo.getByPaneId('%10')).toBeUndefined()
@@ -131,8 +123,6 @@ describe('CodexPanePreRegRepo identity_key', () => {
       pane_id: '%10',
       xats_agent_id: 'U1',
       identity_key: 'K1',
-      team: null,
-      agent_name: null,
       expires_at: '2999-01-01T00:00:00Z',
     }
     repo.upsert(snapshot)
@@ -150,8 +140,6 @@ describe('CodexPanePreRegRepo identity_key', () => {
       pane_id: '%10',
       xats_agent_id: 'U1',
       identity_key: null,
-      team: null,
-      agent_name: null,
       expires_at: '2999-01-01T00:00:00Z',
     })
     expect(taken?.identity_key).toBeNull()
@@ -163,8 +151,6 @@ describe('CodexPanePreRegRepo identity_key', () => {
       pane_id: '%10',
       xats_agent_id: 'U1',
       identity_key: 'K1',
-      team: null,
-      agent_name: null,
       expires_at: '2999-01-01T00:00:00Z',
     }
     repo.upsert(original)
@@ -187,8 +173,6 @@ describe('CodexPanePreRegRepo identity_key', () => {
       pane_id: '%10',
       xats_agent_id: 'U1',
       identity_key: 'K1',
-      team: null,
-      agent_name: null,
       expires_at: '2999-01-01T00:00:00Z',
     }
     repo.upsert(original)
@@ -197,64 +181,43 @@ describe('CodexPanePreRegRepo identity_key', () => {
     expect(repo.getByPaneId('%10')?.expires_at).toBe('2999-06-01T00:00:00Z')
   })
 
-  it('round-trips a declared identity', () => {
-    repo.upsert({
-      pane_id: '%25',
-      xats_agent_id: 'U2',
-      identity_key: 'K2',
-      team: 'monkeys team',
-      agent_name: "mvr 'coder'",
-      expires_at: '2999-01-01T00:00:00Z',
-    })
-    expect(repo.getByPaneId('%25')).toEqual({
-      pane_id: '%25',
-      xats_agent_id: 'U2',
-      identity_key: 'K2',
-      team: 'monkeys team',
-      agent_name: "mvr 'coder'",
-      expires_at: '2999-01-01T00:00:00Z',
-    })
-  })
+  it('migration drops team and agent_name and is idempotent', () => {
+    const dir = tmp()
+    cleanups.push(dir)
+    const legacy = openDb(join(dir, 'legacy.db'))
+    legacy.exec(`CREATE TABLE codex_pane_pre_registrations (
+      pane_id TEXT PRIMARY KEY,
+      xats_agent_id TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      identity_key TEXT,
+      team TEXT,
+      agent_name TEXT
+    )`)
+    legacy.prepare(
+      `INSERT INTO codex_pane_pre_registrations
+         (pane_id, xats_agent_id, expires_at, identity_key, team, agent_name)
+       VALUES ('%25', 'U1', '2999-01-01T00:00:00Z', 'K1', 'monkeys', 'coder')`
+    ).run()
 
-  it('an omitting overwrite clears both declared identity fields', () => {
-    repo.upsert({
-      pane_id: '%25',
-      xats_agent_id: 'A',
-      team: 'monkeys',
-      agent_name: 'mvr-coder',
-      expires_at: '2999-01-01T00:00:00Z',
-    })
-    repo.upsert({
-      pane_id: '%25',
-      xats_agent_id: 'B',
-      expires_at: '2999-01-02T00:00:00Z',
-    })
-    expect(repo.getByPaneId('%25')).toMatchObject({
-      team: null,
-      agent_name: null,
-    })
-  })
-
-  it('takeMatching ignores declaration fields in its currency predicate', () => {
-    repo.upsert({
+    applySchema(legacy, { localDevice: 'local' })
+    const columnNames = (): string[] => (
+      legacy.pragma('table_info(codex_pane_pre_registrations)') as Array<{
+        name: string
+      }>
+    ).map(c => c.name)
+    expect(columnNames()).not.toContain('team')
+    expect(columnNames()).not.toContain('agent_name')
+    expect(new CodexPanePreRegRepo(legacy).getByPaneId('%25')).toEqual({
       pane_id: '%25',
       xats_agent_id: 'U1',
       identity_key: 'K1',
-      team: 'monkeys',
-      agent_name: 'mvr-coder',
       expires_at: '2999-01-01T00:00:00Z',
     })
-    const taken = repo.takeMatching({
-      pane_id: '%25',
-      xats_agent_id: 'U1',
-      identity_key: 'K1',
-      team: 'different',
-      agent_name: 'different',
-      expires_at: '2999-01-01T00:00:00Z',
-    })
-    expect(taken).toMatchObject({
-      team: 'monkeys',
-      agent_name: 'mvr-coder',
-    })
+
+    expect(() => applySchema(legacy, { localDevice: 'local' })).not.toThrow()
+    expect(columnNames()).toEqual([
+      'pane_id', 'xats_agent_id', 'expires_at', 'identity_key',
+    ])
+    legacy.close()
   })
 })

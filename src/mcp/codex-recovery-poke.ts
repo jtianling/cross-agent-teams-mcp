@@ -36,10 +36,6 @@ export const RECOVERY_PROBE_INTERVAL_MS = 5_000
 export interface CodexRecoveryDeps {
   repo: CodexPanePreRegRepo
   findByIdentityKey: (key: string) => IdentityKeyMatch[]
-  findByDeclaredIdentity: (
-    team: string,
-    name: string
-  ) => IdentityKeyMatch | undefined
   localDevice: string
   isProcessAlive?: (pid: number) => boolean
   listPanes?: () => Promise<PaneTtyEntry[]>
@@ -59,7 +55,7 @@ export interface CodexRecoveryDeps {
   verifyPaneHost?: (args: {
     paneId: string
     pid: number
-    holderAgentId: string | null
+    holderAgentId: string
     stillCurrent: () => boolean
   }) => Promise<PaneHostVerdict>
   paneGuard?: (paneId: string) => Promise<'pass' | 'fail'>
@@ -215,8 +211,20 @@ export function evaluateCodexRecoveryOnPreRegister(
     log: deps.log,
     now: deps.now,
   })
-  const resolved = resolveScheduleIdentity(row, deps)
-  if (resolved === undefined) return
+  if (row.identity_key === null) return
+
+  const holder = deps.findByIdentityKey(row.identity_key)[0]
+  if (holder === undefined) return
+
+  const alive = deps.isProcessAlive ?? isAlive
+  const pid = holder.runtime_ui_pid
+  if (pid !== null && pid > 0 && alive(pid)) {
+    rlog(deps,
+      `codex-recovery skip: holder (${holder.team}, ${holder.name}) ` +
+      `runtime_ui_pid=${pid} is alive; pane=${row.pane_id}`
+    )
+    return
+  }
 
   recoveryGeneration += 1
   const messageId = recoveryRetryMessageId(row.pane_id, recoveryGeneration)
@@ -226,8 +234,11 @@ export function evaluateCodexRecoveryOnPreRegister(
   const state: ProbeState = {
     entry,
     row,
-    source: resolved.source,
-    holder: resolved.holder,
+    holder: {
+      agent_id: holder.agent_id,
+      team: holder.team,
+      name: holder.name,
+    },
     deps,
     probeErrorLogged: new Set(),
     resumeLogged: new Set(),
@@ -235,148 +246,19 @@ export function evaluateCodexRecoveryOnPreRegister(
   }
   rlog(deps,
     `codex-recovery scheduled: pane=${row.pane_id} ` +
-    `identity=(${resolved.holder.team}, ${resolved.holder.name}) ` +
-    `source=${resolved.source}`
+    `identity=(${holder.team}, ${holder.name})`
   )
   // First probe fires immediately (delay 0): the codex process may already be
   // up by the time the pre-register call lands.
   entry.timer = setTimeout(() => { void probeIteration(state) }, 0)
 }
 
-type RecoveryIdentitySource = 'key' | 'declaration'
-
-interface RecoveryIdentity {
-  agent_id: string | null
-  team: string
-  name: string
-}
-
-function holderIsAlive(
-  holder: IdentityKeyMatch,
-  deps: CodexRecoveryDeps
-): boolean {
-  const pid = holder.runtime_ui_pid
-  return pid !== null && pid > 0 && (deps.isProcessAlive ?? isAlive)(pid)
-}
-
-type DeclaredHolderRefusal =
-  | 'holder_alive'
-  | 'holder_liveness_unknown'
-
-// Names the release condition rather than predicting when it arrives.  The
-// earlier wording ("...until this identity registers with a positive pid")
-// reads as "wait and it clears", which is true for a codex or claude-code
-// holder and false for the runtimes that never record a pid at all: an
-// identity living on kimi-code or opencode meets this refusal on every later
-// seat rebuild, and clearing it takes operator action.  Hiding that behind an
-// optimistic string would bury exactly the "a human has to step in" state this
-// mechanism exists to eliminate.
-const HOLDER_LIVENESS_UNKNOWN_CONSEQUENCE =
-  'consequence=blocked_until_this_identity_registers_with_a_positive_pid '
-  + 'note=runtimes_that_never_record_one(kimi-code,opencode,tty-bound_codex)'
-  + '_do_not_clear_this_without_operator_action'
-
-function holderRefusalLogSuffix(reason: string | undefined): string {
-  return reason === 'holder_liveness_unknown'
-    ? ` ${HOLDER_LIVENESS_UNKNOWN_CONSEQUENCE}`
-    : ''
-}
-
-function declaredHolderRefusal(
-  holder: IdentityKeyMatch,
-  deps: CodexRecoveryDeps
-): DeclaredHolderRefusal | undefined {
-  const pid = holder.runtime_ui_pid
-  if (pid === null || pid <= 0) return 'holder_liveness_unknown'
-  return (deps.isProcessAlive ?? isAlive)(pid) ? 'holder_alive' : undefined
-}
-
-function logDeclarationConflict(
-  row: AcceptedPreRegRow,
-  holder: IdentityKeyMatch,
-  deps: CodexRecoveryDeps
-): void {
-  if (row.team === undefined || row.team === null) return
-  if (row.agent_name === undefined || row.agent_name === null) return
-  if (row.team === holder.team && row.agent_name === holder.name) return
-  rlog(deps,
-    `codex-recovery declaration conflict (debug): pane=${row.pane_id} ` +
-    `key_identity=(${holder.team}, ${holder.name}) ` +
-    `declared_identity=(${row.team}, ${row.agent_name})`
-  )
-}
-
-function resolveDeclaredScheduleIdentity(
-  row: AcceptedPreRegRow,
-  deps: CodexRecoveryDeps
-): RecoveryIdentity | undefined {
-  const hasTeam = row.team !== undefined && row.team !== null
-  const hasName = row.agent_name !== undefined && row.agent_name !== null
-  if (hasTeam !== hasName) {
-    rlog(deps,
-      `codex-recovery skip (debug): pane=${row.pane_id} ` +
-      'reason=incomplete_declaration'
-    )
-    return undefined
-  }
-  if (!hasTeam || !hasName) return undefined
-
-  const team = row.team as string
-  const name = row.agent_name as string
-  const holder = deps.findByDeclaredIdentity(team, name)
-  const refusal = holder === undefined
-    ? undefined
-    : declaredHolderRefusal(holder, deps)
-  if (holder !== undefined && refusal !== undefined) {
-    rlog(deps,
-      `codex-recovery skip: pane=${row.pane_id} ` +
-      `reason=${refusal}` +
-      holderRefusalLogSuffix(refusal) + ' ' +
-      `declared_identity=(${team}, ${name}) ` +
-      `current_holder=${holder.agent_id} ` +
-      `runtime_ui_pid=${holder.runtime_ui_pid}`
-    )
-    return undefined
-  }
-  return {
-    agent_id: holder?.agent_id ?? null,
-    team,
-    name,
-  }
-}
-
-function resolveScheduleIdentity(
-  row: AcceptedPreRegRow,
-  deps: CodexRecoveryDeps
-): { source: RecoveryIdentitySource; holder: RecoveryIdentity } | undefined {
-  if (row.identity_key !== null) {
-    const holder = deps.findByIdentityKey(row.identity_key)[0]
-    if (holder !== undefined) {
-      logDeclarationConflict(row, holder, deps)
-      if (holderIsAlive(holder, deps)) {
-        rlog(deps,
-          `codex-recovery skip: holder (${holder.team}, ${holder.name}) ` +
-          `runtime_ui_pid=${holder.runtime_ui_pid} is alive; ` +
-          `pane=${row.pane_id}`
-        )
-        return undefined
-      }
-      return { source: 'key', holder }
-    }
-  }
-  const holder = resolveDeclaredScheduleIdentity(row, deps)
-  return holder === undefined
-    ? undefined
-    : { source: 'declaration', holder }
-}
-
 interface ProbeState {
   entry: RecoveryScheduleEntry
   row: AcceptedPreRegRow
-  source: RecoveryIdentitySource
-  /** Identity captured at schedule time. Every probe/send re-resolves it
-   *  through the schedule's source before acting. */
-  holder: RecoveryIdentity
+  /** Holder identity captured at schedule time, used only as the reference to
+   *  detect drift: every probe/send re-resolves the key and requires a match. */
+  holder: { agent_id: string; team: string; name: string }
   deps: CodexRecoveryDeps
   /** Probe stages whose infrastructure error was already logged (once each). */
   probeErrorLogged: Set<string>
@@ -451,42 +333,14 @@ function rowGoneReason(state: ProbeState): string {
   return 'row_expired'
 }
 
-type HolderSkipReason =
-  | 'holder_missing'
-  | 'holder_changed'
-  | 'holder_alive'
-  | 'holder_liveness_unknown'
+type HolderSkipReason = 'holder_missing' | 'holder_changed' | 'holder_alive'
 
 type HolderResolution =
-  | { holder: RecoveryIdentity }
+  | { holder: { agent_id: string; team: string; name: string } }
   | { skip: HolderSkipReason }
 
 function resolveCurrentHolder(state: ProbeState): HolderResolution {
   const { row, deps } = state
-  if (state.source === 'declaration') {
-    const holder = deps.findByDeclaredIdentity(
-      state.holder.team,
-      state.holder.name
-    )
-    if (holder === undefined) {
-      return {
-        holder: {
-          agent_id: null,
-          team: state.holder.team,
-          name: state.holder.name,
-        },
-      }
-    }
-    const refusal = declaredHolderRefusal(holder, deps)
-    if (refusal !== undefined) return { skip: refusal }
-    return {
-      holder: {
-        agent_id: holder.agent_id,
-        team: holder.team,
-        name: holder.name,
-      },
-    }
-  }
   if (row.identity_key === null) return { skip: 'holder_missing' }
   const holder = deps.findByIdentityKey(row.identity_key)[0]
   if (holder === undefined) return { skip: 'holder_missing' }
@@ -497,7 +351,9 @@ function resolveCurrentHolder(state: ProbeState): HolderResolution {
   ) {
     return { skip: 'holder_changed' }
   }
-  if (holderIsAlive(holder, deps)) return { skip: 'holder_alive' }
+  const alive = deps.isProcessAlive ?? isAlive
+  const pid = holder.runtime_ui_pid
+  if (pid !== null && pid > 0 && alive(pid)) return { skip: 'holder_alive' }
   return {
     holder: { agent_id: holder.agent_id, team: holder.team, name: holder.name },
   }
@@ -522,9 +378,7 @@ async function probeIteration(state: ProbeState): Promise<void> {
     const resolution = resolveCurrentHolder(state)
     if ('skip' in resolution) {
       rlog(deps,
-        `codex-recovery skip: pane=${row.pane_id} ` +
-        `reason=${resolution.skip}` +
-        holderRefusalLogSuffix(resolution.skip)
+        `codex-recovery skip: pane=${row.pane_id} reason=${resolution.skip}`
       )
       cancelOwnGeneration(state)
       return
@@ -651,8 +505,7 @@ async function sendRecoveryPoke(state: ProbeState, pid: number): Promise<void> {
     } else {
       rlog(deps,
         `codex-recovery cancelled: pane=${row.pane_id} ` +
-        `reason=${outcome.reason}` +
-        holderRefusalLogSuffix(outcome.reason)
+        `reason=${outcome.reason}`
       )
     }
   }

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect } from 'vitest'
 import {
   memoizePaneSnapshot,
   verifyPaneHost,
@@ -66,20 +66,6 @@ describe('verifyPaneHost', () => {
     })
     expect(verdict).toEqual({ ok: true })
     expect(ttyLookups).toBe(0)
-  })
-
-  it('a live pre-reg process verifies without inventing an agent id', async () => {
-    const stillOwnsPane = vi.fn(() => true)
-    const verdict = await verifyPaneHost({
-      row: row({ agent_id: null, runtime_ui_pid: LIVE_PID }),
-      paneId: '%19',
-      paneSnapshot: paneSnapshotOf([{ pane_id: '%19', pane_pid: LIVE_PID }]),
-      localDevice: LOCAL,
-      isProcessAlive: alive,
-      stillOwnsPane,
-    })
-    expect(verdict).toEqual({ ok: true })
-    expect(stillOwnsPane).toHaveBeenCalledWith(null, '%19')
   })
 
   it('rule 3: a live pid sitting on another tty does not verify', async () => {

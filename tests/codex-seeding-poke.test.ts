@@ -222,7 +222,6 @@ describe('codex seeding poke', () => {
     const recoveryDeps: CodexRecoveryDeps = {
       repo,
       findByIdentityKey: () => [HOLDER],
-      findByDeclaredIdentity: () => undefined,
       localDevice: 'local',
       isProcessAlive: () => false,
       listPanes: async () => [{ pane_id: LEFT.pane_id, tty: LEFT.tty }],
@@ -268,7 +267,6 @@ describe('codex seeding poke', () => {
     const recoveryDeps: CodexRecoveryDeps = {
       repo,
       findByIdentityKey: () => [HOLDER],
-      findByDeclaredIdentity: () => undefined,
       localDevice: 'local',
       isProcessAlive: () => false,
       listPanes: async () => [],

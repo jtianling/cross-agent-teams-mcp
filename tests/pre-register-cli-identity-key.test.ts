@@ -193,101 +193,6 @@ describe('pre-register-codex-pane CLI --identity-key-env', () => {
     }
   }, 30000)
 
-  it('forwards team and agent-name verbatim', async () => {
-    const { startServer } = await import('../src/daemon/server.js')
-    const dir = tmp()
-    cleanups.push(dir)
-    const dbPath = join(dir, 'data.db')
-    const { app, port } = await startServer({ dbPath, port: 0 })
-    try {
-      const result = await runCli([
-        '--pane', '%25',
-        '--agent-id', 'U1',
-        '--team', 'monkeys team',
-        '--agent-name', "mvr 'coder'",
-        '--port', String(port),
-      ])
-      expect(result.stderr).toBe('')
-      expect(result.code).toBe(0)
-
-      const db = openDb(dbPath)
-      applySchema(db)
-      const row = db.prepare(
-        `SELECT team, agent_name FROM codex_pane_pre_registrations
-         WHERE pane_id = '%25'`
-      ).get()
-      expect(row).toEqual({ team: 'monkeys team', agent_name: "mvr 'coder'" })
-      db.close()
-    } finally {
-      await app.close()
-    }
-  }, 30000)
-
-  it('forwards either declared identity flag independently', async () => {
-    const { startServer } = await import('../src/daemon/server.js')
-    const dir = tmp()
-    cleanups.push(dir)
-    const dbPath = join(dir, 'data.db')
-    const { app, port } = await startServer({ dbPath, port: 0 })
-    try {
-      const result = await runCli([
-        '--pane', '%25',
-        '--agent-id', 'U1',
-        '--team', 'monkeys',
-        '--port', String(port),
-      ])
-      expect(result.code).toBe(0)
-
-      const db = openDb(dbPath)
-      applySchema(db)
-      const row = db.prepare(
-        `SELECT team, agent_name FROM codex_pane_pre_registrations
-         WHERE pane_id = '%25'`
-      ).get()
-      expect(row).toEqual({ team: 'monkeys', agent_name: null })
-      db.close()
-    } finally {
-      await app.close()
-    }
-  }, 30000)
-
-  it('returns the daemon label refusal as a non-zero CLI result', async () => {
-    const { startServer } = await import('../src/daemon/server.js')
-    const dir = tmp()
-    cleanups.push(dir)
-    const { app, port } = await startServer({
-      dbPath: join(dir, 'data.db'),
-      port: 0,
-    })
-    try {
-      const result = await runCli([
-        '--pane', '%25',
-        '--agent-id', 'U1',
-        '--agent-name', 'mvr-coder(monkeys)',
-        '--port', String(port),
-      ])
-      expect(result.code).toBe(1)
-      expect(result.stderr).toContain('invalid_arguments')
-      expect(result.stderr).toContain('agent_name')
-    } finally {
-      await app.close()
-    }
-  }, 30000)
-
-  it('a declared flag cannot consume the next flag as its value', async () => {
-    const result = await runCli([
-      '--pane', '%25',
-      '--agent-id', 'U1',
-      '--team',
-      '--agent-name', 'mvr-coder',
-      '--port', '1',
-    ])
-    expect(result.code).toBe(2)
-    expect(result.stderr).toContain('invalid_arguments')
-    expect(result.stderr).toContain('--team requires a value')
-    expect(result.stderr).not.toContain('cli_failed')
-  })
-
   it('an unknown flag fails the call instead of being silently ignored', async () => {
     // Measured in production: a launcher passed --identity-key-env to a build
     // that predated the flag, got {"ok":true}, and its degrade-and-retry
@@ -305,6 +210,19 @@ describe('pre-register-codex-pane CLI --identity-key-env', () => {
     expect(result.code).toBe(2)
     expect(result.stderr).toContain('unknown flag(s)')
     expect(result.stderr).toContain('--identity-key-of-the-future')
+    expect(result.stderr).not.toContain('cli_failed')
+  })
+
+  it('--team is an unknown flag that never reaches the daemon', async () => {
+    const result = await runCli([
+      '--pane', '%25',
+      '--agent-id', 'U1',
+      '--team', 'monkeys',
+      '--port', '1',
+    ])
+    expect(result.code).toBe(2)
+    expect(result.stderr).toContain('unknown flag(s)')
+    expect(result.stderr).toContain('--team')
     expect(result.stderr).not.toContain('cli_failed')
   })
 

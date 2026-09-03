@@ -139,7 +139,6 @@ describe('codex recovery after a seat-follow migration', () => {
     const deps: CodexRecoveryDeps = {
       repo: preReg,
       findByIdentityKey: key => agents.findByIdentityKey(key, 'local'),
-      findByDeclaredIdentity: () => undefined,
       localDevice: 'local',
       isProcessAlive: () => false,
       listPanes: async () => [{ pane_id: '%1972', tty: 'ttys001' }],

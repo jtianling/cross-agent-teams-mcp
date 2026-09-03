@@ -1,7 +1,6 @@
 import { z } from 'zod'
 import type { CodexPanePreRegRepo } from './codex-pane-pre-register-repo.js'
 import { describeRedactedError } from './log-redact.js'
-import { validateNameLabel, validateTeamLabel } from './register-agent.js'
 import {
   argvContainsUuid,
   defaultForegroundProbeSync,
@@ -21,8 +20,6 @@ export const preRegisterCodexPaneInputSchema = z
     identity_key: z.string().min(1).refine(v => v.trim().length > 0, {
       message: 'identity_key must not be empty',
     }).optional(),
-    team: z.string().optional(),
-    agent_name: z.string().optional(),
     ttl_seconds: z.number().int().positive().optional(),
   })
   .strict()
@@ -83,40 +80,11 @@ export function defaultCarrierAlive(paneId: string, uuid: string): boolean {
 
 /** Names only.  Echoing the values would put identity_key in the response. */
 const REPORTED_FIELDS = [
-  'pane_id', 'xats_agent_id', 'identity_key', 'team', 'agent_name',
-  'ttl_seconds',
+  'pane_id', 'xats_agent_id', 'identity_key', 'ttl_seconds',
 ] as const
 
 function receivedFields(data: PreRegisterCodexPaneInput): string[] {
   return REPORTED_FIELDS.filter(name => data[name] !== undefined)
-}
-
-const INVALID_DECLARED_LABEL_RE = /["\p{Cc}\u2028\u2029]/u
-
-function declaredIdentityError(
-  data: PreRegisterCodexPaneInput
-): string | undefined {
-  if (data.team !== undefined) {
-    if (data.team.trim().length === 0) return 'team: must not be empty'
-    if (INVALID_DECLARED_LABEL_RE.test(data.team)) {
-      return 'team: contains invalid label characters'
-    }
-    if ('error' in validateTeamLabel(data.team)) {
-      return 'team: contains invalid label characters'
-    }
-  }
-  if (data.agent_name !== undefined) {
-    if (data.agent_name.trim().length === 0) {
-      return 'agent_name: must not be empty'
-    }
-    if (INVALID_DECLARED_LABEL_RE.test(data.agent_name)) {
-      return 'agent_name: contains invalid label characters'
-    }
-    if ('error' in validateNameLabel(data.agent_name)) {
-      return 'agent_name: contains invalid label characters'
-    }
-  }
-  return undefined
 }
 
 const DEFAULT_TTL_SECONDS = 120
@@ -134,8 +102,6 @@ export interface AcceptedPreRegRow {
   pane_id: string
   xats_agent_id: string
   identity_key: string | null
-  team?: string | null
-  agent_name?: string | null
   expires_at: string
 }
 
@@ -239,11 +205,6 @@ export class PreRegisterCodexPaneService {
       }
     }
 
-    const declarationError = declaredIdentityError(parsed.data)
-    if (declarationError !== undefined) {
-      return { error: 'invalid_arguments', detail: declarationError }
-    }
-
     const now = this.now()
     const nowIso = now.toISOString()
     const refused = this.refuseReason(
@@ -263,15 +224,11 @@ export class PreRegisterCodexPaneService {
 
     const ttl = clampTtl(parsed.data.ttl_seconds)
     const expires_at = new Date(now.getTime() + ttl * 1000).toISOString()
-    const team = parsed.data.team?.trim()
-    const agentName = parsed.data.agent_name?.trim()
     this.repo.deleteExpired(nowIso)
     this.repo.upsert({
       pane_id: parsed.data.pane_id,
       xats_agent_id: parsed.data.xats_agent_id,
       identity_key: parsed.data.identity_key,
-      team,
-      agent_name: agentName,
       expires_at,
     })
     // Recovery scheduling is a side channel: a hook failure must not turn an
@@ -281,8 +238,6 @@ export class PreRegisterCodexPaneService {
         pane_id: parsed.data.pane_id,
         xats_agent_id: parsed.data.xats_agent_id,
         identity_key: parsed.data.identity_key ?? null,
-        team: team ?? null,
-        agent_name: agentName ?? null,
         expires_at,
       })
     } catch (error) {

@@ -109,7 +109,6 @@ describe('codex recovery refuses a pane that is not at a composer', () => {
     return {
       repo,
       findByIdentityKey: () => [HOLDER],
-      findByDeclaredIdentity: () => undefined,
       localDevice: 'local',
       isProcessAlive: () => false,
       listPanes: async () => [{ pane_id: '%1972', tty: 'ttys001' }],
@@ -136,8 +135,6 @@ describe('codex recovery refuses a pane that is not at a composer', () => {
         pane_id: '%1972',
         xats_agent_id: 'U1',
         identity_key: 'K1',
-        team: null,
-        agent_name: null,
         expires_at: EXPIRES,
       },
       deps

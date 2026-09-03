@@ -70,9 +70,7 @@ const DDL = [
     pane_id TEXT PRIMARY KEY,
     xats_agent_id TEXT NOT NULL,
     expires_at TEXT NOT NULL,
-    identity_key TEXT,
-    team TEXT,
-    agent_name TEXT
+    identity_key TEXT
   )`
 ]
 
@@ -310,11 +308,11 @@ function migrateCodexPreRegColumns(db: Database.Database): void {
   if (!existing.has('identity_key')) {
     db.exec(`ALTER TABLE codex_pane_pre_registrations ADD COLUMN identity_key TEXT`)
   }
-  if (!existing.has('team')) {
-    db.exec(`ALTER TABLE codex_pane_pre_registrations ADD COLUMN team TEXT`)
+  if (existing.has('team')) {
+    db.exec(`ALTER TABLE codex_pane_pre_registrations DROP COLUMN team`)
   }
-  if (!existing.has('agent_name')) {
-    db.exec(`ALTER TABLE codex_pane_pre_registrations ADD COLUMN agent_name TEXT`)
+  if (existing.has('agent_name')) {
+    db.exec(`ALTER TABLE codex_pane_pre_registrations DROP COLUMN agent_name`)
   }
 }
 

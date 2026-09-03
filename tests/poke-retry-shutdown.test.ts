@@ -84,7 +84,6 @@ describe('daemon shutdown clears pending poke-retry timers', () => {
       {
         repo,
         findByIdentityKey: () => [holder],
-        findByDeclaredIdentity: () => undefined,
         localDevice: 'local',
         isProcessAlive: () => false,
         listPanes: async () => [],

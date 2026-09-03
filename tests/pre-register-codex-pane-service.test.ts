@@ -79,6 +79,18 @@ describe('PreRegisterCodexPaneService', () => {
     expect((res as { detail: string }).detail).toMatch(/pane_id/i)
   })
 
+  it('rejects team and agent_name as unknown fields without writing state', () => {
+    const svc = new PreRegisterCodexPaneService(repo)
+    const res = svc.register({
+      pane_id: '%25',
+      xats_agent_id: 'U1',
+      team: 'monkeys',
+      agent_name: 'mvr-coder',
+    })
+    expect(res).toMatchObject({ error: 'invalid_arguments' })
+    expect(repo.listUnexpired(new Date().toISOString())).toHaveLength(0)
+  })
+
   it('rejects non-positive ttl_seconds', () => {
     const svc = new PreRegisterCodexPaneService(repo)
     const res = svc.register({ pane_id: '%10', xats_agent_id: 'U1', ttl_seconds: 0 })
@@ -164,16 +176,12 @@ describe('PreRegisterCodexPaneService', () => {
         pane_id: '%10',
         xats_agent_id: 'U1',
         identity_key: 'K1',
-        team: null,
-        agent_name: null,
         expires_at: '2026-01-01T00:02:00.000Z',
       },
       {
         pane_id: '%10',
         xats_agent_id: 'U2',
         identity_key: null,
-        team: null,
-        agent_name: null,
         expires_at: '2026-01-01T00:02:00.000Z',
       },
     ])

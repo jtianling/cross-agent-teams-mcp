@@ -514,8 +514,6 @@ describe('autoBindCodexPane', () => {
       pane_id: '%10',
       xats_agent_id: 'U9',
       identity_key: 'K9',
-      team: null,
-      agent_name: null,
       expires_at: '2999-02-01T00:00:00Z',
     })
     expect(attach.applyPlan).not.toHaveBeenCalled()
