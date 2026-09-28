@@ -224,6 +224,11 @@ const RECONNECT_DESC = [
     'your own (team, name), such as after a context clear.',
   'Invoke this when the user asks to "reconnect xats", "re-register xats", ' +
     '"重连 xats", or "重新注册 xats".',
+  'A pane token alone is not a request to reconnect. Recovery must resolve ' +
+    'an existing identity; never manufacture a name/team when lookup fails. ' +
+    'If an exact prior name and team are already known, re-register those ' +
+    'unchanged. Otherwise ask the user unless they explicitly requested ' +
+    'reconnect to look up their existing identity.',
   'BRANCH 1 (check this first): if `printenv XATS_IDENTITY_KEY` is ' +
     'non-empty, call `reconnect({identity_key: <that value>, ui_pid: ' +
     '$PPID})` — or `reconnect({identity_key: <that value>, thread_id: ' +
@@ -303,7 +308,9 @@ const RECONNECT_DESC = [
   'On a single match: returns { ok, agent_id, name, team, last_seen_at } ' +
     'plus the runtime-specific delivery fields.',
   'On zero matches: returns { need_register, reason } — reconnect does NOT ' +
-    'auto-register; call register_agent to create a new identity.',
+    'auto-register. Ask the user for the missing name/team before any new ' +
+    'registration; never invent an identity or treat need_register as ' +
+    'authorization to create one.',
   'On multiple matches: returns { ambiguous, candidates } ordered by ' +
     'last_seen_at descending and does not choose or mutate a row.',
   'Each candidate/match carries last_seen_at. A successful Codex resume ' +
@@ -1083,7 +1090,12 @@ export function registerBusinessTools(
 
   const registerAgentInputSchema = z.object({
     model: z.string().optional(),
-    name: z.string().min(1).refine(v => v.trim().length > 0, { message: 'name must not be empty' }),
+    name: z.string().min(1).refine(v => v.trim().length > 0, {
+      message: 'name must not be empty',
+    }).describe(
+      'User-supplied name or this session\'s exact established prior name. '
+        + 'Never invent a name; ask the user when missing.'
+    ),
     device: z.string().optional(),
     role: z.string().optional(),
     team: z.string().optional(),
@@ -1800,6 +1812,15 @@ export function registerBusinessTools(
       title: 'Register agent',
       description: [
         'Register this session as an agent in a team. This is the unified registration entry point.',
+        'IDENTITY REQUIRED: use only a name explicitly supplied by the user, ' +
+          'or the exact prior name and team established for this session. ' +
+          'Never invent a name from the runtime, thread ID, cwd, project, ' +
+          'role, or examples. If the name is missing, ask the user before ' +
+          'calling register_agent. A pane token only binds a pane; it is ' +
+          'not a registration request or permission to choose an identity. ' +
+          'For recovery, preserve the exact old name AND team; never ' +
+          'replace a missing old team with the cwd default. The default-team ' +
+          'rule applies only to a new registration with a user-supplied name.',
         'DETECTION (run these probes BEFORE choosing `agent_type=`, in order; first match wins):',
         '1. `printenv KIMI_XATS_BASE_URL` non-empty → `agent_type="kimi-code"`; pass that value as `base_url`, and pass `session_id` from `printenv KIMI_XATS_SESSION_ID`. The `xats-kimi` launcher pre-creates the session via the kimi server REST API and exports BOTH variables, so the session id is exact — do NOT derive it from `~/.kimi-code/session_index.jsonl` (its last `workDir`-matching entry can belong to a DIFFERENT kimi session in the same directory; pokes bound that way are delivered to the wrong session). `session_id` is REQUIRED for kimi-code — the daemon does NOT auto-resolve it. These env vars are set ONLY by the `xats-kimi` launcher, so their presence is itself the runtime assertion that the caller is kimi-code.',
         '2. `printenv OPENCODE_XATS_BASE_URL` non-empty → `agent_type="opencode"`; pass that value as `base_url`. Do NOT pass `session_id` — the daemon auto-resolves it as the most recently updated session on that base_url. The env var is set ONLY by the `free-xats-opencode` launcher, so its presence is itself the runtime assertion that the caller is opencode.',

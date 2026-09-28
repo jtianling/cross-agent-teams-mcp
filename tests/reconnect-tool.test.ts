@@ -378,6 +378,9 @@ describe('reconnect tool', () => {
     const obj = await parseTool(resp)
 
     expect(obj.need_register).toBe(true)
+    expect(obj.reason).toContain('Ask the user for the missing name/team')
+    expect(obj.reason).toContain('Do not invent a name or team')
+    expect(obj.reason).not.toContain('register a new identity')
     expect(typeof obj.reason).toBe('string')
     expect(obj.ok).toBeUndefined()
 
@@ -447,6 +450,9 @@ describe('reconnect tool', () => {
     const obj = await parseTool(resp)
 
     expect(obj.need_register).toBe(true)
+    expect(obj.reason).toContain('Ask the user for the missing name/team')
+    expect(obj.reason).toContain('Do not invent a name or team')
+    expect(obj.reason).not.toContain('register a new identity')
     expect(obj.ok).toBeUndefined()
 
     await transport.close()
@@ -524,6 +530,9 @@ describe('reconnect tool', () => {
     const obj = await parseTool(resp)
 
     expect(obj.need_register).toBe(true)
+    expect(obj.reason).toContain('Ask the user for the missing name/team')
+    expect(obj.reason).toContain('Do not invent a name or team')
+    expect(obj.reason).not.toContain('register a new identity')
     expect(obj.reason).toContain(threadId)
     const row = db.prepare(
       `SELECT agent_id, registered_at, last_seen_at, last_processed_event_id
@@ -737,6 +746,9 @@ describe('reconnect tool', () => {
     const obj = await parseTool(resp)
 
     expect(obj.need_register).toBe(true)
+    expect(obj.reason).toContain('Ask the user for the missing name/team')
+    expect(obj.reason).toContain('Do not invent a name or team')
+    expect(obj.reason).not.toContain('register a new identity')
     expect(obj.reason).toContain('ses_nomatch')
     const row = db.prepare(
       `SELECT last_seen_at FROM agents WHERE agent_id='O'`
@@ -809,6 +821,9 @@ describe('reconnect tool', () => {
     const obj = await parseTool(resp)
 
     expect(obj.need_register).toBe(true)
+    expect(obj.reason).toContain('Ask the user for the missing name/team')
+    expect(obj.reason).toContain('Do not invent a name or team')
+    expect(obj.reason).not.toContain('register a new identity')
     expect(obj.ok).toBeUndefined()
 
     await transport.close()

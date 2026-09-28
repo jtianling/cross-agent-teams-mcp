@@ -105,6 +105,9 @@ function slog(deps: CodexSeedingDeps, line: string): void {
 export function buildCodexSeedingPokeContent(args: { nonce: string }): string {
   return [
     '[cross-agent-teams pane token]',
+    'This token is only for pane binding, not a request to register or reconnect.',
+    'Do not invent a name or team. If no explicit registration identity is known,',
+    'retain this token and ask the user for the missing identity before registering.',
     'Two or more codex panes are pre-registering at the same time, so',
     'cross-agent-teams (xats) cannot tell from its own side which pane is',
     'which. When you call the cross-agent-teams MCP tool register_agent, add',
@@ -112,6 +115,9 @@ export function buildCodexSeedingPokeContent(args: { nonce: string }): string {
     'This daemon wrote the token into THIS pane only, so quoting it back is',
     'what tells the daemon which pane you are. It supplies nothing else about',
     'the registration.',
+    'If already registered and the exact prior name and team are known,',
+    're-register with that unchanged identity and',
+    'include this token.',
   ].join(' ')
 }
 

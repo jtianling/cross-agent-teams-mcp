@@ -236,6 +236,11 @@ export function mountMcp(
         instructions:
           'xats 是 cross-agent-teams 的缩写. 当用户或其他 agent 提到 xats 时, 指的是本 MCP server (cross-agent-teams-mcp) 及其跨 agent 协作工具 (register_agent, send_message, broadcast 等). 用户说"注册到 xats"或"注册到 cross-agent-teams"时, 表示注册到本 MCP 服务, xats 和 cross-agent-teams 不是 team 名, 不要把它们传给 team. 不要把单独的常用词"注册"默认劫持为本工具; 只有当前上下文已经在讨论 cross-agent-teams 注册时才可续接. 注册时 (register_agent) 如果用户未显式指定 team, 默认传 project_dir=当前工作目录 (cwd), daemon 会用它的 basename 作为 team 默认值; 都不传时回落 default.'
           + ' register_agent is the single registration entry point; pass `agent_type` explicitly.'
+          + ' 身份必须来自用户明确指定的 name, 或当前会话已明确建立的旧 name/team. '
+          + '缺少 name 时先询问用户, 禁止按 runtime/thread/cwd/角色自行起名. '
+          + 'pane token 仅用于绑定 pane, 不构成注册或重连请求. '
+          + '恢复身份必须沿用完整旧 name/team, 不得用默认 team 替代缺失的旧 team. '
+          + '默认 team 规则仅适用于用户已指定 name 的新注册. '
           + ' For `agent_type="kimi-code"`: read `$KIMI_XATS_BASE_URL` (exported by the `xats-kimi` launcher) and pass that value as `base_url`, plus a REQUIRED `session_id` read from `$KIMI_XATS_SESSION_ID` (the launcher pre-creates the session via the kimi server REST API and exports it; do NOT guess from `~/.kimi-code/session_index.jsonl`).'
           + ' For `agent_type="opencode"`: read `$OPENCODE_XATS_BASE_URL` (exported by the `free-xats-opencode` launcher) and pass that value as `base_url`; omit `session_id` (daemon auto-resolves it as the most recently updated session on that base_url).'
           + ' For `agent_type="codex"` (Codex CLI or Mac Codex App): read `$CODEX_THREAD_ID` (codex 0.124.0+ exports it) and pass it as `thread_id` (REQUIRED). For Codex CLI, do NOT pass `ui_pid` because the launcher\'s `pre_register_codex_pane` flow handles tmux pane binding. Mac Codex App has no tmux launcher flow; omit `ui_pid` because an App or app-server pid is not conversation-scoped.'

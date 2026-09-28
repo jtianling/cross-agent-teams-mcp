@@ -428,6 +428,10 @@ describe('codex seeding poke', () => {
     const content = buildCodexSeedingPokeContent({ nonce: 'N-123' })
     expect(content).toContain('register_agent')
     expect(content).toContain('recovery_nonce: "N-123"')
+    expect(content).toContain('not a request to register or reconnect')
+    expect(content).toContain('Do not invent a name or team')
+    expect(content).toContain('ask the user for the missing identity')
+    expect(content).toContain('exact prior name and team are known')
     // The recovery notice's identity assertions, which this one cannot make.
     expect(content).not.toContain('name="')
     expect(content).not.toContain('team="')

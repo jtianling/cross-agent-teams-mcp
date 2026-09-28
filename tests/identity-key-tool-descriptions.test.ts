@@ -47,6 +47,10 @@ describe('identity key tool descriptions', () => {
     // Must cover the FIRST registration, not just recovery.
     expect(desc).toMatch(/EVERY `register_agent` call, including the very first one/)
     expect(desc).toContain('identity_key_conflict')
+    expect(desc).toContain('IDENTITY REQUIRED')
+    expect(desc).toContain('Never invent a name')
+    expect(desc).toContain('ask the user before calling register_agent')
+    expect(desc).toContain('exact old name AND team')
 
     await transport.close(); await client.close(); db.close(); await server.close()
   })
@@ -128,6 +132,9 @@ describe('identity key tool descriptions', () => {
     )
     // Pre-existing routing must survive.
     expect(desc).toContain('重连 xats')
+    expect(desc).toContain('A pane token alone is not a request to reconnect')
+    expect(desc).toContain('never invent an identity')
+    expect(desc).not.toContain('call register_agent to create a new identity')
     expect(desc).toContain('base_url=$OPENCODE_XATS_BASE_URL')
 
     await transport.close(); await client.close(); db.close(); await server.close()

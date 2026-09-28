@@ -2,6 +2,11 @@ import type { AgentsRepo, RuntimeUiPidMatch } from '../storage/agents-repo.js'
 import { kimiAuthHeaders, DEFAULT_KIMI_TOKEN_FILE } from './kimi-auth.js'
 import { kimiSessionUrl, parseStrictEnvelopeData } from './kimi-session-state.js'
 
+const MISSING_IDENTITY_GUIDANCE =
+  'There is no prior identity to reconnect. Ask the user for the missing ' +
+  'name/team before calling register_agent. Do not invent a name or team; ' +
+  'need_register is not authorization to create an identity.'
+
 export interface ReconnectCandidate {
   agent_id: string
   device: string
@@ -47,7 +52,7 @@ export function resolveReconnect(
       kind: 'need_register',
       reason:
         `No local agent is registered for ui_pid ${ui_pid}. ` +
-        'There is no prior identity to reconnect; call register_agent to register a new identity.',
+        MISSING_IDENTITY_GUIDANCE,
     }
   }
   if (rows.length === 1) {
@@ -73,9 +78,8 @@ export function resolveIdentityKeyReconnect(
       kind: 'need_register',
       reason:
         'No local agent holds this identity_key. ' +
-        'There is no prior identity to reconnect; call register_agent to ' +
-        'register a new identity and pass the same identity_key so later ' +
-        'restarts can recover it.',
+        MISSING_IDENTITY_GUIDANCE +
+        ' Once the user supplies the identity, pass the same identity_key.',
     }
   }
   if (rows.length === 1) {
@@ -95,8 +99,7 @@ export function resolveCodexReconnect(
       kind: 'need_register',
       reason:
         `No local Codex agent is registered for thread_id ${thread_id}. ` +
-        'There is no prior identity to reconnect; call register_agent to ' +
-        'register a new identity.',
+        MISSING_IDENTITY_GUIDANCE,
     }
   }
   if (rows.length === 1) {
@@ -121,8 +124,7 @@ export function resolveKimiReconnect(
       reason:
         `No local kimi agent is registered for session_id ${session_id} ` +
         `on base_url ${base_url}. ` +
-        'There is no prior identity to reconnect; call register_agent to ' +
-        'register a new identity.',
+        MISSING_IDENTITY_GUIDANCE,
     }
   }
   if (rows.length === 1) {
@@ -211,8 +213,7 @@ export function resolveOpencodeReconnect(
       reason:
         `No local opencode agent is registered for session_id ${session_id} ` +
         `on base_url ${base_url}. ` +
-        'There is no prior identity to reconnect; call register_agent to ' +
-        'register a new identity.',
+        MISSING_IDENTITY_GUIDANCE,
     }
   }
   if (rows.length === 1) {
