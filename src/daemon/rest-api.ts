@@ -17,6 +17,10 @@ import {
   CodexBindingLookup,
   codexBindingLookupSchema,
 } from '../mcp/codex-binding-lookup.js'
+import {
+  IdentityKeyLookup,
+  identityKeyLookupSchema,
+} from '../mcp/identity-key-lookup.js'
 import { removeAgentRow } from '../mcp/unregister-self.js'
 import { isStorageError, wrapStorage } from './errors.js'
 import type { ChannelWakeFanout } from './channel-wake-fanout.js'
@@ -261,6 +265,23 @@ async function handleCodexBindingLookup(
   }
 }
 
+async function handleIdentityKeyLookup(
+  service: IdentityKeyLookup,
+  req: FastifyRequest,
+  reply: FastifyReply
+): Promise<void> {
+  const parsed = identityKeyLookupSchema.safeParse(req.body)
+  if (!parsed.success) {
+    await sendInvalidRuntimeRequest(reply, 'Invalid identity key lookup')
+    return
+  }
+  try {
+    await reply.send(await service.lookup(parsed.data))
+  } catch (error) {
+    await sendRuntimeFailure(reply, error)
+  }
+}
+
 async function handleRuntimeReserve(
   ctx: RestCtx,
   req: FastifyRequest,
@@ -363,6 +384,12 @@ export function mountRestApi(
     '/api/codex/binding/lookup',
     { errorHandler: runtimeRouteErrorHandler },
     (req, reply) => handleCodexBindingLookup(codexBindingLookup, req, reply)
+  )
+  const identityKeyLookup = new IdentityKeyLookup(db, localDevice)
+  app.post(
+    '/api/identity-key/lookup',
+    { errorHandler: runtimeRouteErrorHandler },
+    (req, reply) => handleIdentityKeyLookup(identityKeyLookup, req, reply)
   )
   app.delete('/api/agents/:agent_id', (req, reply) => handleDeleteAgent(ctx, req, reply))
   app.post(
