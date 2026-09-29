@@ -305,7 +305,7 @@ describe('register_agent same-thread precedence (codex)', () => {
     identity_key: 'EECF3E35',
   }
 
-  it('INCIDENT: a same-thread rename never consumes the foreign pre-reg; the shell later consumes its own row', async () => {
+  it.each([false, true])('same-thread rename preserves foreign pre-reg, reused name: %s', async reused => {
     // The foreign pre-reg is fully CONSUMABLE (unique machine-wide
     // candidate): without same-thread precedence, the rename would have
     // bound the shell's pane/pid and taken EECF3E35 — the incident.
@@ -343,7 +343,10 @@ describe('register_agent same-thread precedence (codex)', () => {
         // alive-holder seat-follow arbitration is deterministic.
         agent_id: 'holder-a', name: 'aoe-codex', thread_id: THREAD_T,
         pane: '%67', pid: process.pid, tty: 'ttys010', identity_key: 'K1',
-      }],
+      }, ...(reused ? [{
+        agent_id: 'previous-name', name: 'aoe-codex-r2', thread_id: THREAD_NEW,
+        pane: null, pid: null, tty: '', identity_key: 'previous-name-key',
+      }] : [])],
       preRegs: [foreignPreReg],
     })
 

@@ -611,9 +611,14 @@ export function registerBusinessTools(
   // so a key still attached to the seat's previous row follows the seat.
   // followSeatIdentityKey catches internally; this guard only covers a
   // throwing log sink, keeping register_agent results uncorrupted.
-  function runCodexSeatFollow(callerAgentId: string): void {
+  function runCodexSeatFollow(
+    callerAgentId: string,
+    inheritedSameThread = false
+  ): void {
     try {
-      followSeatIdentityKey({ callerAgentId, deps: seatFollowDeps })
+      followSeatIdentityKey({
+        callerAgentId, deps: seatFollowDeps, inheritedSameThread,
+      })
     } catch { /* best-effort */ }
   }
 
@@ -747,7 +752,7 @@ export function registerBusinessTools(
           })
         : undefined
     if (bound !== undefined && 'ok' in bound && bound.ok) {
-      runCodexSeatFollow(callerAgentId)
+      runCodexSeatFollow(callerAgentId, true)
       return { ok: true }
     }
     return {

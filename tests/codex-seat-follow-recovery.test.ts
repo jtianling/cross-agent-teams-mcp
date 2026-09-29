@@ -38,7 +38,7 @@ describe('codex recovery after a seat-follow migration', () => {
     cleanups.length = 0
   })
 
-  it('resolves the migrated key to Y and pokes with Y, not X', async () => {
+  it.each([false, true])('recovers the latest name, reused name key: %s', async reused => {
     const dir = tmp()
     cleanups.push(dir)
     const db = openDb(join(dir, 'data.db'))
@@ -48,7 +48,7 @@ describe('codex recovery after a seat-follow migration', () => {
 
     const renameThread = '33333333-3333-4333-8333-333333333333'
     const x = agents.register({
-      agent_type: 'codex', name: 'X', team: 'aoe', identity_key: 'K1',
+      agent_type: 'codex', name: 'X', team: 'old-team', identity_key: 'K1',
       delivery: {
         kind: 'codex-appserver',
         thread_id: renameThread,
@@ -66,6 +66,7 @@ describe('codex recovery after a seat-follow migration', () => {
     // migration (the fallback-bound pid is heuristic, never proof).
     const y = agents.register({
       agent_type: 'codex', name: 'Y', team: 'aoe',
+      ...(reused ? { identity_key: 'previous-name-key' } : {}),
       delivery: {
         kind: 'codex-appserver',
         thread_id: renameThread,
@@ -81,6 +82,7 @@ describe('codex recovery after a seat-follow migration', () => {
 
     followSeatIdentityKey({
       callerAgentId: y.agent_id,
+      inheritedSameThread: true,
       deps: {
         findCaller: agentId => {
           const row = agents.findById(agentId)
@@ -112,7 +114,10 @@ describe('codex recovery after a seat-follow migration', () => {
 
     const resolved = agents.findByIdentityKey('K1', 'local')
     expect(resolved).toHaveLength(1)
-    expect(resolved[0]).toMatchObject({ agent_id: y.agent_id, name: 'Y' })
+    expect(resolved[0]).toMatchObject({
+      agent_id: y.agent_id, name: 'Y', team: 'aoe',
+    })
+    expect(agents.findByIdentityKey('previous-name-key', 'local')).toEqual([])
     expect(agents.findById(x.agent_id)?.identity_key).toBeNull()
 
     // Pane restart: the launcher pre-registers with K1 again; recovery must
@@ -158,6 +163,7 @@ describe('codex recovery after a seat-follow migration', () => {
     expect(content).toContain('name="Y"')
     expect(content).toContain('team="aoe"')
     expect(content).not.toContain('name="X"')
+    expect(content).not.toContain('team="old-team"')
     expect(content).not.toContain('K1')
 
     db.close()

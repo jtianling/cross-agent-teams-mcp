@@ -203,6 +203,37 @@ describe('followSeatIdentityKey', () => {
     )
   })
 
+  it('replaces a reused name key only after same-thread inheritance', () => {
+    const deps = makeDeps({
+      isProcessAlive: () => true,
+      findCaller: () => ({
+        team: 'new-team',
+        name: 'Y',
+        identity_key: 'old-name-key',
+        codex_thread_id: THREAD_X,
+      }),
+    })
+    followSeatIdentityKey({
+      callerAgentId: 'caller-1', deps, inheritedSameThread: true,
+    })
+    expect(deps.applyPlan).toHaveBeenCalledWith(
+      { kind: 'migrate', from_agent_id: 'holder-1' }, 'caller-1', 'K1'
+    )
+    expect(deps.log).not.toHaveBeenCalledWith(expect.stringContaining('old-name-key'))
+  })
+
+  it.each([THREAD_Y, null])('keeps an existing key for unproven thread %s', thread => {
+    const deps = makeDeps({
+      findCaller: () => ({
+        team: 'aoe', name: 'Y', identity_key: 'K2', codex_thread_id: thread,
+      }),
+    })
+    followSeatIdentityKey({
+      callerAgentId: 'caller-1', deps, inheritedSameThread: true,
+    })
+    expect(deps.applyPlan).not.toHaveBeenCalled()
+  })
+
   it('is a no-op with a count-only debug line on zero candidates', () => {
     const deps = makeDeps({ findKeyHoldersBySeat: () => [] })
     followSeatIdentityKey({ callerAgentId: 'caller-1', deps })

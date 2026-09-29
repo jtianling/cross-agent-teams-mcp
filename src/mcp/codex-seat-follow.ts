@@ -160,6 +160,7 @@ function runDeadHolderFollow(args: {
 export function followSeatIdentityKey(args: {
   callerAgentId: string
   deps: SeatFollowDeps
+  inheritedSameThread?: boolean
 }): void {
   const { callerAgentId, deps } = args
   let key: string | null = null
@@ -176,9 +177,10 @@ export function followSeatIdentityKey(args: {
     key = holder.identity_key
     const caller = deps.findCaller(callerAgentId)
     if (!caller) return
-    if (caller.identity_key !== null) {
-      // The caller already carries a key (e.g. the pre-reg seeding attach
-      // ran first); a seat-matched key must never overwrite it.
+    const canRotate = args.inheritedSameThread === true
+      && caller.identity_key !== key
+      && !('refusal' in planThreadEqualityMigration(holder, caller.codex_thread_id))
+    if (caller.identity_key !== null && !canRotate) {
       deps.log?.(
         `seat-follow skip (debug): caller=${callerAgentId} ` +
         `already holds a key; seat key not moved`
