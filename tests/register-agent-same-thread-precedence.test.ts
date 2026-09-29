@@ -6,6 +6,8 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { openDb } from '../src/storage/db.js'
 import { applySchema } from '../src/storage/schema.js'
+import { CodexPanePreRegRepo } from '../src/mcp/codex-pane-pre-register-repo.js'
+import { mintCodexRecoveryNonce } from '../src/mcp/codex-recovery-nonce.js'
 import { __testOverrides as autoBindOverrides } from '../src/mcp/auto-bind-codex-pane.js'
 import { isAlive } from '../src/daemon/pid.js'
 
@@ -196,11 +198,11 @@ describe('register_agent same-thread precedence (codex)', () => {
       )
     }
     for (const p of args.preRegs ?? []) {
-      seed.prepare(
-        `INSERT INTO codex_pane_pre_registrations
-           (pane_id, xats_agent_id, expires_at, identity_key)
-         VALUES (?, ?, '2999-01-01T00:00:00.000Z', ?)`
-      ).run(p.pane_id, p.uuid, p.identity_key)
+      new CodexPanePreRegRepo(seed).upsert({
+        pane_id: p.pane_id, xats_agent_id: p.uuid,
+        identity_key: p.identity_key ?? undefined,
+        expires_at: '2999-01-01T00:00:00.000Z',
+      })
     }
     seed.close()
 
@@ -209,7 +211,7 @@ describe('register_agent same-thread precedence (codex)', () => {
 
   async function startRegisterCodex(
     url: URL,
-    args: { name: string; thread_id: string; ui_pid?: number }
+    args: { name: string; thread_id: string; ui_pid?: number; recovery_nonce?: string }
   ): Promise<{
     done: Promise<Record<string, unknown>>
     close: () => Promise<void>
@@ -225,6 +227,7 @@ describe('register_agent same-thread precedence (codex)', () => {
         name: args.name,
         team: 'aoe',
         thread_id: args.thread_id,
+        recovery_nonce: args.recovery_nonce,
         ...(args.ui_pid === undefined ? {} : { ui_pid: args.ui_pid }),
       },
     }).then(resp => parseTool(resp))
@@ -239,7 +242,7 @@ describe('register_agent same-thread precedence (codex)', () => {
 
   async function registerCodex(
     url: URL,
-    args: { name: string; thread_id: string; ui_pid?: number }
+    args: { name: string; thread_id: string; ui_pid?: number; recovery_nonce?: string }
   ): Promise<{ obj: Record<string, unknown>; close: () => Promise<void> }> {
     const { done, close } = await startRegisterCodex(url, args)
     return { obj: await done, close }
@@ -393,6 +396,7 @@ describe('register_agent same-thread precedence (codex)', () => {
     // its pre-reg row is consumed by its own session and it gets its key.
     const shell = await registerCodex(url, {
       name: 'shell-codex', thread_id: THREAD_SHELL,
+      recovery_nonce: mintCodexRecoveryNonce('%99'),
     })
     expect(shell.obj.agent_id).toBeDefined()
 
@@ -446,6 +450,7 @@ describe('register_agent same-thread precedence (codex)', () => {
 
     const rec = await registerCodex(url, {
       name: 'aoe-codex', thread_id: THREAD_NEW,
+      recovery_nonce: mintCodexRecoveryNonce('%67'),
     })
     expect(rec.obj.agent_id).toBeDefined()
     expect(bindRuntimeIdentityMock).toHaveBeenCalledWith(
@@ -453,7 +458,7 @@ describe('register_agent same-thread precedence (codex)', () => {
     )
     // Unified decision log: the no-evidence outcome is logged too.
     expect(logLines).toContainEqual(expect.stringContaining(
-      'outcome=none rows=0 seats=0'
+      'auto-bind targeted (debug): pane=%67'
     ))
 
     expect(readPreRegs(dbPath)).toEqual([])
@@ -929,12 +934,12 @@ describe('register_agent same-thread precedence (codex)', () => {
     // same thread.
     const back = await registerCodex(url, {
       name: 'aoe-codex', thread_id: THREAD_T,
+      recovery_nonce: mintCodexRecoveryNonce('%67'),
     })
     expect(back.obj.agent_id).toBeDefined()
 
     expect(logLines).toContainEqual(expect.stringContaining(
-      'outcome=inherit_seat_vacated rows=1 seats=1 agents=holder-a ' +
-      'reason=bind_failed'
+      'auto-bind targeted (debug): pane=%67'
     ))
     // Scan ONLY: the seat being gone proves nothing about which pane the
     // caller occupies now, so global detection stays out of reach.

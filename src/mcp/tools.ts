@@ -1,6 +1,7 @@
 import type Database from 'better-sqlite3'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
+import { CodexLaunchReconnectService } from './reconnect-codex-launch.js'
 import {
   AgentsRepo,
   sameIdentityRowSnapshot,
@@ -181,7 +182,13 @@ const SEND_MESSAGE_DESC = [
   'Private 1→1 message to another agent by name.  By default auto-poke=true with quiet-guard (auto_poke:false opts out), and need_reply=true.',
   'Set need_reply:false for FYI/no-response-needed messages; recipients see need_reply in get_inbox.',
   'to_agent_name is the target\'s `name` within its team; bare names resolve on the caller\'s device, and `name:device` targets a specific device.  For UUID-based sends use send_message_by_id.',
-  'If the user refers to a recipient in the shorthand `name(team)` (e.g. `skills-creator(default)`), split it into `to_agent_name`=`skills-creator` and `to_team`=`default`. The daemon does NOT parse `name(team)`, so the literal string fails to resolve (unknown_recipient). This is distinct from the `name:device` suffix, which the daemon DOES parse.',
+  'Recipient shorthand `name@team` and `name(team)` are equivalent: ' +
+    '`x-name@y-team` and `x-name(y-team)` both mean agent x-name in team y-team. ' +
+    'For send_message, split either form into to_agent_name="x-name" and ' +
+    'to_team="y-team". The shorthand explicitly specifies the target team, ' +
+    'including for cross-team sends. The daemon does not parse these forms; ' +
+    'never pass the whole shorthand as to_agent_name. The team notation is ' +
+    'distinct from the name:device suffix, which the daemon does parse.',
   'REPLY RULE: when replying to a message returned by get_inbox, treat its `from_device` as authoritative — if it differs from your own device, you MUST send to `from_name + ":" + from_device` (bare `from_name` would resolve on YOUR device and miss the actual sender). Same-device replies can use the bare name. The safe fallback for unknown device is send_message_by_id({to_agent_id: from_agent_id, ...}).',
   'For multi-recipient use broadcast (same-team) or broadcast_to_role (same-team, by role).',
   '除非用户明确指定 to_team, 不要跨 team 沟通 (explicitly set to_team only when user asks).',
@@ -229,10 +236,17 @@ const RECONNECT_DESC = [
     'If an exact prior name and team are already known, re-register those ' +
     'unchanged. Otherwise ask the user unless they explicitly requested ' +
     'reconnect to look up their existing identity.',
-  'BRANCH 1 (check this first): if `printenv XATS_IDENTITY_KEY` is ' +
+  'Codex CLI: first read XATS_CODEX_LAUNCH_ID from the shell tool. When set ' +
+    'by the launcher through session-scoped shell_environment_policy.set, ' +
+    'call reconnect({launch_id: <that value>, thread_id: $CODEX_THREAD_ID}). ' +
+    'This recovers the same pane identity after /clear starts a new thread. ' +
+    'The daemon verifies the live launcher/pane binding and rejects forked ' +
+    'or subagent threads. Never copy a launch_id from another pane. ' +
+    'Codex must NOT read or pass XATS_IDENTITY_KEY: shared app-server ' +
+    'environment values do not identify the calling pane.',
+  'BRANCH 1 (non-Codex callers only): if `printenv XATS_IDENTITY_KEY` is ' +
     'non-empty, call `reconnect({identity_key: <that value>, ui_pid: ' +
-    '$PPID})` — or `reconnect({identity_key: <that value>, thread_id: ' +
-    '$CODEX_THREAD_ID})` from codex — before considering the two branches ' +
+    '$PPID})` before considering the runtime branches ' +
     'below. `identity_key` is the only lookup that survives a pane restart, ' +
     'and it does NOT belong to the exactly-one group below: it resolves the ' +
     'identity while the accompanying `ui_pid` / `thread_id` refreshes the ' +
@@ -258,9 +272,10 @@ const RECONNECT_DESC = [
     '`session_id=$KIMI_XATS_SESSION_ID`.',
   'Claude Code lookup uses local `runtime_ui_pid` and reuses the existing ' +
     'channel and pane binding paths.',
-  'For Codex CLI and Mac Codex App, `CODEX_THREAD_ID` is the stable ' +
-    'conversation/thread identity when the same task is resumed after a ' +
-    'context clear, MCP session replacement, or conversation resume. Do not ' +
+  'For Codex CLI and Mac Codex App, `CODEX_THREAD_ID` identifies the same ' +
+    'thread across MCP session replacement or conversation resume. A context clear ' +
+    'with /clear starts a NEW thread: thread_id alone cannot recover its old ' +
+    'identity. Without a launcher-scoped launch_id, ask for (team, name). Do not ' +
     'use the ' +
     'App pid, app-server pid, or an old database row as proof of identity.',
   'Codex lookup uses the local codex-appserver delivery `thread_id`. On a ' +
@@ -643,7 +658,8 @@ export function registerBusinessTools(
     'Recover with reconnect (your agent_id and delivery are preserved): ' +
     'kimi-code → reconnect({ agent_type: "kimi-code", base_url: $KIMI_XATS_BASE_URL, session_id: $KIMI_XATS_SESSION_ID }); ' +
     'opencode → reconnect({ agent_type: "opencode", base_url: $OPENCODE_XATS_BASE_URL, session_id }); ' +
-    'codex → reconnect({ thread_id: $CODEX_THREAD_ID }); ' +
+    'codex → reconnect({ thread_id: $CODEX_THREAD_ID }), also passing ' +
+    'launch_id from session-scoped XATS_CODEX_LAUNCH_ID when available; ' +
     'claude-code → reconnect({ ui_pid: $PPID }). ' +
     'If you have never registered, call register_agent instead.'
 
@@ -783,6 +799,9 @@ export function registerBusinessTools(
     const targetPaneId = recoveryNonce === undefined
       ? undefined
       : consumeCodexRecoveryNonce(recoveryNonce)
+    const targetedRow = targetPaneId === undefined
+      ? undefined
+      : codexPanePreRegRepo.getByPaneId(targetPaneId)
     if (recoveryNonce !== undefined) {
       log?.(
         `codex-recovery nonce (debug): caller=${callerAgentId} ` +
@@ -800,6 +819,7 @@ export function registerBusinessTools(
       // the daemon wrote that token into, so this targeting — and only this
       // targeting — may rotate a stale key off the caller's own row.
       targetPaneFromNonce: targetPaneId !== undefined,
+      requirePaneNonce: true,
       // One synchronous transaction for "re-arbitrate the key → write the
       // runtime binding (with its incumbent-pane eviction) → consume the row
       // → attach the key"; better-sqlite3 nests via savepoints, so the
@@ -837,7 +857,15 @@ export function registerBusinessTools(
       },
       log,
     })
-    if (auto === false) return false
+    if (auto === false) {
+      if (targetedRow !== undefined) {
+        const current = codexPanePreRegRepo.getByPaneId(targetedRow.pane_id)
+        if (JSON.stringify(current) === JSON.stringify(targetedRow)) {
+          evaluateCodexSeedingOnPreRegister(targetedRow, codexSeedingDeps)
+        }
+      }
+      return false
+    }
     // Seat-follow only after a CONSUMED row: a stale outcome means the
     // pre-reg row was overwritten during the bind, and re-attaching the
     // seat key here would bypass the full-snapshot consume protection.
@@ -987,6 +1015,11 @@ export function registerBusinessTools(
     }
 
     if (inferredAgent === 'codex') {
+      if (args.recovery_nonce !== undefined) {
+        return tryCodexPreRegScan(
+          callerAgentId, expectedRegisterGeneration, args.recovery_nonce
+        )
+      }
       // Same-thread evidence DIRECTS the resolution instead of ending it: a
       // unique seat is inherited exactly, and only a registration with NO
       // evidence reaches the global pane detection.  The one seat outcome
@@ -1842,7 +1875,14 @@ export function registerBusinessTools(
         '`model` is OPTIONAL for any agent_type: omit it when you do not have an authoritative model identifier; the daemon stores NULL in that case. Pass an explicit `model` only when you have a stable identifier you would like surfaced via `list_agents`.',
         'Requests such as "register to xats" or "register to cross-agent-teams" refer to this MCP service, not to the `team` field; do not set `team` to `xats` or `cross-agent-teams` from those phrases.',
         'Do not treat the bare word "register" as a request for this tool unless the current conversation is already about cross-agent-teams registration.',
-        'If the user writes an identity in the shorthand `name(team)` (e.g. `skills-creator(default)` means name=`skills-creator`, team=`default`), split it into the separate `name` and `team` arguments. The daemon does NOT parse `name(team)`; passing the literal string as `name` registers a malformed identity (the parentheses are not rejected).',
+        'Identity shorthand `name@team` and `name(team)` are equivalent: ' +
+          '`x-name@y-team` and `x-name(y-team)` both mean name="x-name", ' +
+          'team="y-team". In a registration request, split either form into ' +
+          'the separate name and team arguments. The shorthand explicitly ' +
+          'specifies team, so do not use the cwd-derived default. The daemon ' +
+          'does not parse these forms; never pass the whole shorthand as name. ' +
+          'In a send request, the same notation identifies the recipient: ' +
+          'send_message({to_agent_name: "x-name", to_team: "y-team", ...}).',
         'When the end user has not explicitly specified `team`, callers should pass `project_dir` as the current working directory so the daemon derives a project-scoped default team from its basename; if omitted, it falls back to `default`.',
         'REPORTING RULE: on success the response carries the actual `team` the daemon assigned. When summarizing the registration to the user, surface that returned `team` value verbatim; NEVER derive or paraphrase the team from `project_dir`, cwd, or your own pre-call assumption. Failing to read the response masks the daemon\'s `default` fallback (e.g. when `project_dir` was forgotten) and produces misleading "team: X (from cwd basename)" reports that break later cross-team send_message diagnostics.',
         '`agent_type` must describe the runtime behind `ui_pid`, not merely the current MCP caller. For example, if `ui_pid` points at an external editor process, pass `agent_type="custom"` with `agent_type_name=<editor>` even when the registration request is issued from a different harness.',
@@ -1877,10 +1917,15 @@ export function registerBusinessTools(
   )
 
   const reconnectInputSchema = z.object({
+    launch_id: z.string().uuid().optional().describe(
+      'Codex launcher UUID from session-scoped XATS_CODEX_LAUNCH_ID. '
+      + 'Requires thread_id; never obtain it from another pane or a shared env.'
+    ),
     identity_key: z.string().min(1).refine(v => v.trim().length > 0, {
       message: 'identity_key must not be empty',
     }).optional().describe(
-      'Launcher-minted per-pane key from `$XATS_IDENTITY_KEY`. The only lookup that survives a pane restart. Combine it with `ui_pid` (claude-code) or `thread_id` (codex) in the same call: the key resolves the identity, the other value rebinds the live runtime.'
+      'Launcher-minted per-pane key for non-Codex callers. Codex must not read '
+      + 'this from the shared app-server environment; use launch_id instead.'
     ),
     ui_pid: z.number().int().positive().optional().describe(
       'Claude UI process id (`$PPID` inside Claude Code).'
@@ -1916,6 +1961,15 @@ export function registerBusinessTools(
   }).strict()
 
   const reconnectArgsSchema = reconnectInputSchema.superRefine((value, ctx) => {
+    if (value.launch_id !== undefined && (
+      value.thread_id === undefined || value.identity_key !== undefined
+      || value.ui_pid !== undefined || value.base_url !== undefined
+    )) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'launch_id requires thread_id and cannot mix identity or runtime arms',
+      })
+    }
     const keyCount = Number(value.ui_pid !== undefined)
       + Number(value.thread_id !== undefined)
       + Number(value.base_url !== undefined)
@@ -2114,6 +2168,41 @@ export function registerBusinessTools(
     )
     if (resolution.kind !== 'single') return unresolvedReconnect(resolution)
     return completeCodexReconnect(resolution.match, args)
+  }
+
+  async function executeCodexLaunchReconnect(args: {
+    launch_id: string
+    thread_id: string
+    ws_url?: string
+    auth_token_ref?: string
+  }): Promise<unknown> {
+    if (getSessionOriginInfo?.()?.origin === 'remote') {
+      return { ok: false, error: 'local_launch_required' }
+    }
+    if (!onRegisterSuccess) return { error: 'connection_binding_unavailable' }
+    const connectionId = getSessionId?.() ?? caller()
+    if (!connectionId) return { error: 'unknown_agent' }
+    const service = new CodexLaunchReconnectService(
+      db, context?.localDevice ?? 'local'
+    )
+    const result = await service.reconnect(args)
+    if (!result.ok) return result
+    if (!service.isCurrent(result)) return { ok: false, error: 'stale' }
+    const {
+      device, delivery, launch_id: _launch, pane_id: _pane,
+      register_generation: _generation, ...envelope
+    } = result
+    try {
+      onRegisterSuccess(result.agent_id, result.team)
+      registerSvc.bindExistingConnection({
+        connection_id: connectionId,
+        agent_type: 'codex', device, delivery,
+        name: result.name, team: result.team,
+      })
+    } catch {
+      return { ok: false, error: 'connection_bind_failed' }
+    }
+    return envelope
   }
 
   async function completeCodexReconnect(
@@ -2548,6 +2637,7 @@ export function registerBusinessTools(
   }
 
   async function executeReconnect(args: {
+    launch_id?: string
     identity_key?: string
     ui_pid?: number
     thread_id?: string
@@ -2558,6 +2648,12 @@ export function registerBusinessTools(
     agent_type?: 'opencode' | 'kimi-code'
     runtime_generation?: number
   }): Promise<unknown> {
+    if (args.launch_id !== undefined) {
+      return executeCodexLaunchReconnect({
+        launch_id: args.launch_id, thread_id: args.thread_id!,
+        ws_url: args.ws_url, auth_token_ref: args.auth_token_ref,
+      })
+    }
     // The key wins over any accompanying runtime lookup: after a restart the
     // new pid may already belong to an unrelated row.
     if (args.identity_key !== undefined) {

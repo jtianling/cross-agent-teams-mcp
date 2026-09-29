@@ -390,7 +390,8 @@ _xats-codex() {
     "$codex_bin" "$@" \
         --remote "$ws_url" \
         -C "$PWD" \
-        -c xats.agent_id="\"$xats_agent_id\""
+        -c xats.agent_id="\"$xats_agent_id\"" \
+        -c shell_environment_policy.set.XATS_CODEX_LAUNCH_ID="\"$xats_agent_id\""
 }
 
 free-xats-codex() { _xats-codex --dangerously-bypass-approvals-and-sandbox "$@"; }

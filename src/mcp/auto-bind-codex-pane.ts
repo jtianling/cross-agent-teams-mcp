@@ -67,6 +67,7 @@ export interface AutoBindCodexPaneInput {
    *  stale identity key, so a future targeting source with weaker provenance
    *  must not inherit that authority by accident. */
   targetPaneFromNonce?: boolean
+  requirePaneNonce?: boolean
   identityKeyAttach?: IdentityKeyAttachDeps
   onConsumed?: (pane_id: string) => void
   log?: (line: string) => void
@@ -360,6 +361,11 @@ export async function autoBindCodexPane(
     const now = deps.now ?? __testOverrides.now ?? (() => new Date())
     const nowIso = now().toISOString()
     input.repo.deleteExpired(nowIso)
+    if (input.requirePaneNonce && !input.targetPaneFromNonce) {
+      input.log?.(`auto-bind skip: caller=${input.callerAgentId} `
+        + 'reason=pane_nonce_required')
+      return false
+    }
     const all = input.repo.listUnexpired(nowIso)
     // Narrowing happens BEFORE evaluation, so an unrelated pane's row can
     // neither be probed nor counted.  That is the whole point: the failure this
@@ -635,6 +641,16 @@ function runClaimCommit(
   }
   consumedKey.value = consumed.identity_key
   applyConsumedKeyOrThrow(input, chosen, consumed.identity_key)
+  if (input.requirePaneNonce && input.targetPaneFromNonce
+    && input.targetPaneId === chosen.pane_id) {
+    input.repo.completeBinding({
+      paneId: chosen.pane_id,
+      launchId: consumed.xats_agent_id,
+      agentId: input.callerAgentId,
+      runtimePid: chosen.ui_pid,
+      registerGeneration: input.expectedRegisterGeneration,
+    })
+  }
   return 'bound_consumed'
 }
 

@@ -176,15 +176,16 @@ describe('codex seeding poke', () => {
       .map(call => String(call[0]))
   }
 
-  it('a single pending row is sent nothing, and the decision is logged', () => {
+  it('a single pending row receives its own exact binding challenge', async () => {
     seedRow(LEFT)
     const deps = makeDeps()
     evaluateCodexSeedingOnPreRegister(writer(LEFT), deps)
-    expect(__peekCodexSeedingSchedules()).toEqual([])
-    expect(deps.tmuxPoke).not.toHaveBeenCalled()
-    // A silent no-op is indistinguishable from a broken trigger.
+    expect(__peekCodexSeedingSchedules()).toEqual(['%10'])
+    await vi.advanceTimersByTimeAsync(10)
+    expect(pokeCalls(deps).map(call => call.pane_id)).toEqual(['%10'])
+    expect(hasDeliveredCodexRecoveryNonce('%10')).toBe(true)
     expect(deps.log).toHaveBeenCalledWith(
-      expect.stringContaining('outcome=no_ambiguity')
+      expect.stringContaining('outcome=scheduled seeded=%10')
     )
   })
 
@@ -210,10 +211,9 @@ describe('codex seeding poke', () => {
     seedRow(RIGHT)
     evaluateCodexSeedingOnPreRegister(writer(RIGHT), deps)
 
-    expect(__peekCodexSeedingSchedules()).toEqual([])
     await vi.advanceTimersByTimeAsync(10_000)
-    expect(deps.tmuxPoke).not.toHaveBeenCalled()
-    expect(logLines(deps).filter(l => l.includes('outcome=no_ambiguity')))
+    expect(pokeCalls(deps).map(call => call.pane_id)).toEqual(['%20'])
+    expect(logLines(deps).filter(l => l.includes('outcome=scheduled')))
       .toHaveLength(2)
   })
 

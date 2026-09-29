@@ -43,13 +43,20 @@ free-xats-codex() {
 
   exec codex --remote ws://127.0.0.1:8799 \
     -C "$PWD" \
-    -c xats.agent_id="\"$uuid\""
+    -c xats.agent_id="\"$uuid\"" \
+    -c shell_environment_policy.set.XATS_CODEX_LAUNCH_ID="\"$uuid\""
 }
 ```
 
 > `-c xats.agent_id="\"$uuid\""` 里外层双引号是 zsh 的, 内层 `\"` 最终让 codex 在 argv 里看到字面量 `xats.agent_id="<uuid>"` — daemon 的 auto-bind 正是按这个字面量来匹配 pane 的.
 
 ## 行为说明
+
+- **clear 后恢复**: shell 工具中的 `XATS_CODEX_LAUNCH_ID` 来自本次启动的会话级
+  配置, `/clear` 创建新线程时继续携带.  调用
+  `reconnect({launch_id: <XATS_CODEX_LAUNCH_ID>, thread_id: <CODEX_THREAD_ID>})`
+  恢复原身份.  不读取共享 app-server 的 `XATS_IDENTITY_KEY`, 不向 hooks 传递标识.
+  fork 和子代理线程不能使用继承来的标识恢复父身份.
 
 - **tmux 内启动**: 先发一条 pre-register 给 daemon (pane_id + UUID + 120s TTL), 再 `exec codex`.  codex agent 跑起来之后调用 `register_agent({client:"codex", ...})` 时, daemon 会用 pending pre-reg 自动解析 UI pid 并绑定 `tmux_pane_id`.
 - **非 tmux 启动 (SSH 纯终端 / CI 等)**: 打印 `[xats] pre-register skipped: not in tmux`, 然后 `exec codex`.  CLI 仍连接常驻的 8799 runtime, 不会看到 App 的 8800 session; 只是没有自动绑定 pane.

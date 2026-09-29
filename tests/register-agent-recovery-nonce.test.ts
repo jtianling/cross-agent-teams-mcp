@@ -6,7 +6,11 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { openDb } from '../src/storage/db.js'
 import { applySchema } from '../src/storage/schema.js'
+import { CodexPanePreRegRepo } from '../src/mcp/codex-pane-pre-register-repo.js'
+import { CodexBindingRepo } from '../src/mcp/codex-binding-repo.js'
+import { CodexBindingLookup } from '../src/mcp/codex-binding-lookup.js'
 import { __testOverrides as autoBindOverrides } from '../src/mcp/auto-bind-codex-pane.js'
+import * as carrierProbes from '../src/mcp/auto-bind-codex-pane.js'
 import {
   clearAllCodexRecoveryNonces,
   mintCodexRecoveryNonce,
@@ -103,8 +107,14 @@ async function parseTool(resp: unknown): Promise<Record<string, unknown>> {
 // ordinary shape after one restart fans out to two panes, and the shape that
 // makes the scan's "exactly one machine-wide candidate" rule fail closed.
 const PANES = [
-  { pane_id: '%10', tty: 'ttys001', uuid: 'U_LEFT', pid: 5010 },
-  { pane_id: '%20', tty: 'ttys002', uuid: 'U_RIGHT', pid: 5020 },
+  {
+    pane_id: '%10', tty: 'ttys001',
+    uuid: '00000000-0000-4000-8000-000000000010', pid: 5010,
+  },
+  {
+    pane_id: '%20', tty: 'ttys002',
+    uuid: '00000000-0000-4000-8000-000000000020', pid: 5020,
+  },
 ]
 
 function carrierLine(pid: number, uuid: string): string {
@@ -143,6 +153,7 @@ describe('register_agent selects its pre-reg row by recovery nonce', () => {
   })
 
   afterEach(() => {
+    vi.restoreAllMocks()
     cleanups.forEach(d => rmSync(d, { recursive: true, force: true }))
     cleanups.length = 0
     delete autoBindOverrides.listPanes
@@ -162,7 +173,8 @@ describe('register_agent selects its pre-reg row by recovery nonce', () => {
     const dbPath = join(dir, 'data.db')
     const logLines: string[] = []
     const { app, port, host } = await startServer({
-      dbPath, port: 0, mcpLog: line => { logLines.push(line) },
+      dbPath, port: 0, localDevice: 'local',
+      mcpLog: line => { logLines.push(line) },
     })
     const url = new URL(`http://${host}:${port}/mcp`)
 
@@ -240,19 +252,19 @@ describe('register_agent selects its pre-reg row by recovery nonce', () => {
     // known pane, so echoing it back says which row is whose.
     const { app, dbPath, url, logLines } = await startWithBothPanesPending()
 
-    const left = await registerCodex(url, {
-      name: 'agent-left',
-      thread_id: THREAD_A,
-      recovery_nonce: mintCodexRecoveryNonce('%10'),
-    })
-    expect(left.obj.agent_id).toBeDefined()
-
     const right = await registerCodex(url, {
       name: 'agent-right',
       thread_id: THREAD_B,
       recovery_nonce: mintCodexRecoveryNonce('%20'),
     })
     expect(right.obj.agent_id).toBeDefined()
+
+    const left = await registerCodex(url, {
+      name: 'agent-left',
+      thread_id: THREAD_A,
+      recovery_nonce: mintCodexRecoveryNonce('%10'),
+    })
+    expect(left.obj.agent_id).toBeDefined()
 
     expect(readRow(dbPath, 'agent-left')).toEqual({
       tmux_pane_id: '%10', runtime_ui_pid: 5010,
@@ -262,6 +274,35 @@ describe('register_agent selects its pre-reg row by recovery nonce', () => {
     })
     expect(readPreRegPanes(dbPath)).toEqual([])
     expect(logLines.filter(l => l.includes('candidate_count'))).toEqual([])
+    const db = openDb(dbPath)
+    const lookup = new CodexBindingLookup(new CodexBindingRepo(db), 'local', {
+      listPanes: autoBindOverrides.listPanes,
+      ttyProcesses: autoBindOverrides.ttyProcesses,
+    })
+    vi.spyOn(carrierProbes, 'defaultListPanes')
+      .mockImplementation(autoBindOverrides.listPanes!)
+    vi.spyOn(carrierProbes, 'defaultTtyProcesses')
+      .mockImplementation(autoBindOverrides.ttyProcesses!)
+    for (const [i, pane] of PANES.entries()) {
+      expect(await lookup.lookup({
+        protocol_version: 1, pane_id: pane.pane_id, launch_id: pane.uuid,
+      })).toEqual({
+        ok: true, protocol_version: 1, pane_id: pane.pane_id,
+        launch_id: pane.uuid, thread_id: i === 0 ? THREAD_A : THREAD_B,
+      })
+      const response = await fetch(new URL('/api/codex/binding/lookup', url), {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          protocol_version: 1, pane_id: pane.pane_id, launch_id: pane.uuid,
+        }),
+      })
+      expect(response.status).toBe(200)
+      expect(await response.json()).toEqual({
+        ok: true, protocol_version: 1, pane_id: pane.pane_id,
+        launch_id: pane.uuid, thread_id: i === 0 ? THREAD_A : THREAD_B,
+      })
+    }
+    db.close()
 
     await left.close()
     await right.close()
@@ -292,9 +333,7 @@ describe('register_agent selects its pre-reg row by recovery nonce', () => {
     await app.close()
   })
 
-  it('no nonce keeps today behaviour exactly: candidate_count, nothing consumed', async () => {
-    // The fallback must stay byte-for-byte what it is now, so that a model
-    // which ignores the instruction is no worse off than before.
+  it('no nonce requires exact pane proof and consumes nothing', async () => {
     const { app, dbPath, url, logLines } = await startWithBothPanesPending()
 
     const left = await registerCodex(url, { name: 'agent-left', thread_id: THREAD_A })
@@ -305,7 +344,7 @@ describe('register_agent selects its pre-reg row by recovery nonce', () => {
     })
     expect(readPreRegPanes(dbPath)).toEqual(['%10', '%20'])
     expect(logLines).toContainEqual(expect.stringContaining(
-      'reason=candidate_count'
+      'reason=pane_nonce_required'
     ))
 
     await left.close()
@@ -326,10 +365,74 @@ describe('register_agent selects its pre-reg row by recovery nonce', () => {
 
     expect(readPreRegPanes(dbPath)).toEqual(['%10', '%20'])
     expect(logLines).toContainEqual(expect.stringContaining(
-      'reason=candidate_count'
+      'reason=pane_nonce_required'
     ))
 
     await left.close()
+    await app.close()
+  })
+
+  it('a new nonce completes a same-thread registration on its actual new pane',
+    async () => {
+      const { app, dbPath, url } = await startWithBothPanesPending()
+      const first = await registerCodex(url, {
+        name: 'agent-left', thread_id: THREAD_A,
+        recovery_nonce: mintCodexRecoveryNonce('%10'),
+      })
+      const again = await registerCodex(url, {
+        name: 'agent-left', thread_id: THREAD_A,
+        recovery_nonce: mintCodexRecoveryNonce('%20'),
+      })
+      expect(readRow(dbPath, 'agent-left')).toEqual({
+        tmux_pane_id: '%20', runtime_ui_pid: 5020,
+      })
+      const db = openDb(dbPath)
+      expect(new CodexBindingRepo(db).read('%20')).toMatchObject({
+        thread_id: THREAD_A, launch_id: PANES[1].uuid,
+      })
+      db.close()
+      await first.close()
+      await again.close()
+      await app.close()
+    })
+
+  it('re-arms a fresh challenge after transient bind failure, then completes',
+    async () => {
+      const { app, dbPath, url } = await startWithBothPanesPending()
+      bindRuntimeIdentityMock.mockResolvedValueOnce({ error: 'pid_has_no_tty' })
+      const initial = await registerCodex(url, {
+        name: 'agent-left', thread_id: THREAD_A,
+        recovery_nonce: mintCodexRecoveryNonce('%10'),
+      })
+      expect(evaluateSeedingMock).toHaveBeenCalledTimes(3)
+      expect(evaluateSeedingMock.mock.calls[2][0]).toMatchObject({ pane_id: '%10' })
+      expect(readPreRegPanes(dbPath)).toContain('%10')
+      const retry = await registerCodex(url, {
+        name: 'agent-left', thread_id: THREAD_A,
+        recovery_nonce: mintCodexRecoveryNonce('%10'),
+      })
+      expect(readRow(dbPath, 'agent-left').tmux_pane_id).toBe('%10')
+      await initial.close()
+      await retry.close()
+      await app.close()
+    })
+
+  it('does not re-arm a failed old generation after a new launch arrives', async () => {
+    const { app, dbPath, url } = await startWithBothPanesPending()
+    bindRuntimeIdentityMock.mockImplementationOnce(async () => {
+      const db = openDb(dbPath)
+      new CodexPanePreRegRepo(db).upsert({
+        pane_id: '%10', xats_agent_id: 'NEXT', expires_at: '2999-01-01T00:00:00Z',
+      })
+      db.close()
+      return { error: 'pid_has_no_tty' }
+    })
+    const failed = await registerCodex(url, {
+      name: 'agent-left', thread_id: THREAD_A,
+      recovery_nonce: mintCodexRecoveryNonce('%10'),
+    })
+    expect(evaluateSeedingMock).toHaveBeenCalledTimes(2)
+    await failed.close()
     await app.close()
   })
 })

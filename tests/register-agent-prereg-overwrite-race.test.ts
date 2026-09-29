@@ -6,6 +6,12 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { openDb } from '../src/storage/db.js'
 import { applySchema } from '../src/storage/schema.js'
+import { mintCodexRecoveryNonce } from '../src/mcp/codex-recovery-nonce.js'
+
+vi.mock('../src/mcp/codex-seeding-poke.js', async importOriginal => ({
+  ...await importOriginal<typeof import('../src/mcp/codex-seeding-poke.js')>(),
+  evaluateCodexSeedingOnPreRegister: vi.fn(),
+}))
 import { __testOverrides as autoBindOverrides } from '../src/mcp/auto-bind-codex-pane.js'
 
 const detectTmuxPaneMock = vi.fn()
@@ -184,6 +190,7 @@ describe('register_agent pre-reg overwrite race (stale bind)', () => {
         name: 'Y',
         team: 'aoe',
         thread_id: VALID_THREAD_ID,
+        recovery_nonce: mintCodexRecoveryNonce('%1972'),
       },
     })
     const obj = await parseTool(resp)

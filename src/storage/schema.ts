@@ -66,6 +66,17 @@ const DDL = [
     PRIMARY KEY (message_id, agent_id)
   )`,
   `CREATE INDEX IF NOT EXISTS idx_message_delivery_status_message ON message_delivery_status(message_id)`,
+  `CREATE TABLE IF NOT EXISTS codex_pane_bindings (
+    pane_id TEXT PRIMARY KEY,
+    launch_id TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    agent_id TEXT,
+    thread_id TEXT,
+    runtime_ui_pid INTEGER,
+    runtime_tty TEXT
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_codex_pane_bindings_launch
+    ON codex_pane_bindings(launch_id)`,
   `CREATE TABLE IF NOT EXISTS codex_pane_pre_registrations (
     pane_id TEXT PRIMARY KEY,
     xats_agent_id TEXT NOT NULL,

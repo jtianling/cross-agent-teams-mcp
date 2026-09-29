@@ -48,11 +48,6 @@ import { describeRedactedError } from './log-redact.js'
 
 export const SEEDING_PROBE_INTERVAL_MS = 5_000
 
-/** Two panes announced at once is the condition under which the scan's
- *  unique-candidate rule refuses every caller.  Below it the existing rule
- *  already selects correctly and a paste would buy nothing. */
-const AMBIGUITY_THRESHOLD = 2
-
 export interface CodexSeedingDeps {
   repo: CodexPanePreRegRepo
   listPanes?: () => Promise<PaneTtyEntry[]>
@@ -108,9 +103,9 @@ export function buildCodexSeedingPokeContent(args: { nonce: string }): string {
     'This token is only for pane binding, not a request to register or reconnect.',
     'Do not invent a name or team. If no explicit registration identity is known,',
     'retain this token and ask the user for the missing identity before registering.',
-    'Two or more codex panes are pre-registering at the same time, so',
-    'cross-agent-teams (xats) cannot tell from its own side which pane is',
-    'which. When you call the cross-agent-teams MCP tool register_agent, add',
+    'Cross-agent-teams (xats) needs to associate this exact pane with your',
+    'Codex thread. When you call the cross-agent-teams MCP tool',
+    'register_agent, add',
     `recovery_nonce: "${args.nonce}" to that call (copy the value exactly).`,
     'This daemon wrote the token into THIS pane only, so quoting it back is',
     'what tells the daemon which pane you are. It supplies nothing else about',
@@ -182,11 +177,7 @@ export function __peekCodexSeedingSchedules(): string[] {
  * Called after every accepted pre_register_codex_pane, AFTER the recovery
  * evaluation so a pane it just scheduled already holds its token here.
  *
- * The trigger is two or more unexpired pending rows, evaluated on the write
- * because that is the moment the second row becomes observable.  When it
- * fires, EVERY pending pane without a live token is scheduled, not only the
- * pane that just wrote: the earlier pane's codex may already be up and about
- * to register.
+ * Every pending launch needs its own pane association proof.
  */
 export function evaluateCodexSeedingOnPreRegister(
   row: AcceptedPreRegRow,
@@ -198,16 +189,6 @@ export function evaluateCodexSeedingOnPreRegister(
     now: deps.now,
   })
   const pending = deps.repo.listUnexpired(nowIso(deps))
-  if (pending.length < AMBIGUITY_THRESHOLD) {
-    // Logged even though nothing happens: a silent no-op is indistinguishable
-    // from a broken trigger, which is how the gap this closes survived
-    // unnoticed in the first place.
-    slog(deps,
-      `codex-seeding trigger: writer=${row.pane_id} pending=${pending.length} ` +
-      `outcome=no_ambiguity`
-    )
-    return
-  }
   const seeded: string[] = []
   const held: string[] = []
   for (const pendingRow of pending) {

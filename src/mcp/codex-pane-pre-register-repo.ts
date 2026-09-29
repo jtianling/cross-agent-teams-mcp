@@ -1,4 +1,5 @@
 import type Database from 'better-sqlite3'
+import { CodexBindingRepo } from './codex-binding-repo.js'
 
 export interface CodexPanePreRegRow {
   pane_id: string
@@ -18,6 +19,19 @@ export class CodexPanePreRegRepo {
   constructor(private readonly db: Database.Database) {}
 
   upsert(input: UpsertInput): void {
+    this.db.transaction(() => {
+      this.writePreRegistration(input)
+      new CodexBindingRepo(this.db).begin(
+        input.pane_id, input.xats_agent_id, input.expires_at
+      )
+    })()
+  }
+
+  completeBinding(args: Parameters<CodexBindingRepo['complete']>[0]): void {
+    new CodexBindingRepo(this.db).complete(args)
+  }
+
+  private writePreRegistration(input: UpsertInput): void {
     this.db
       .prepare(
         `INSERT INTO codex_pane_pre_registrations

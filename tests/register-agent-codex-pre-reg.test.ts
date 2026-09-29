@@ -6,6 +6,12 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { openDb } from '../src/storage/db.js'
 import { applySchema } from '../src/storage/schema.js'
+import { mintCodexRecoveryNonce } from '../src/mcp/codex-recovery-nonce.js'
+
+vi.mock('../src/mcp/codex-seeding-poke.js', async importOriginal => ({
+  ...await importOriginal<typeof import('../src/mcp/codex-seeding-poke.js')>(),
+  evaluateCodexSeedingOnPreRegister: vi.fn(),
+}))
 import { __testOverrides as autoBindOverrides } from '../src/mcp/auto-bind-codex-pane.js'
 
 const detectTmuxPaneMock = vi.fn()
@@ -125,10 +131,22 @@ describe('register_agent codex pre-reg auto-bind', () => {
     })
     expect(await parseTool(preReg)).toMatchObject({ ok: true })
 
-    // Then codex agent registers without ui_pid
+    // The first call cannot consume the pane without its challenge.
+    await c.callTool({
+      name: 'register_agent',
+      arguments: {
+        agent_type: 'codex', name: 'new-gpt', thread_id: VALID_THREAD_ID,
+      },
+    })
+    expect(bindRuntimeIdentityMock).not.toHaveBeenCalled()
+
+    // Then codex agent repeats registration with the pane challenge.
     const resp = await c.callTool({
       name: 'register_agent',
-      arguments: { agent_type: 'codex', model: 'gpt-5', role: 'worker', name: 'new-gpt', thread_id: VALID_THREAD_ID },
+      arguments: {
+        agent_type: 'codex', model: 'gpt-5', role: 'worker', name: 'new-gpt',
+        thread_id: VALID_THREAD_ID, recovery_nonce: mintCodexRecoveryNonce('%1972'),
+      },
     })
     const obj = await parseTool(resp)
 
@@ -228,11 +246,15 @@ describe('register_agent codex pre-reg auto-bind', () => {
 
     const resp = await c.callTool({
       name: 'register_agent',
-      arguments: { agent_type: 'codex', model: 'gpt-5', role: 'worker', name: 'new-gpt', thread_id: VALID_THREAD_ID },
+      arguments: {
+        agent_type: 'codex', model: 'gpt-5', role: 'worker', name: 'new-gpt',
+        thread_id: VALID_THREAD_ID, recovery_nonce: mintCodexRecoveryNonce('%1972'),
+      },
     })
     const obj = await parseTool(resp)
 
     expect(obj.agent_id).toBeDefined()
+    expect(bindRuntimeIdentityMock).toHaveBeenCalled()
     // codex-appserver delivery is bound natively; no tmux fallback hint expected.
     expect(obj.hint).toBeUndefined()
 

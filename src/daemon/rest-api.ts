@@ -12,6 +12,11 @@ import { SendMessageService, type SendInput } from '../mcp/send-message.js'
 import { GetInboxService } from '../mcp/get-inbox.js'
 import { createAutoPokeImpl } from '../mcp/tools.js'
 import { listAgentsForTeam } from '../mcp/list-agents.js'
+import { CodexBindingRepo } from '../mcp/codex-binding-repo.js'
+import {
+  CodexBindingLookup,
+  codexBindingLookupSchema,
+} from '../mcp/codex-binding-lookup.js'
 import { removeAgentRow } from '../mcp/unregister-self.js'
 import { isStorageError, wrapStorage } from './errors.js'
 import type { ChannelWakeFanout } from './channel-wake-fanout.js'
@@ -239,6 +244,23 @@ async function runtimeRouteErrorHandler(
   await sendRuntimeFailure(reply, error)
 }
 
+async function handleCodexBindingLookup(
+  service: CodexBindingLookup,
+  req: FastifyRequest,
+  reply: FastifyReply
+): Promise<void> {
+  const parsed = codexBindingLookupSchema.safeParse(req.body)
+  if (!parsed.success) {
+    await sendInvalidRuntimeRequest(reply, 'Invalid Codex binding lookup')
+    return
+  }
+  try {
+    await reply.send(await service.lookup(parsed.data))
+  } catch (error) {
+    await sendRuntimeFailure(reply, error)
+  }
+}
+
 async function handleRuntimeReserve(
   ctx: RestCtx,
   req: FastifyRequest,
@@ -334,6 +356,14 @@ export function mountRestApi(
   app.post('/api/send', (req, reply) => handleSend(ctx, req, reply))
   app.get('/api/inbox', (req, reply) => handleInbox(ctx, req, reply))
   app.get('/api/agents', (req, reply) => handleAgents(ctx, req, reply))
+  const codexBindingLookup = new CodexBindingLookup(
+    new CodexBindingRepo(db), localDevice
+  )
+  app.post(
+    '/api/codex/binding/lookup',
+    { errorHandler: runtimeRouteErrorHandler },
+    (req, reply) => handleCodexBindingLookup(codexBindingLookup, req, reply)
+  )
   app.delete('/api/agents/:agent_id', (req, reply) => handleDeleteAgent(ctx, req, reply))
   app.post(
     '/api/runtime/opencode/reserve',

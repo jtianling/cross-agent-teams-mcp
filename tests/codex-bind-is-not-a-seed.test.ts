@@ -6,6 +6,10 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { openDb } from '../src/storage/db.js'
 import { applySchema } from '../src/storage/schema.js'
+
+vi.mock('../src/mcp/codex-carrier-detect.js', () => ({
+  detectCodexCarrier: vi.fn(async () => undefined),
+}))
 import { __testOverrides as autoBindOverrides } from '../src/mcp/auto-bind-codex-pane.js'
 import {
   __peekCodexRecoverySchedules,
@@ -152,7 +156,7 @@ describe('a runtime bind is not an identity seed', () => {
 
     // The restart: the launcher announces the same pane with a key, and the
     // daemon finds no identity holding it, so no recovery round exists to
-    // schedule.  One pending row is also below the seeding trigger.
+    // schedule. The next launch must obtain a seeding challenge instead.
     const launcherT = new StreamableHTTPClientTransport(url)
     const launcher = new Client({ name: 'launcher', version: '0.0.0' })
     await launcher.connect(launcherT)
@@ -164,7 +168,7 @@ describe('a runtime bind is not an identity seed', () => {
     })
     expect(await parseTool(preReg)).toMatchObject({ ok: true })
     expect(__peekCodexRecoverySchedules()).toEqual([])
-    expect(__peekCodexSeedingSchedules()).toEqual([])
+    expect(__peekCodexSeedingSchedules()).toEqual([PANE])
 
     await launcherT.close()
     await launcher.close()

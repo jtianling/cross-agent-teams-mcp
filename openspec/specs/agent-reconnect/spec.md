@@ -91,7 +91,7 @@ When more than one `device='local'` agents row matches `runtime_ui_pid = ui_pid`
 
 The `reconnect` tool's MCP description SHALL instruct the agent to invoke it when the user asks to reconnect or re-register to xats — covering at least the phrases "reconnect xats", "re-register xats", "重连 xats", and "重新注册 xats" — passing the Claude UI process id (`$PPID`) as `ui_pid`. The description SHALL ALSO route automatic re-establishment by a three-way branch, evaluated in order:
 
-- **First**, when an `XATS_IDENTITY_KEY` is available in the environment, the description SHALL guide `reconnect({identity_key, ui_pid: $PPID})` (or `{identity_key, thread_id}` for codex) *before* considering the other two branches, and SHALL state that on a `need_register` result the agent asks the user for `(team, name)` as usual and passes the same `identity_key` on that `register_agent` call.  This branch MUST come first because after a restart the agent both holds a key and does not remember its `(team, name)`, so the two later branches would otherwise capture the case and fail.
+- **First**, 非 Codex 调用方持有本会话的 `XATS_IDENTITY_KEY` 时, 说明 SHALL 优先指引 `reconnect({identity_key, ui_pid: $PPID})`.  返回 `need_register` 时询问 `(team, name)`, 后续注册传同一个 key.  Codex MUST NOT 读取共享 app-server 的 identity key, SHALL 优先使用会话级 `XATS_CODEX_LAUNCH_ID` 与当前 `CODEX_THREAD_ID` 调用 launch 恢复分支.
 - When there is no identity key and the agent does NOT remember its `(team, name)` (for example after a context clear, where `$PPID` is unchanged), the description SHALL guide `reconnect({ ui_pid: $PPID })` as the path to recover identity by process id and rebind the new `channel_session_id` in one step, preferred over the `bind_channel`→`register_agent` fallback.
 - When there is no identity key and the agent DOES remember its `(team, name)` (for example after closing Claude Code and resuming the conversation, where `$PPID` has changed but the context survived), the description SHALL guide `register_agent` with the remembered `(team, name)` and the current `$PPID` instead of `reconnect` — because `reconnect` reverse-looks-up the changed `$PPID`, finds no match, and returns `need_register`.
 
@@ -167,6 +167,8 @@ On zero matching rows, reconnect SHALL return `need_register`. On success it SHA
 
 ### Requirement: reconnect recovers identity by identity_key
 
+Codex 的 identity-key 参数组合保留兼容性, 工具说明 MUST NOT 要求 Codex 从共享 app-server 环境获取该值.  `/clear` 新建线程, 不保证 `CODEX_THREAD_ID` 保持不变.
+
 `reconnect` SHALL accept an optional `identity_key` and, when it is supplied, resolve the prior `(team, name)` by reverse-looking-up the agents table on `identity_key`.  The lookup MUST be constrained to the daemon's configured local device label and MUST exclude `__channel_proxy__` rows, exactly as the three existing lookups are.
 
 Unlike the process-scoped lookups, this key survives a pane restart.  That is its entire purpose: after a restart the Claude UI pid is different, the codex thread id is different, and the agent no longer remembers its own `(team, name)`, so no existing lookup can recover the identity.
@@ -240,3 +242,43 @@ When `identity_key` is present it SHALL take precedence for identity resolution:
 - **WHEN** a caller invokes `reconnect({ui_pid})`, `reconnect({thread_id})`, or `reconnect({base_url, session_id})` with no `identity_key`
 - **THEN** the behaviour is identical to before this change, including the exactly-one validation among those three
 
+### Requirement: Codex clear 通过 launch 标识恢复身份
+
+系统 SHALL 接受 `reconnect({launch_id, thread_id})`.  两个字段 MUST 为 UUID,
+`launch_id` 不得与 `identity_key`, `ui_pid` 或其它 runtime 分支混用.  启动器
+SHALL 复用实际 argv 中的 launch UUID, 通过会话级
+`shell_environment_policy.set.XATS_CODEX_LAUNCH_ID` 传给 shell 工具.
+
+该分支 SHALL 仅允许本机连接, 使用唯一的 launch 完成快照反查本机 Codex 身份.
+系统 MUST 复核 pane, tty, 前台 carrier UUID 和 pid, 不得按 cwd 或最近活跃时间猜测.
+未知, 未绑定, 重复或失效的 launch SHALL 返回明确拒绝, 不写入任何注册行.
+
+系统 SHALL 使用已登记 endpoint 和鉴权引用读取目标线程元数据, 验证返回的 id.
+父线程或 fork 来源非空, 来源不是 CLI/App 主会话, 或元数据不足时 MUST 拒绝恢复.
+调用方不得借此覆盖已有 endpoint 或鉴权引用, 不得抢占其它身份已登记的线程.
+
+异步检查后 SHALL 再次复核 carrier 和快照.  agent 的注册代际及身份信息, launch
+快照和 delivery 必须与检查前一致.  更新 agent delivery 与完成快照 MUST 在同一
+事务中完成, 保留 `agent_id`, 名字, team, 游标和 pane 绑定.  持久化成功后 SHALL
+复用现有连接接管和收件箱绑定路径, 连接绑定失败必须显式返回错误.
+
+#### Scenario: clear 后恢复原身份
+
+- **GIVEN** launch L 已精确绑定身份 A 与线程 T1
+- **WHEN** 同一主会话 clear 后使用 L 和新线程 T2 调用 reconnect
+- **THEN** 系统 SHALL 返回 A, 同步保存两处 T2, 保留收件游标和 pane
+
+#### Scenario: fork 或子代理继承了 launch 环境
+
+- **WHEN** 目标线程有父线程或 fork 来源, 即使传入有效 L
+- **THEN** 系统 MUST 拒绝恢复父身份, 不修改 delivery 或绑定
+
+#### Scenario: 检查期间发生并发变更
+
+- **WHEN** 注册代际, 身份或 launch 在异步检查期间发生变化
+- **THEN** 系统 MUST 拒绝旧检查结果, 不覆盖新状态
+
+#### Scenario: 绑定快照写入失败
+
+- **WHEN** agent 更新后绑定快照写入失败
+- **THEN** 同一事务 MUST 回滚 agent 更新, 不产生两个线程值不一致的状态

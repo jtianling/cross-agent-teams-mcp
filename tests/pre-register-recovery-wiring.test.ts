@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -6,6 +6,11 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { openDb } from '../src/storage/db.js'
 import { applySchema } from '../src/storage/schema.js'
+
+vi.mock('../src/mcp/codex-seeding-poke.js', async importOriginal => ({
+  ...await importOriginal<typeof import('../src/mcp/codex-seeding-poke.js')>(),
+  evaluateCodexSeedingOnPreRegister: vi.fn(),
+}))
 import {
   __peekCodexRecoverySchedules,
   clearAllCodexRecoverySchedules,
