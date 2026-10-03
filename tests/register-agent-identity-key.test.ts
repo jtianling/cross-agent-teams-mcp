@@ -8,8 +8,10 @@ import { AgentsRepo, type IdentityKeyMatch } from '../src/storage/agents-repo.js
 import {
   RegisterAgentService,
   planIdentityKeyBinding,
+  planLiveRuntimeGuard,
 } from '../src/mcp/register-agent.js'
-import { isAlive } from '../src/daemon/pid.js'
+import { spawn } from 'node:child_process'
+import { isAlive, isLiveClaudeProcess } from '../src/daemon/pid.js'
 
 const tmp = () => mkdtempSync(join(tmpdir(), 'atm-reg-identity-key-'))
 
@@ -276,6 +278,133 @@ describe('register_agent identity_key four-branch binding', () => {
     expect('agent_id' in res).toBe(true)
     expect(repo.getById((res as { agent_id: string }).agent_id)?.identity_key)
       .toBe('K')
+    db.close()
+  })
+})
+
+describe('isLiveClaudeProcess', () => {
+  it('rejects a live pid that is not running claude', () => {
+    expect(isLiveClaudeProcess(process.pid)).toBe(false)
+  })
+
+  it('rejects a dead pid', () => {
+    expect(isLiveClaudeProcess(DEAD_PID)).toBe(false)
+  })
+
+  it('accepts a live pid whose command is claude', async () => {
+    const child = spawn('sleep', ['30'], { argv0: 'claude' })
+    try {
+      await new Promise(r => child.once('spawn', r))
+      expect(isLiveClaudeProcess(child.pid!)).toBe(true)
+    } finally {
+      child.kill()
+    }
+  })
+})
+
+describe('planLiveRuntimeGuard', () => {
+  const target = (runtime_ui_pid: number | null) =>
+    ({ team: 'monkeys', name: 'trials', runtime_ui_pid })
+  const isProcessAlive = (pid: number) => pid === process.pid
+
+  it('allows a caller that brings no ui_pid', () => {
+    expect(planLiveRuntimeGuard({ target: target(process.pid), isProcessAlive }))
+      .toBeUndefined()
+  })
+
+  it('allows the holder itself', () => {
+    expect(planLiveRuntimeGuard({
+      target: target(process.pid),
+      ui_pid: process.pid,
+      isProcessAlive,
+    })).toBeUndefined()
+  })
+
+  it('allows replacing a holder whose process is gone', () => {
+    expect(planLiveRuntimeGuard({
+      target: target(DEAD_PID),
+      ui_pid: 4242,
+      isProcessAlive,
+    }))
+      .toBeUndefined()
+  })
+
+  it('allows a row without a recorded pid', () => {
+    expect(planLiveRuntimeGuard({
+      target: target(null),
+      ui_pid: 4242,
+      isProcessAlive,
+    }))
+      .toBeUndefined()
+  })
+
+  it('rejects a second live process presenting the identity', () => {
+    expect(planLiveRuntimeGuard({
+      target: target(process.pid),
+      ui_pid: 4242,
+      isProcessAlive,
+    })).toMatchObject({
+      error: 'identity_in_use',
+      detail: { team: 'monkeys', name: 'trials', ui_pid: process.pid },
+    })
+  })
+  it('treats a recycled pid that no longer runs claude as released', () => {
+    expect(planLiveRuntimeGuard({ target: target(process.pid), ui_pid: 4242 }))
+      .toBeUndefined()
+  })
+})
+
+describe('register_agent rejects a forked session taking over a live identity', () => {
+  const cleanups: string[] = []
+  afterEach(() => {
+    cleanups.forEach(d => rmSync(d, { recursive: true, force: true }))
+    cleanups.length = 0
+  })
+
+  function setup() {
+    const dir = tmp(); cleanups.push(dir)
+    const db = openDb(join(dir, 'data.db'))
+    applySchema(db)
+    const closed: string[] = []
+    const svc = new RegisterAgentService(db, {
+      closeSessionByConnectionId: (id) => { closed.push(id); return true },
+      isProcessAlive: (pid) => pid === process.pid,
+    })
+    return { db, repo: new AgentsRepo(db), svc, closed }
+  }
+
+  function register(
+    svc: RegisterAgentService,
+    connection_id: string,
+    runtime_ui_pid: number
+  ) {
+    return svc.register({
+      connection_id,
+      agent_type: 'claude-code',
+      name: 'trials',
+      team: 'monkeys',
+      runtime_ui_pid,
+    })
+  }
+
+  it('keeps the original pane bound when a fork reconnects', () => {
+    const { db, repo, svc, closed } = setup()
+    const first = register(svc, 'conn-pane', process.pid)
+    const agentId = (first as { agent_id: string }).agent_id
+    const fork = register(svc, 'conn-fork', 4242)
+    expect(fork).toMatchObject({ error: 'identity_in_use' })
+    expect(closed).toEqual([])
+    expect(repo.getById(agentId)?.runtime_ui_pid).toBe(process.pid)
+    db.close()
+  })
+
+  it('lets a restarted pane reclaim the identity once the old pid is gone', () => {
+    const { db, repo, svc } = setup()
+    const first = register(svc, 'conn-old', DEAD_PID)
+    const agentId = (first as { agent_id: string }).agent_id
+    const again = register(svc, 'conn-new', 4242)
+    expect((again as { agent_id: string }).agent_id).toBe(agentId)
+    expect(repo.getById(agentId)?.runtime_ui_pid).toBe(4242)
     db.close()
   })
 })

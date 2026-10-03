@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 
@@ -12,6 +13,28 @@ export function isAlive(pid: number): boolean {
     if (err.code === 'EPERM') return true
     return false
   }
+}
+
+const PS_TIMEOUT_MS = 3_000
+const CLAUDE_COMMAND_RE = /(^|[\s/])claude([\s/]|$)/i
+
+/**
+ * A recorded Claude ui_pid only still names its agent while that pid runs a
+ * claude binary; once the pid is recycled by an unrelated process, the
+ * identity it held must count as released.
+ */
+export function isLiveClaudeProcess(pid: number): boolean {
+  if (!isAlive(pid)) return false
+  let command: string
+  try {
+    command = execFileSync('ps', ['-p', String(pid), '-o', 'command='], {
+      encoding: 'utf8',
+      timeout: PS_TIMEOUT_MS,
+    }).trim()
+  } catch {
+    return false
+  }
+  return CLAUDE_COMMAND_RE.test(command)
 }
 
 export function acquirePidFile(path: string, port: number): AcquireResult {

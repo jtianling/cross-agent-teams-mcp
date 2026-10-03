@@ -1,5 +1,6 @@
 import {
   RegisterAgentService,
+  type IdentityInUse,
   type IdentityKeyConflict,
 } from './register-agent.js'
 import type { IdentityRowSnapshot } from '../storage/agents-repo.js'
@@ -77,6 +78,7 @@ export type RegisterCodexSelfResult =
       detail: { env: 'CROSS_AGENT_TEAMS_CODEX_WS_URLS'; reason: string }
     }
   | IdentityKeyConflict
+  | IdentityInUse
 
 export interface RegisterCodexSelfDeps {
   env?: NodeJS.ProcessEnv

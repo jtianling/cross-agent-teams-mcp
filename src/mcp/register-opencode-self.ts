@@ -1,4 +1,5 @@
 import type {
+  IdentityInUse,
   IdentityKeyConflict,
   RegisterAgentService,
 } from './register-agent.js'
@@ -50,6 +51,7 @@ export type RegisterOpencodeSelfResult =
   | { error: 'session_not_found'; detail: { base_url: string; session_id: string } }
   | { error: 'missing_auth_token'; detail: { ref: string } }
   | IdentityKeyConflict
+  | IdentityInUse
 
 export type ResolveOpencodeSessionResult =
   | { session_id: string }
