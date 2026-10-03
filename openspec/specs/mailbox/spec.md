@@ -575,14 +575,14 @@ The prompt format MUST be:
 
 Where `sender_identifier` is:
 
-- `{display_name} ({agent_id})` when the sender agent has a non-empty `display_name` in the `agents` table
+- `{display_name}@{sender_team} ({agent_id})` when the sender agent has a non-empty `display_name` in the `agents` table; `@{sender_team}` is omitted only when the row carries no team
 - `{agent_id[:8]}` when `display_name` is `null`, empty, or the agent row cannot be resolved (defensive fallback)
 
 And `{target_name}@{target_team}` names the agent row the poke was addressed to, so that a recipient which receives a hint but finds an empty `get_inbox` can identify in one step whether the wake-up was meant for it.  When the target row cannot be resolved, the target segment together with its ` → ` separator SHALL be omitted rather than rendered with placeholders.
 
 `name` and `team` carry no upper length bound, so the length cap below is enforced at render time by the same omission: when including the target segment would push the prompt past the cap, the whole segment and its ` → ` separator SHALL be dropped rather than truncated to a partial label.
 
-For cross-team `send_message`, the sender_identifier is looked up by `from_agent_id` regardless of team — no team prefix is added to the sender segment (recipient can inspect `from_team` via `get_inbox`).
+The sender_identifier is looked up by `from_agent_id` regardless of team and always names the sender's own team, because agent names such as `tester` repeat across teams and a bare name lets a recipient reply to the wrong one.  The full `agent_id` stays in the sender segment for `send_message_by_id`.
 
 The total prompt length MUST NOT exceed 200 characters.  Neither the sender's `display_name` nor the target's `name` / `team` carries a schema length cap, so the hint SHALL shed content to stay within the cap in this order: first the ` → {target_name}@{target_team}` segment, then the sender's `display_name` in favour of `{agent_id[:8]}`.  Dropping only the target segment does not bound the result and MUST NOT be treated as enforcing the cap.
 
@@ -601,14 +601,14 @@ The rule does NOT constrain the `poke` MCP tool itself when callers invoke it di
 - **AND** B's pane is idle, `POKE_QUIET_MS=100`
 - **WHEN** A calls `send_message_by_id({to_agent_id: B, body: "please investigate bug #42 in the auth module"})` with default auto_poke
 - **THEN** the message is persisted to B's mailbox with the full body
-- **AND** the poke prompt injected into B's pane equals `"新邮件 from lead-opus (<A's agent_id>) → worker-kimi@core, 请调 get_inbox 查看"`
+- **AND** the poke prompt injected into B's pane equals `"新邮件 from lead-opus@core (<A's agent_id>) → worker-kimi@core, 请调 get_inbox 查看"`
 - **AND** the injected prompt does NOT contain `"bug #42"` or any other substring of the body
 
 #### Scenario: Cross-team send_message auto-poke names the target's own team
 
 - **GIVEN** agent A (display_name="lead-alpha") in team `alpha`, agent with `name='bob'` in team `beta` with idle pane
 - **WHEN** A calls `send_message({to_agent_name: 'bob', to_team: 'beta', body: "secret: token=xyz"})` with default auto_poke
-- **THEN** bob's pane receives exactly `"新邮件 from lead-alpha (<A's agent_id>) → bob@beta, 请调 get_inbox 查看"`
+- **THEN** bob's pane receives exactly `"新邮件 from lead-alpha@alpha (<A's agent_id>) → bob@beta, 请调 get_inbox 查看"`
 - **AND** the prompt does NOT contain `"token"` or any body substring
 
 #### Scenario: Hint identifies the intended target when the pane host differs
@@ -623,7 +623,7 @@ The rule does NOT constrain the `poke` MCP tool itself when callers invoke it di
 - **GIVEN** sender A (display_name="captain"), recipients B (`name='b'`) and C (`name='c'`) in team `svc` with role `backend`, both with `tmux_pane_id` and idle panes, `POKE_QUIET_MS=100`
 - **WHEN** A calls `broadcast_to_role({to_role: 'backend', body: "sensitive config: API_KEY=sk-xyz"})` with default auto_poke
 - **THEN** both B and C have the message in mailbox
-- **AND** B's pane receives `"新邮件 from captain (<A's agent_id>) → b@svc, 请调 get_inbox 查看"`
+- **AND** B's pane receives `"新邮件 from captain@svc (<A's agent_id>) → b@svc, 请调 get_inbox 查看"`
 - **AND** C's pane receives the same format with `→ c@svc`
 - **AND** neither pane contains `"API_KEY"`, `"sk-xyz"`, or any body substring
 

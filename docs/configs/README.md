@@ -33,7 +33,7 @@ Since `add-auto-poke-on-send`, `send_message` **defaults to auto-poke** for both
 
 When the guard fails (pane is active), has no pane registered, tmux is unavailable, or the target is the caller itself, the message is **still persisted** to the mailbox and the skip is reported in the response.
 
-Auto-poke injects **only a SHORT wake-up hint** into the recipient's pane, never the message body.  The hint format is fixed: `新邮件 from {display_name} ({agent_id}), 请调 get_inbox 查看`.  When the sender has no `display_name`, the hint falls back to `新邮件 from {agent_id[:8]}, 请调 get_inbox 查看`.  Recipients always retrieve full bodies via `get_inbox`; no body byte ever reaches a pane through auto-poke.
+Auto-poke injects **only a SHORT wake-up hint** into the recipient's pane, never the message body.  The hint format is fixed: `新邮件 from {display_name}@{sender_team} ({agent_id}) → {target_name}@{target_team}, 请调 get_inbox 查看`.  Both ends name their team because agent names repeat across teams.  When the sender has no `display_name`, the sender part falls back to `{agent_id[:8]}`.  Recipients always retrieve full bodies via `get_inbox`; no body byte ever reaches a pane through auto-poke.
 
 `broadcast` is **opt-out**: it auto-pokes every eligible recipient by default (per-pane parallel quiet-guard).  Pass `auto_poke: false` to suppress the tmux side-effect and deliver pure mailbox.
 

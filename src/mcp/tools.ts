@@ -365,13 +365,17 @@ function defaultClaudeSelfModel(
 export const HINT_MAX_CHARS = 200
 
 export function buildAutoPokeHint(
-  row: { name?: string | null } | undefined,
+  row: { name?: string | null; team?: string | null } | undefined,
   fromAgentId: string,
   target?: { name?: string | null; team?: string | null } | undefined
 ): string {
   const dn = row?.name
+  const senderTeam = row?.team
+  const senderLabel = typeof senderTeam === 'string' && senderTeam.length > 0
+    ? `${dn}@${senderTeam}`
+    : dn
   const sender = typeof dn === 'string' && dn.length > 0
-    ? `${dn} (${fromAgentId})`
+    ? `${senderLabel} (${fromAgentId})`
     : fromAgentId.slice(0, 8)
   const targetName = target?.name
   const targetTeam = target?.team
@@ -398,8 +402,8 @@ export function createAutoPokeImpl(
 ): import('./auto-poke-fanout.js').AutoPokeFn {
   return async (args) => {
     const row = db
-      .prepare('SELECT name FROM agents WHERE agent_id=?')
-      .get(args.fromAgentId) as { name: string | null } | undefined
+      .prepare('SELECT name, team FROM agents WHERE agent_id=?')
+      .get(args.fromAgentId) as { name: string | null; team: string } | undefined
     const target = db
       .prepare('SELECT name, team FROM agents WHERE agent_id=?')
       .get(args.targetAgentId) as { name: string | null; team: string } | undefined

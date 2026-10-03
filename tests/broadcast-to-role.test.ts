@@ -42,8 +42,8 @@ function setup(opts?: { paneState?: Record<string, 'idle' | 'active'> }): {
     async ({ fromAgentId, targetAgentId, paneId }) => {
       // Mirrors createAutoPokeImpl: sender row plus the target row, so the
       // per-recipient target segment is exercised here too.
-      const row = db.prepare('SELECT name FROM agents WHERE agent_id=?').get(fromAgentId) as
-        { name: string | null } | undefined
+      const row = db.prepare('SELECT name, team FROM agents WHERE agent_id=?').get(fromAgentId) as
+        { name: string | null; team: string } | undefined
       const target = db.prepare('SELECT name, team FROM agents WHERE agent_id=?').get(targetAgentId) as
         { name: string | null; team: string } | undefined
       const prompt = buildAutoPokeHint(row, fromAgentId, target)

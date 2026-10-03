@@ -104,7 +104,7 @@ describe('auto-poke hint format', () => {
     const input = call[1] as { target_agent_id: string; prompt: string }
     // sender is name + full agent_id; target is the recipient's own name@team
     expect(input.prompt).toBe(
-      expectedHint(`lead-opus (${aId})`, { name: 'worker-kimi', team: 'default' })
+      expectedHint(`lead-opus@default (${aId})`, { name: 'worker-kimi', team: 'default' })
     )
     expect(input.prompt).not.toContain('bug #42')
     expect(input.prompt).not.toContain('please investigate')
@@ -137,11 +137,11 @@ describe('auto-poke hint format', () => {
       return [input.target_agent_id, input.prompt]
     }))
     expect(byTarget.get(bId)).toBe(
-      expectedHint(`lead-opus (${aId})`, { name: 'worker-kimi', team: 'default' })
+      expectedHint(`lead-opus@default (${aId})`, { name: 'worker-kimi', team: 'default' })
     )
     expect(byTarget.get(bId)).not.toContain('worker-gpt')
     expect(byTarget.get(cId)).toBe(
-      expectedHint(`lead-opus (${aId})`, { name: 'worker-gpt', team: 'default' })
+      expectedHint(`lead-opus@default (${aId})`, { name: 'worker-gpt', team: 'default' })
     )
     expect(byTarget.get(cId)).not.toContain('worker-kimi')
     for (const prompt of byTarget.values()) {
@@ -195,7 +195,7 @@ describe('auto-poke hint format', () => {
     // A retry tick resolves the target afresh; it must not fall back to the
     // captured body nor drop the target segment.
     expect(input.prompt).toBe(
-      expectedHint(`lead-opus (${aId})`, { name: 'worker-kimi', team: 'default' })
+      expectedHint(`lead-opus@default (${aId})`, { name: 'worker-kimi', team: 'default' })
     )
     expect(input.prompt).not.toContain('secret body')
 
@@ -227,13 +227,13 @@ describe('auto-poke hint format', () => {
     expect(input.prompt).not.toContain('payload body')
   })
 
-  it('buildAutoPokeHint: sender is "name (agent_id)" when the name is non-empty', () => {
+  it('buildAutoPokeHint: sender is "name@team (agent_id)" when the name is non-empty', () => {
     const hint = buildAutoPokeHint(
-      { name: 'lead-opus' },
+      { name: 'lead-opus', team: 'core' },
       'aaaaaaaa-1111-2222-3333-444444444444',
       { name: 'worker-kimi', team: 'core' }
     )
-    expect(hint).toBe('新邮件 from lead-opus (aaaaaaaa-1111-2222-3333-444444444444) → worker-kimi@core, 请调 get_inbox 查看')
+    expect(hint).toBe('新邮件 from lead-opus@core (aaaaaaaa-1111-2222-3333-444444444444) → worker-kimi@core, 请调 get_inbox 查看')
     expect(hint.length).toBeLessThanOrEqual(200)
     expect(hint).toContain('get_inbox')
   })
@@ -247,14 +247,20 @@ describe('auto-poke hint format', () => {
       .toBe('新邮件 from yyyyyyyy → b@t, 请调 get_inbox 查看')
   })
 
-  it('buildAutoPokeHint: the target segment names the target\'s own team, cross team included', () => {
+  it('buildAutoPokeHint: sender and target each carry their own team', () => {
     const from = 'aaaaaaaa-1111-2222-3333-444444444444'
-    // Same team and cross team render identically — the segment always carries
-    // the TARGET's team, and the sender's team is never part of the hint.
-    expect(buildAutoPokeHint({ name: 'lead-opus' }, from, { name: 'b', team: 'svc' }))
-      .toBe(`新邮件 from lead-opus (${from}) → b@svc, 请调 get_inbox 查看`)
-    expect(buildAutoPokeHint({ name: 'lead-alpha' }, from, { name: 'bob', team: 'beta' }))
-      .toBe(`新邮件 from lead-alpha (${from}) → bob@beta, 请调 get_inbox 查看`)
+    // Agent names repeat across teams (tester in several teams), so both ends
+    // name their team; a cross-team hint must not borrow the other side's.
+    expect(buildAutoPokeHint({ name: 'lead-opus', team: 'svc' }, from, { name: 'b', team: 'svc' }))
+      .toBe(`新邮件 from lead-opus@svc (${from}) → b@svc, 请调 get_inbox 查看`)
+    expect(buildAutoPokeHint({ name: 'tester', team: 'alpha' }, from, { name: 'bob', team: 'beta' }))
+      .toBe(`新邮件 from tester@alpha (${from}) → bob@beta, 请调 get_inbox 查看`)
+  })
+
+  it('buildAutoPokeHint: a sender row without a team renders the bare name', () => {
+    const from = 'aaaaaaaa-1111-2222-3333-444444444444'
+    expect(buildAutoPokeHint({ name: 'lead-opus', team: '' }, from, { name: 'b', team: 't' }))
+      .toBe(`新邮件 from lead-opus (${from}) → b@t, 请调 get_inbox 查看`)
   })
 
   it('buildAutoPokeHint: an unresolvable target drops the separator too, with no placeholder', () => {

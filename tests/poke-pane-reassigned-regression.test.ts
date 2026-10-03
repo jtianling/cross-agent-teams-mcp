@@ -152,7 +152,7 @@ describe('poke skips a pane whose host changed (2026-07 incident)', () => {
     expect(vi.mocked(tmuxCli.sendEnter)).toHaveBeenCalledWith(PANE)
     expect(vi.mocked(tmuxCli.loadBuffer)).toHaveBeenCalledWith(
       expect.any(String),
-      `新邮件 from main (${SENDER}) → tester-2@webdot, 请调 get_inbox 查看`
+      `新邮件 from main@webdot (${SENDER}) → tester-2@webdot, 请调 get_inbox 查看`
     )
   })
 })

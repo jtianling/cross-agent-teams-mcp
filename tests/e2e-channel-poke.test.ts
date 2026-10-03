@@ -151,7 +151,7 @@ describe('e2e channel poke (self-binding)', () => {
     // The channel wake carries the hint, and the hint identifies both the
     // sender and the agent it was addressed to (bob registered as bob@default).
     expect(hostNotifs[0].params).toMatchObject({
-      content: `新邮件 from alice (${alice.agent_id as string}) → bob@${bob.team as string}, 请调 get_inbox 查看`,
+      content: `新邮件 from alice@${alice.team as string} (${alice.agent_id as string}) → bob@${bob.team as string}, 请调 get_inbox 查看`,
     })
 
     const content = (hostNotifs[0].params as { content: string }).content
