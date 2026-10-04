@@ -18,7 +18,7 @@ import {
   type IdentityRowSnapshot,
 } from '../storage/agents-repo.js'
 import type { SessionOriginInfo } from '../daemon/network-origin.js'
-import { isAlive, isLiveClaudeProcess } from '../daemon/pid.js'
+import { isAlive } from '../daemon/pid.js'
 
 export { deriveDefaultTeam } from '../lib/default-team.js'
 
@@ -68,7 +68,6 @@ type BaseRegisterResult =
   | { error: 'invalid_name_label' }
   | { error: 'invalid_team_label' }
   | IdentityKeyConflict
-  | IdentityInUse
 
 export type RegisterResult =
   | BaseRegisterResult
@@ -78,41 +77,6 @@ export type RegisterResult =
   | { error: 'runtime_generation_conflict' }
   | { error: 'runtime_delivery_conflict'; conflicting_agent_id: string }
   | { error: 'opencode_runtime_coordinates_required' }
-
-export type IdentityInUse = {
-  error: 'identity_in_use'
-  detail: { team: string; name: string; ui_pid: number }
-  hint: string
-}
-
-const IDENTITY_IN_USE_HINT =
-  'This identity is held by another Claude process that is still running. ' +
-  'If you are a forked or background session spawned from that agent, you ' +
-  'do not use xats: do not reconnect, do not register under any name, and ' +
-  'do not retry. Only the original agent owns this identity.'
-
-/**
- * A registration may move an identity onto a new ui_pid only once the
- * previous one is gone. A second live process presenting the same identity
- * is a fork of the original agent (e.g. a Claude Code background session
- * that inherited its context and environment), never its replacement.
- */
-export function planLiveRuntimeGuard(args: {
-  target: { team: string; name: string; runtime_ui_pid: number | null }
-  ui_pid?: number
-  isProcessAlive?: (pid: number) => boolean
-}): IdentityInUse | undefined {
-  const pid = args.target.runtime_ui_pid
-  if (args.ui_pid === undefined || pid === null || pid <= 0) return undefined
-  if (pid === args.ui_pid) return undefined
-  const alive = args.isProcessAlive ?? isLiveClaudeProcess
-  if (!alive(pid)) return undefined
-  return {
-    error: 'identity_in_use',
-    detail: { team: args.target.team, name: args.target.name, ui_pid: pid },
-    hint: IDENTITY_IN_USE_HINT,
-  }
-}
 
 export type IdentityKeyPlan =
   | { kind: 'bind' }
@@ -272,8 +236,6 @@ export interface RegisterAgentDeps {
   log?: (line: string) => void
   localDevice?: string
   getSessionOrigin?: (connectionId: string) => SessionOriginInfo | undefined
-  /** Liveness probe for a recorded Claude ui_pid; tests inject a fake. */
-  isProcessAlive?: (pid: number) => boolean
 }
 
 interface InitialOpencodeRuntimeContext {
@@ -371,29 +333,6 @@ export class RegisterAgentService {
         team,
         role,
       })
-    }
-    const existing = this.repo.findByIdentity({
-      device: resolvedDevice.ok,
-      team,
-      name: input.name,
-    })
-    const existingRow = existing
-      ? this.repo.findById(existing.agent_id)
-      : undefined
-    if (existingRow) {
-      const inUse = planLiveRuntimeGuard({
-        target: existingRow,
-        ui_pid: input.runtime_ui_pid,
-        isProcessAlive: this.deps.isProcessAlive,
-      })
-      if (inUse) {
-        this.deps.log?.(
-          `register_agent rejected identity_in_use: team=${team} ` +
-          `name=${input.name} holder_ui_pid=${inUse.detail.ui_pid} ` +
-          `incoming_ui_pid=${input.runtime_ui_pid}`
-        )
-        return inUse
-      }
     }
     // Resolved before any connection binding so a conflict leaves both the
     // registry and the in-memory session map untouched.

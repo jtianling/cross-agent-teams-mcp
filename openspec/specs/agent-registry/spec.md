@@ -546,33 +546,6 @@ Arriving on a different TCP socket (e.g. after keep-alive expiry) MUST NOT by it
 - **WHEN** `sess-B` 以相同身份、相同 `session_id='S'` 和 `base_url='HTTP://127.0.0.1:80/'` (大写 scheme + 默认端口 + 尾斜杠) 注册
 - **THEN** 两条连接共享同一 runtime 身份, daemon 不关闭 `sess-A`, 不输出 takeover 日志
 
-### Requirement: 存活的 claude-code 身份不可被另一个进程接管
-
-当 `register_agent` (包括 `reconnect` 内部复用的注册路径) 携带 `runtime_ui_pid`, 且 `(device, team, name)` 对应的已有行记录了不同的 `runtime_ui_pid`, 并且该进程仍存活时, daemon MUST 拒绝本次注册, 返回 `{ error: 'identity_in_use', detail: { team, name, ui_pid: <持有者 pid> }, hint }`.  此时 MUST NOT 执行 TAKEOVER, MUST NOT 关闭持有者的 MCP session, MUST NOT 改写该行的任何字段.  `hint` MUST 告知调用方: 若它是从该 agent fork 出来的会话 (例如继承了上下文与 `XATS_IDENTITY_KEY` 的 Claude Code 后台会话), 则不使用 xats, 不得 reconnect, 不得以任何名字注册, 不得重试.
-
-"仍存活" MUST 同时满足: pid 存在, 且该 pid 当前运行的命令行含 `claude` 路径段 (如 `claude ...`、`.../MacOS/claude ...`、`.../claude/versions/<ver> ...`).  pid 已被无关进程复用时 MUST 视为持有者已退出, 避免主 agent 重启后因 pid 复用被误拒.  该检查仅用于本条拦截, `identity_key_conflict` 的持有者判断仍只看 pid 是否存在, 因为 codex 行同样记录 `runtime_ui_pid`.
-
-持有者进程已退出、该行未记录 `runtime_ui_pid`、调用方未携带 `ui_pid`, 或 pid 与持有者相同时, 仍按原 TAKEOVER 规则处理.  这样 pane 重启后的重连不受影响, 只有同一身份出现第二个存活进程时才被拒绝.
-
-#### Scenario: fork 会话用继承的 identity_key 重连被拒绝
-
-- **GIVEN** `(monkeys, trials)` 由 pane 内 claude 进程 P1 注册, 行内 `runtime_ui_pid=P1` 且 P1 存活
-- **WHEN** 后台 fork 进程 P2 调用 `reconnect({ identity_key, ui_pid: P2 })`
-- **THEN** 返回 `error: 'identity_in_use'`, `detail.ui_pid=P1`
-- **AND** P1 的 MCP session 未被关闭, 行内 `runtime_ui_pid` 与 channel 绑定保持不变
-
-#### Scenario: pane 重启后重连不受影响
-
-- **GIVEN** 行内 `runtime_ui_pid=P1` 且 P1 已退出
-- **WHEN** 新进程 P3 以同一身份注册
-- **THEN** 注册成功, 复用原 `agent_id`, `runtime_ui_pid` 更新为 P3
-
-#### Scenario: 持有者 pid 被非 claude 进程复用
-
-- **GIVEN** 行内 `runtime_ui_pid=P1`, P1 当前存活但运行的不是 claude
-- **WHEN** 新进程 P3 以同一身份注册
-- **THEN** 注册成功, 按 pane 重启处理
-
 ### Requirement: Mismatched agent_id for tool call returns 403
 
 If a tool call explicitly carries a `from_agent_id` parameter that does not match the caller's **currently registered agent_id** (held in the session's `agentIdHolder.current`), the daemon MUST reject the request with HTTP 403.
