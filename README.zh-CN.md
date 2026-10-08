@@ -27,9 +27,8 @@ agent 可读的操作手册: [README.agent.md](README.agent.md).  把下面这�
 并按其内容在本设备上配置好 xats.
 ```
 
-agent 会与你确认设备标签, `~/.zshrc` 改动, 以及是否也要在 Codex App 中启用
-xats.  首次 `start-xats` 时自动生成 daemon token, 并配好
-`free-xats-codex` / `xats-codex` / 可选的 `xats-codex-app` /
+agent 会与你确认设备标签和 `~/.zshrc` 改动.  首次 `start-xats` 时自动生成
+daemon token, 并配好 `free-xats-codex` / `xats-codex` /
 `free-xats-opencode` / `xats-opencode` 启动函数以及 `start-xats` /
 `stop-xats`.  想手工操作的话, 继续往下看.
 
@@ -150,8 +149,7 @@ Codex 通过 Streamable HTTP 跟 daemon 通信.  唤醒走 Codex 自己的 app-s
 
 ##### 最小配置 (只能收邮箱, 没有 push 唤醒)
 
-主要的 CLI runtime 使用标准的 `~/.codex/config.toml`.  由 xats 管理的
-桌面 App 则使用隔离的 `~/.codex-app/config.toml`:
+CLI runtime 使用标准的 `~/.codex/config.toml`:
 
 ```toml
 experimental_use_rmcp_client = true
@@ -171,7 +169,7 @@ daemon 带了 `--token <t>` 时: 在启动 codex 的 shell 里 `export XATS_TOKE
 
 要让别的 agent 能**主动唤醒**这个 codex thread (而不只是发邮件), 需要 `codex-appserver` delivery.  这里有个不直观的坑要写清楚:
 
-> **`codex --remote` 模式下, MCP server 是 app-server 加载的, 不是 TUI 加载的**.  当前版本的 codex (0.144.x 实测) 中, app-server 会**按每个 thread 的 cwd** 解析配置, 把受信任 (trusted) 项目的 `.codex/config.toml` layer 合并到自身 `CODEX_HOME` 之上.  主要的 CLI server 使用标准的 `~/.codex`, 由 xats 管理的 App server 使用隔离的 `~/.codex-app`.  记得传 `-C "$PWD"` 让 thread cwd 指向项目.  仅在 TUI 这边设 `CODEX_HOME` 在 `--remote` 模式下对 MCP 依然不起作用.
+> **`codex --remote` 模式下, MCP server 是 app-server 加载的, 不是 TUI 加载的**.  当前版本的 codex (0.144.x 实测) 中, app-server 会**按每个 thread 的 cwd** 解析配置, 把受信任 (trusted) 项目的 `.codex/config.toml` layer 合并到自身 `CODEX_HOME` 之上.  CLI server 使用标准的 `~/.codex`.  记得传 `-C "$PWD"` 让 thread cwd 指向项目.  仅在 TUI 这边设 `CODEX_HOME` 在 `--remote` 模式下对 MCP 依然不起作用.
 
 启动顺序:
 
@@ -182,17 +180,6 @@ env -u CODEX_HOME codex app-server --listen ws://127.0.0.1:8799
 # 2) 在另一个终端启动 codex TUI, 只连接 CLI server
 codex --remote ws://127.0.0.1:8799
 ```
-
-如果桌面 App 也需要 xats poke, 它必须使用 8800 上的第二个 server.  这个 server
-要从当前 Codex 或 ChatGPT App bundle 启动, 并启用
-`features.code_mode_host=true`; App 启动时设置
-`CODEX_APP_SERVER_WS_URL=ws://127.0.0.1:8800`.  不要为 App runtime 回退到 PATH
-中的 binary, 以保证 App 和 app-server 版本匹配.  但外部 app-server 模式当前
-不能使用 ChatGPT in Chrome 插件.  daemon
-使用 `CROSS_AGENT_TEAMS_CODEX_WS_URLS='["ws://127.0.0.1:8799","ws://127.0.0.1:8800"]'`,
-注册时会用传入的 `thread_id` 探测并持久化唯一匹配的 endpoint.  完整生命周期函数和
-迁移步骤见 [README.agent.md](README.agent.md).  如果 Chrome 插件更重要, 只为 CLI
-启用 xats, App 继续从 macOS 图标原生启动; 此时 App 本身不能被 xats poke 唤醒.
 
 如果当前 app-server 的 `CODEX_HOME` 和 thread 所在受信任项目的 `.codex/config.toml` 里都没配 `cross-agent-teams-mcp`, `--remote` 进去的 codex agent 根本看不到 MCP 工具, `register_agent` 调都调不到.
 
