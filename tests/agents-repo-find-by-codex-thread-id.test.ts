@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { openDb } from '../src/storage/db.js'
 import { applySchema } from '../src/storage/schema.js'
 import { AgentsRepo } from '../src/storage/agents-repo.js'
+import { insertAgent } from './helpers/insert-agent.js'
 
 const tmp = () => mkdtempSync(join(tmpdir(), 'atm-find-by-codex-thread-'))
 
@@ -60,16 +61,25 @@ describe('AgentsRepo.findByCodexThreadId', () => {
     const { dir, db, repo } = freshRepo()
     cleanups.push(dir)
     const threadId = '22222222-2222-4222-8222-222222222222'
-    const older = registerCodex(repo, { name: 'older', thread_id: threadId })
-    const newer = registerCodex(repo, { name: 'newer', thread_id: threadId })
-    db.prepare(`UPDATE agents SET last_seen_at=? WHERE agent_id=?`).run(
-      '2024-01-01T00:00:00.000Z',
-      older,
-    )
-    db.prepare(`UPDATE agents SET last_seen_at=? WHERE agent_id=?`).run(
-      '2024-06-01T00:00:00.000Z',
-      newer,
-    )
+    // Legacy duplicates predate coordinate exclusivity, so they are seeded
+    // directly: register() would release the older holder.
+    const delivery = {
+      kind: 'codex-appserver' as const,
+      thread_id: threadId,
+      ws_url: 'ws://127.0.0.1:8799',
+    }
+    insertAgent(db, {
+      agent_id: 'older',
+      agent_type: 'codex',
+      delivery,
+      last_seen_at: '2024-01-01T00:00:00.000Z',
+    })
+    insertAgent(db, {
+      agent_id: 'newer',
+      agent_type: 'codex',
+      delivery,
+      last_seen_at: '2024-06-01T00:00:00.000Z',
+    })
 
     expect(repo.findByCodexThreadId(threadId, 'local').map(row => row.name)).toEqual([
       'newer',

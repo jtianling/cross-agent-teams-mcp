@@ -10,7 +10,9 @@ export interface CleanupOpts {
 // (PRAGMA foreign_keys=ON) never become dangling mid-transaction. Cursor
 // position is intentionally NOT consulted — agents that have been offline for
 // more than 30 days forfeit any unread mail, which is the explicit retention
-// contract.
+// contract. Agent rows expire under the same threshold, keyed on last_seen_at:
+// nothing references `agents` by foreign key, so mail naming an expired agent
+// stays behind and ages out under its own rule.
 export function runCleanup(db: Database.Database, opts: CleanupOpts = {}): { deleted: number } {
   const now = opts.now ?? new Date()
   const maxAgeDays = opts.maxAgeDays ?? 30
@@ -22,6 +24,11 @@ export function runCleanup(db: Database.Database, opts: CleanupOpts = {}): { del
   )
   const deleteMessages = db.prepare(`DELETE FROM messages WHERE sent_at < ?`)
   const deleteEvents = db.prepare(`DELETE FROM events WHERE created_at < ?`)
+  const deleteExpiredAgents = db.prepare(
+    `DELETE FROM agents
+      WHERE role != '__channel_proxy__'
+        AND last_seen_at < ?`
+  )
   // Channel-proxy GC (design D3 / D4): prune stale `__channel_proxy__` rows
   // whose channel_session_id is no longer referenced by any non-proxy host's
   // delivery_payload. Live-bound proxies survive even past the cutoff.
@@ -42,8 +49,10 @@ export function runCleanup(db: Database.Database, opts: CleanupOpts = {}): { del
     const s = deleteStatus.run(ageCutoff)
     const m = deleteMessages.run(ageCutoff)
     const e = deleteEvents.run(ageCutoff)
+    // Hosts go first so a proxy they alone kept alive is reaped in this pass.
+    const a = deleteExpiredAgents.run(ageCutoff)
     const p = deleteStaleProxies.run(ageCutoff)
-    return Number(s.changes) + Number(m.changes) + Number(e.changes) + Number(p.changes)
+    return [s, m, e, a, p].reduce((sum, r) => sum + Number(r.changes), 0)
   })
   return { deleted: tx() }
 }

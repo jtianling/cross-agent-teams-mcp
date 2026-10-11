@@ -190,6 +190,7 @@ describe('broadcast_to_role', () => {
     const r = await svc.broadcast({ from: 'A', to_role: 'frontend', body: 'hi', auto_poke: false })
     if ('error' in r) throw new Error('expected success')
     expect([...r.recipients].sort()).toEqual(['F1', 'F2', 'F3'])
+    expect(r.skipped_inactive).toBe(0)
     const f2Rows = db.prepare('SELECT id FROM messages WHERE to_agent_id=?').all('F2') as unknown[]
     expect(f2Rows.length).toBe(1)
   })

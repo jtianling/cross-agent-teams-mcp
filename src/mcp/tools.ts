@@ -212,6 +212,7 @@ const SEND_MESSAGE_BY_ID_DESC = [
 
 const BROADCAST_DESC = [
   'Same-team broadcast to every other agent in the caller team across all devices; delivers to every team member except the sender.',
+  'Only members active within the last 7 days (last_seen_at, refreshed by any xats tool call incl. get_inbox) are addressed; the rest get no mailbox row and no wake-up, and the response reports how many were left out as skipped_inactive.  send_message reaches a specific agent regardless of this window.',
   'Auto-poke default true (quiet-guard on tmux targets, busy-gate on kimi targets; both retry at 30s/180s/600s — reports poked, poke_skip_reasons, retry_scheduled, retry_delays_s).  auto_poke:false opts out.  See send_message for what each poke_skip_reasons value means, incl. pane_reassigned (the recipient no longer hosts its recorded tmux pane, so no wake-up was injected; never retried, mailbox row still written).',
   'For role filter use broadcast_to_role.  For cross-team 1→1 use send_message({to_team}).',
   'Auto-poke injects only a SHORT wake-up hint (新邮件 from <sender> → <recipient_name>@<recipient_team>, 请调 get_inbox 查看) — never the body.  Read via get_inbox.',
@@ -220,10 +221,11 @@ const BROADCAST_DESC = [
 
 const BROADCAST_TO_ROLE_DESC = [
   'Same-team broadcast filtered by role across all devices; delivers to every matching team member.  Strictly same-team — no cross-team variant.',
+  'Only role holders active within the last 7 days (last_seen_at, refreshed by any xats tool call incl. get_inbox) are addressed; the rest get no mailbox row and no wake-up, and the response reports how many were left out as skipped_inactive.  send_message reaches a specific agent regardless of this window.',
   'For cross-team private 1→1 use send_message({to_team}).',
   'Auto-poke default true with quiet-guard on tmux targets / busy-gate on kimi targets, both retrying at 30s/180s/600s (auto_poke:false opts out); injects only a SHORT wake-up hint, not the message body.  Recipients read via get_inbox.',
   'See send_message for what each poke_skip_reasons value means, incl. pane_reassigned (the recipient no longer hosts its recorded tmux pane, so no wake-up was injected; never retried, mailbox row still written).',
-  'Returns unknown_recipient when no same-team agent matches to_role.'
+  'Returns unknown_recipient when no recently active same-team agent matches to_role (with skipped_inactive when holders exist but all are inactive).'
 ].join(' ')
 
 const RECONNECT_DESC = [
@@ -667,6 +669,20 @@ export function registerBusinessTools(
     'claude-code → reconnect({ ui_pid: $PPID }). ' +
     'If you have never registered, call register_agent instead.'
 
+  const EXPIRED_AGENT_RECOVERY_HINT =
+    'This MCP session is bound to an agent whose registration record no ' +
+    'longer exists: it was removed, most likely by the 30-day inactivity ' +
+    'expiry (an agent that calls no xats tool for 30 days is deleted). ' +
+    'First call reconnect with your runtime lookup key: ' +
+    'kimi-code → reconnect({ agent_type: "kimi-code", base_url: $KIMI_XATS_BASE_URL, session_id: $KIMI_XATS_SESSION_ID }); ' +
+    'opencode → reconnect({ agent_type: "opencode", base_url: $OPENCODE_XATS_BASE_URL, session_id }); ' +
+    'codex → reconnect({ thread_id: $CODEX_THREAD_ID }), also passing ' +
+    'launch_id from session-scoped XATS_CODEX_LAUNCH_ID when available; ' +
+    'claude-code → reconnect({ ui_pid: $PPID }). ' +
+    'When it returns need_register, call register_agent again with your ' +
+    'previous name and team. The re-registered agent gets a new agent_id, ' +
+    'and mail addressed to the expired one is not carried over.'
+
   function unknownAgentHint(): string {
     const failure = getHandshakeFailure?.()
     if (failure === undefined) return UNKNOWN_AGENT_RECOVERY_HINT
@@ -680,10 +696,12 @@ export function registerBusinessTools(
 
   function requireAgent(): string | { error: 'unknown_agent'; hint: string } {
     const c = caller()
-    if (!c) return { error: 'unknown_agent', hint: unknownAgentHint() }
-    const row = agents.findById(c)
-    if (!row) return { error: 'unknown_agent', hint: unknownAgentHint() }
-    return c
+    // caller() falls back to the session id until a registration binds it.
+    if (!c || c === getSessionId?.()) {
+      return { error: 'unknown_agent', hint: unknownAgentHint() }
+    }
+    if (agents.findById(c)) return c
+    return { error: 'unknown_agent', hint: EXPIRED_AGENT_RECOVERY_HINT }
   }
 
   /**

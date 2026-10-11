@@ -9,6 +9,10 @@ import { insertAgent } from './helpers/insert-agent.js'
 
 const tmp = (): string => mkdtempSync(join(tmpdir(), 'atm-cleanup-'))
 
+function daysAgo(days: number): string {
+  return new Date(Date.now() - days * 86400 * 1000).toISOString()
+}
+
 interface EventTriple { event_id: number; message_id: string }
 
 function seedEventWithMessage(
@@ -97,12 +101,59 @@ describe('runCleanup uniform 30-day TTL', () => {
     expect(counts(db)).toEqual({ events: 0, messages: 0, status: 0 })
   })
 
-  it('does not touch non-proxy agents', () => {
+  function agentIds(db: ReturnType<typeof openDb>): string[] {
+    return (db.prepare('SELECT agent_id FROM agents ORDER BY agent_id')
+      .all() as Array<{ agent_id: string }>).map(r => r.agent_id)
+  }
+
+  it('deletes a non-proxy agent last seen 31 days ago and counts it', () => {
     const db = fresh()
-    insertAgent(db, { agent_id: 'A' })
+    insertAgent(db, { agent_id: 'old', last_seen_at: daysAgo(31) })
+    insertAgent(db, { agent_id: 'live' })
+    const res = runCleanup(db)
+    expect(agentIds(db)).toEqual(['live'])
+    expect(res.deleted).toBe(1)
+  })
+
+  it('keeps an agent seen 29 days ago whatever its registration age', () => {
+    const db = fresh()
+    insertAgent(db, {
+      agent_id: 'A',
+      registered_at: daysAgo(200),
+      last_seen_at: daysAgo(29),
+    })
+    const res = runCleanup(db)
+    expect(agentIds(db)).toEqual(['A'])
+    expect(res.deleted).toBe(0)
+  })
+
+  it('does not consult registered_at when expiring an agent', () => {
+    const db = fresh()
+    insertAgent(db, {
+      agent_id: 'A',
+      registered_at: daysAgo(1),
+      last_seen_at: daysAgo(31),
+    })
     runCleanup(db)
-    const a = (db.prepare('SELECT COUNT(*) c FROM agents').get() as { c: number }).c
-    expect(a).toBe(1)
+    expect(agentIds(db)).toEqual([])
+  })
+
+  it('expires rows on another device label too', () => {
+    const db = fresh()
+    insertAgent(db, { agent_id: 'far', device: 'gx', last_seen_at: daysAgo(31) })
+    insertAgent(db, { agent_id: 'far-live', device: 'gx', last_seen_at: daysAgo(2) })
+    runCleanup(db)
+    expect(agentIds(db)).toEqual(['far-live'])
+  })
+
+  it('leaves recent mail addressed to an expired agent to its own TTL', () => {
+    const db = fresh()
+    insertAgent(db, { agent_id: 'old', last_seen_at: daysAgo(31) })
+    seedEventWithMessage(db, { daysOld: 2, recipients: ['old'], messageIdPrefix: 'm' })
+    const res = runCleanup(db)
+    expect(agentIds(db)).toEqual([])
+    expect(res.deleted).toBe(1)
+    expect(counts(db)).toEqual({ events: 1, messages: 1, status: 1 })
   })
 
   it('honours child→parent ordering with foreign keys ON (no transient FK violation)', () => {

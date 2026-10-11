@@ -40,4 +40,14 @@ describe('broadcast tool description — default-on semantics', () => {
     // Retry-backoff still mentioned
     expect(d).toMatch(/retry/i)
   })
+
+  it('fan-out descriptions state the 7-day activity window', async () => {
+    const tools = await listTools()
+    for (const name of ['broadcast', 'broadcast_to_role']) {
+      const d = tools.find(t => t.name === name)!.description!
+      expect(d).toMatch(/active within the last 7 days/)
+      expect(d).toMatch(/skipped_inactive/)
+      expect(d).toMatch(/send_message reaches a specific agent regardless/)
+    }
+  })
 })

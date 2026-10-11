@@ -1,10 +1,15 @@
 import type Database from 'better-sqlite3'
 import { randomUUID } from 'node:crypto'
 import type { AgentsRepo } from '../storage/agents-repo.js'
-import type { AutoPokeSkipReason, FanoutDeps } from './auto-poke-fanout.js'
+import type {
+  AutoPokeRecipient,
+  AutoPokeSkipReason,
+  FanoutDeps,
+} from './auto-poke-fanout.js'
 import { runFanoutWithRetry } from './fanout-with-retry.js'
 import { parseDeliveryRow } from '../lib/delivery-spec.js'
 import { recordInitialDeliveryStatuses } from './delivery-status.js'
+import { fanoutActiveCutoff } from './fanout-active-window.js'
 
 export type BroadcastDeps = FanoutDeps
 
@@ -19,13 +24,15 @@ interface SuccessResult {
   message_id: string
   event_id: number
   recipients: string[]
+  skipped_inactive: number
   poked: boolean
   poke_skip_reasons?: Array<{ agent_id: string; reason: AutoPokeSkipReason }>
   retry_scheduled: boolean
   retry_delays_s?: number[]
 }
 
-export type BroadcastResult = SuccessResult | { error: 'unknown_recipient' }
+export type BroadcastResult = SuccessResult
+  | { error: 'unknown_recipient'; skipped_inactive?: number }
 
 export class BroadcastService {
   constructor(
@@ -37,26 +44,12 @@ export class BroadcastService {
   async broadcast(input: BroadcastInput): Promise<BroadcastResult> {
     const fromRow = this.agents.findById(input.from)
     if (!fromRow) return { error: 'unknown_recipient' }
-    const rawRows = this.db.prepare(
-      `SELECT
-         agent_id,
-         tmux_pane_id,
-         delivery_kind,
-         delivery_payload
-       FROM agents
-       WHERE team=? AND role != '__channel_proxy__' AND agent_id != ?`
-    ).all(fromRow.team, input.from) as Array<{
-      agent_id: string
-      tmux_pane_id: string | null
-      delivery_kind: string
-      delivery_payload: string | null
-    }>
-    const rows = rawRows.map((row) => ({
-      agent_id: row.agent_id,
-      tmux_pane_id: row.tmux_pane_id,
-      delivery: parseDeliveryRow(row),
-    }))
-    if (rows.length === 0) return { error: 'unknown_recipient' }
+    const { rows, skipped_inactive } = this.selectRecipients(fromRow.team, input.from)
+    if (rows.length === 0) {
+      return skipped_inactive > 0
+        ? { error: 'unknown_recipient', skipped_inactive }
+        : { error: 'unknown_recipient' }
+    }
     const recipients = rows.map(r => r.agent_id)
     const baseId = randomUUID()
     const inserted = this.insertBroadcast(fromRow.team, input.from, recipients, input.body, input.subject, baseId)
@@ -69,7 +62,13 @@ export class BroadcastService {
         skipped: [],
         autoPokeDisabled: true,
       })
-      return { ...inserted, recipients, poked: false, retry_scheduled: false }
+      return {
+        ...inserted,
+        recipients,
+        skipped_inactive,
+        poked: false,
+        retry_scheduled: false,
+      }
     }
 
     const envelope = await runFanoutWithRetry({
@@ -86,8 +85,37 @@ export class BroadcastService {
       message_id: inserted.message_id,
       event_id: inserted.event_id,
       recipients,
+      skipped_inactive,
       ...envelope
     }
+  }
+
+  // The 7-day window is the only liveness filter: online state, pane presence
+  // and transport state are deliberately not consulted here.
+  private selectRecipients(team: string, from: string): {
+    rows: AutoPokeRecipient[]
+    skipped_inactive: number
+  } {
+    const cutoff = fanoutActiveCutoff()
+    const members = `FROM agents WHERE team=? AND role != '__channel_proxy__' AND agent_id != ?`
+    const rawRows = this.db.prepare(
+      `SELECT agent_id, tmux_pane_id, delivery_kind, delivery_payload
+       ${members} AND last_seen_at >= ?`
+    ).all(team, from, cutoff) as Array<{
+      agent_id: string
+      tmux_pane_id: string | null
+      delivery_kind: string
+      delivery_payload: string | null
+    }>
+    const skipped = this.db.prepare(
+      `SELECT COUNT(*) AS n ${members} AND last_seen_at < ?`
+    ).get(team, from, cutoff) as { n: number }
+    const rows = rawRows.map((row) => ({
+      agent_id: row.agent_id,
+      tmux_pane_id: row.tmux_pane_id,
+      delivery: parseDeliveryRow(row),
+    }))
+    return { rows, skipped_inactive: skipped.n }
   }
 
   private insertBroadcast(team: string, from: string, recipients: string[], body: string,

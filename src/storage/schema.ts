@@ -26,6 +26,7 @@ const DDL = [
     last_processed_event_id INTEGER NOT NULL DEFAULT 0,
     tmux_pane_id TEXT,
     prev_tmux_pane_id TEXT,
+    prev_codex_thread_id TEXT,
     claude_ui_pid INTEGER,
     runtime_ui_pid INTEGER,
     runtime_tty TEXT,
@@ -305,6 +306,19 @@ function migrateAgentsPrevPaneColumn(db: Database.Database): void {
   db.exec(`ALTER TABLE agents ADD COLUMN prev_tmux_pane_id TEXT`)
 }
 
+// A codex thread released to a newer holder is remembered here so the
+// same-thread seat evidence survives the release. It is a record of a LOST
+// thread, never a delivery address.
+function migrateAgentsPrevCodexThreadColumn(db: Database.Database): void {
+  const tableExists = db
+    .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='agents'`)
+    .get() as { name: string } | undefined
+  if (!tableExists) return
+  const cols = db.pragma('table_info(agents)') as Array<{ name: string }>
+  if (cols.some(c => c.name === 'prev_codex_thread_id')) return
+  db.exec(`ALTER TABLE agents ADD COLUMN prev_codex_thread_id TEXT`)
+}
+
 function migrateCodexPreRegColumns(db: Database.Database): void {
   const tableExists = db
     .prepare(
@@ -397,6 +411,7 @@ export function applySchema(
   migrateAgentsRegisterGenerationColumn(db)
   migrateAgentsOpencodeRuntimeGenerationColumn(db)
   migrateAgentsPrevPaneColumn(db)
+  migrateAgentsPrevCodexThreadColumn(db)
   migrateCodexPreRegColumns(db)
   migrateMessagesNeedReplyColumn(db)
   migrateMessagesAckColumns(db)

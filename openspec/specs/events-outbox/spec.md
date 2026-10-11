@@ -74,17 +74,20 @@ A cleanup routine SHALL run periodically (default every 1 hour, overridable via 
 - `message_delivery_status` rows whose `message_id` references a `messages` row marked for deletion
 - `events` rows where `created_at < now - 30d`
 
-In addition, the same cleanup pass SHALL delete `agents` rows where `role='__channel_proxy__'` AND `last_seen_at < now - 30d`, subject to the live-reference guard defined in the "Cleanup may prune stale channel proxy rows" requirement below.
+In addition, the same cleanup pass SHALL delete `agents` rows in two independent steps:
 
-The deletion MUST execute as a single SQLite transaction in child-to-parent order (`message_delivery_status` → `messages` → `events`, with stale channel proxy `agents` rows deleted as an independent step within the same transaction) so that no foreign-key reference is dangling at any observable point. The `runCleanup` function MUST return the total number of rows deleted across all four tables.
+- rows where `role='__channel_proxy__'` AND `last_seen_at < now - 30d`, subject to the live-reference guard defined in the "Cleanup may prune stale channel proxy rows" requirement below;
+- rows where `role != '__channel_proxy__'` AND `last_seen_at < now - 30d`, as defined in the "Cleanup does not touch current-state tables" requirement below.
+
+The deletion MUST execute as a single SQLite transaction in child-to-parent order (`message_delivery_status` → `messages` → `events`, with the two `agents` steps executed afterwards within the same transaction) so that no foreign-key reference is dangling at any observable point. The `runCleanup` function MUST return the total number of rows deleted across all four tables.
 
 The 30-day threshold is hard — it MUST NOT be gated by `last_processed_event_id` of any agent, online or otherwise. Agents that have been offline for more than 30 days forfeit any unread mail.
 
 The cleanup routine MUST NOT delete:
 
 - Rows newer than 30 days (regardless of read status).
-- Rows in tables other than the four listed above (`events`, `messages`, `message_delivery_status`, `agents` filtered to `role='__channel_proxy__'`).
-- Non-proxy `agents` rows (any role other than `__channel_proxy__`), regardless of age.
+- Rows in tables other than the four listed above (`events`, `messages`, `message_delivery_status`, `agents`).
+- `agents` rows of any role whose `last_seen_at` is within the last 30 days.
 
 #### Scenario: Cleanup deletes 31-day-old rows across all three tables in one transaction
 
@@ -107,25 +110,50 @@ The cleanup routine MUST NOT delete:
 - **WHEN** `runCleanup` runs
 - **THEN** those old rows are deleted regardless of any agent's cursor position
 
-#### Scenario: Cleanup leaves non-proxy agents untouched
+#### Scenario: Cleanup leaves recently seen non-proxy agents untouched
 
-- **GIVEN** a non-proxy `agents` row with `registered_at = now - 90d`
+- **GIVEN** a non-proxy `agents` row with `registered_at = now - 90d` and `last_seen_at = now - 29d`
 - **WHEN** `runCleanup` runs
 - **THEN** the row remains
 
 ### Requirement: Cleanup does not touch current-state tables
 
-The cleanup routine SHALL only operate on `events`, `messages`, `message_delivery_status`, and `agents` rows whose `role='__channel_proxy__'`. Non-proxy `agents` rows MUST NOT be affected by age-based cleanup.
+The cleanup routine SHALL only operate on `events`, `messages`, `message_delivery_status`, and `agents`.
 
-The `messages` and `message_delivery_status` tables are projections of the events outbox (each `messages` row carries `event_id REFERENCES events(event_id)` and each `message_delivery_status` row is keyed by `message_id`), so cleanup deletes them in lock-step with the underlying events to preserve referential integrity. Channel proxy rows in `agents` carry no time-bounded retention contract for business semantics; they are pure infrastructure registered by the channel proxy launcher, accumulate per Claude Code session start, and SHALL be reaped under the 30-day TTL described above. Non-proxy `agents` rows survive cleanup forever.
+The `messages` and `message_delivery_status` tables are projections of the events outbox (each `messages` row carries `event_id REFERENCES events(event_id)` and each `message_delivery_status` row is keyed by `message_id`), so cleanup deletes them in lock-step with the underlying events to preserve referential integrity. Channel proxy rows in `agents` are pure infrastructure registered by the channel proxy launcher, accumulate per Claude Code session start, and SHALL be reaped under the 30-day TTL described above.
+
+Non-proxy `agents` rows SHALL expire under the same 30-day threshold, keyed on `last_seen_at`: a row whose `last_seen_at < now - 30d` MUST be deleted, on every device label alike (a row registered from another device is refreshed only by that session's own tool calls, exactly like a local row). `registered_at` MUST NOT be consulted. The window matches the mailbox retention contract — such an agent has already forfeited its unread mail.
+
+Deleting an expired agent row MUST NOT delete `messages`, `message_delivery_status`, or `events` rows that reference its `agent_id`; those rows carry the id as plain text and age out under their own 30-day rule.
 
 The cleanup contract MUST NOT enumerate the legacy `tasks`, `contracts`, or `contract_subscriptions` tables. Those tables no longer exist on the new version; on upgrade they are dropped during daemon boot (see `daemon-core`).
 
-#### Scenario: Ancient non-proxy agent rows survive cleanup
+#### Scenario: Ancient non-proxy agent rows are deleted
 
-- **GIVEN** an `agents` row with `role='default'` (or any non-`__channel_proxy__` role) and `last_seen_at = now - 90d`
+- **GIVEN** an `agents` row with `role='default'` (or any non-`__channel_proxy__` role) and `last_seen_at = now - 31d`
+- **WHEN** `runCleanup` runs
+- **THEN** the row is deleted
+- **AND** the returned `deleted` count includes it
+
+#### Scenario: Agent seen within 30 days survives regardless of registration age
+
+- **GIVEN** an `agents` row with `role='default'`, `registered_at = now - 200d`, and `last_seen_at = now - 29d`
 - **WHEN** `runCleanup` runs
 - **THEN** the row remains
+
+#### Scenario: Expired rows on another device label are deleted too
+
+- **GIVEN** an `agents` row with `device='gx'` (not the local device) and `last_seen_at = now - 31d`
+- **WHEN** `runCleanup` runs
+- **THEN** the row is deleted
+
+#### Scenario: Mail referencing an expired agent is left to its own retention
+
+- **GIVEN** an `agents` row `old` with `last_seen_at = now - 31d`
+- **AND** a `messages` row addressed to `old` with `sent_at = now - 2d`
+- **WHEN** `runCleanup` runs
+- **THEN** the `agents` row `old` is deleted
+- **AND** the `messages` row and its `events` row remain
 
 ### Requirement: Cleanup may prune stale channel proxy rows
 

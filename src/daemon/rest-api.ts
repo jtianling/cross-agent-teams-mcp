@@ -122,6 +122,17 @@ function recipientFields(to: SendBody['to']): Pick<SendInput, 'to_agent_id' | 't
   return { to_agent_name: to.name, to_team: to.team }
 }
 
+// Sending and reading mail are activity on behalf of the agent. The refresh
+// is logged rather than surfaced on failure: the send or read already
+// happened, and an error status would invite a duplicate retry.
+function touchActive(ctx: RestCtx, req: FastifyRequest, agent_id: string): void {
+  try {
+    ctx.agents.touch(agent_id)
+  } catch (err) {
+    req.log.warn({ err, agent_id }, 'last_seen_at refresh failed')
+  }
+}
+
 async function handleSend(ctx: RestCtx, req: FastifyRequest, reply: FastifyReply): Promise<void> {
   const parsed = sendBodySchema.safeParse(req.body)
   if (!parsed.success) {
@@ -150,6 +161,7 @@ async function handleSend(ctx: RestCtx, req: FastifyRequest, reply: FastifyReply
   if (isErrorResult(result)) {
     return reply.code(sendErrorStatus(result.error)).send({ error: result.error })
   }
+  touchActive(ctx, req, fromRow.agent_id)
   return reply.send(result)
 }
 
@@ -175,6 +187,7 @@ async function handleInbox(ctx: RestCtx, req: FastifyRequest, reply: FastifyRepl
   if (isErrorResult(result)) {
     return reply.code(503).send({ error: result.error })
   }
+  touchActive(ctx, req, owner.agent_id)
   return reply.send(result)
 }
 

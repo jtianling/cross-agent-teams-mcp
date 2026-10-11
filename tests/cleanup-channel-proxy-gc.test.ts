@@ -90,7 +90,7 @@ describe('runCleanup channel-proxy GC', () => {
     db.close()
   })
 
-  it('retains an ancient non-proxy agent row', () => {
+  it('expires an ancient non-proxy agent row', () => {
     const db = fresh()
     insertAgent(db, {
       agent_id: 'biz-old',
@@ -100,7 +100,30 @@ describe('runCleanup channel-proxy GC', () => {
       registered_at: isoDaysAgo(120),
     })
     runCleanup(db)
-    expect(agentCount(db, 'biz-old')).toBe(1)
+    expect(agentCount(db, 'biz-old')).toBe(0)
+    db.close()
+  })
+
+  it('reaps a stale proxy in the same pass that expires its only host', () => {
+    const db = fresh()
+    insertAgent(db, {
+      agent_id: 'P-orphaned',
+      role: '__channel_proxy__',
+      name: 'channel-proxy-orphaned',
+      delivery: { kind: 'claude-channel', channel_session_id: 'csid-Y' },
+      last_seen_at: isoDaysAgo(90),
+    })
+    insertAgent(db, {
+      agent_id: 'H-expired',
+      role: 'backend',
+      name: 'host-expired',
+      delivery: { kind: 'claude-channel', channel_session_id: 'csid-Y' },
+      last_seen_at: isoDaysAgo(31),
+    })
+    const res = runCleanup(db)
+    expect(agentCount(db, 'H-expired')).toBe(0)
+    expect(agentCount(db, 'P-orphaned')).toBe(0)
+    expect(res.deleted).toBe(2)
     db.close()
   })
 

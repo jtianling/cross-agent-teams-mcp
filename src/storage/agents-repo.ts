@@ -349,7 +349,8 @@ export class AgentsRepo {
       }
       const result = this.db.prepare(
         `UPDATE agents
-         SET delivery_kind = ?, delivery_payload = ?
+         SET delivery_kind = ?, delivery_payload = ?,
+             prev_codex_thread_id = NULL
          WHERE agent_id = ?
            AND device = ?
            AND identity_key = ?
@@ -452,11 +453,14 @@ export class AgentsRepo {
     return this.db.prepare(
       `SELECT h.agent_id, h.device, h.team, h.name, h.role,
               h.runtime_ui_pid, h.identity_key, h.last_seen_at,
-              CASE
-                WHEN h.delivery_kind = 'codex-appserver'
-                 AND json_valid(h.delivery_payload)
-                THEN json_extract(h.delivery_payload, '$.thread_id')
-              END AS codex_thread_id
+              COALESCE(
+                CASE
+                  WHEN h.delivery_kind = 'codex-appserver'
+                   AND json_valid(h.delivery_payload)
+                  THEN json_extract(h.delivery_payload, '$.thread_id')
+                END,
+                h.prev_codex_thread_id
+              ) AS codex_thread_id
        FROM agents h
        JOIN agents c ON c.agent_id = ?
        WHERE h.agent_id != c.agent_id
@@ -476,7 +480,8 @@ export class AgentsRepo {
 
   /**
    * Same-thread evidence lookup: rows on the caller's device whose
-   * codex-appserver thread equals the caller's AND that still carry a bound
+   * codex-appserver thread equals the caller's — held now, or released to a
+   * newer holder and remembered in prev_codex_thread_id — AND that carry a bound
    * runtime (runtime_ui_pid or runtime_tty).  A codex registration with such
    * evidence is a same-conversation re-registration: it must inherit the
    * collapsed physical seat and never scan foreign pre-reg rows.
@@ -497,14 +502,22 @@ export class AgentsRepo {
        WHERE device = ?
          AND agent_id != ?
          AND role != '__channel_proxy__'
-         AND delivery_kind = 'codex-appserver'
-         AND CASE
-           WHEN json_valid(delivery_payload)
-           THEN json_extract(delivery_payload, '$.thread_id')
-         END = ?
+         AND (
+           (delivery_kind = 'codex-appserver'
+            AND CASE
+              WHEN json_valid(delivery_payload)
+              THEN json_extract(delivery_payload, '$.thread_id')
+            END = ?)
+           OR prev_codex_thread_id = ?
+         )
          AND (runtime_ui_pid IS NOT NULL OR runtime_tty IS NOT NULL)
        ORDER BY last_seen_at DESC`
-    ).all(localDevice, excludeAgentId ?? '', thread_id) as ThreadRuntimeRow[]
+    ).all(
+      localDevice,
+      excludeAgentId ?? '',
+      thread_id,
+      thread_id
+    ) as ThreadRuntimeRow[]
   }
 
   findByCodexThreadId(
@@ -738,6 +751,7 @@ export class AgentsRepo {
           claude_ui_pid: input.claude_ui_pid!,
           new_csid: rebindCsid,
         })
+        this.convergeChannelSession(device, rebindCsid)
       }
       const written = this.db.prepare(
         `SELECT agent_id, register_generation
@@ -748,6 +762,9 @@ export class AgentsRepo {
       }
       if (input.tmux_pane_id) {
         this.clearPaneBinding(device, input.tmux_pane_id, written.agent_id)
+      }
+      if (input.delivery !== undefined) {
+        this.releaseDeliveryCoordinate(written.agent_id)
       }
       return written
     })
@@ -819,6 +836,10 @@ export class AgentsRepo {
          delivery_payload = CASE
            WHEN ? THEN delivery_payload
            ELSE excluded.delivery_payload
+         END,
+         prev_codex_thread_id = CASE
+           WHEN ? THEN prev_codex_thread_id
+           ELSE NULL
          END`
     ).run(
       newId,
@@ -840,6 +861,7 @@ export class AgentsRepo {
       input.identity_key ?? null,
       input.opencode_runtime_generation ?? 0,
       input.opencode_runtime_generation === undefined ? 1 : 0,
+      preserveExistingDelivery,
       preserveExistingDelivery,
       preserveExistingDelivery,
     )
@@ -864,6 +886,92 @@ export class AgentsRepo {
     ).run(pane, device, pane, keepAgentId)
   }
 
+  /**
+   * A codex thread or a claude channel session is one live conversation, so
+   * the newest holder evicts every other non-proxy row on the same device
+   * that still claims the same coordinate. A proxy row legitimately shares
+   * its host's session and is exempt in both directions.
+   *
+   * A released claude row that shares the keeper's runtime_ui_pid loses it
+   * too: reactiveRebindHosts matches on that pid and would otherwise hand the
+   * coordinate straight back on the next proxy registration.
+   */
+  private releaseDeliveryCoordinate(keepAgentId: string): void {
+    const keeper = this.db.prepare(
+      `SELECT device, runtime_ui_pid, delivery_kind,
+              CASE delivery_kind
+                WHEN 'codex-appserver'
+                THEN json_extract(delivery_payload, '$.thread_id')
+                WHEN 'claude-channel'
+                THEN json_extract(delivery_payload, '$.channel_session_id')
+              END AS coordinate
+       FROM agents
+       WHERE agent_id = ?
+         AND role != '__channel_proxy__'
+         AND delivery_kind IN ('codex-appserver', 'claude-channel')
+         AND json_valid(delivery_payload)`
+    ).get(keepAgentId) as {
+      device: string
+      runtime_ui_pid: number | null
+      delivery_kind: 'codex-appserver' | 'claude-channel'
+      coordinate: string | null
+    } | undefined
+    if (!keeper || keeper.coordinate === null) return
+    const path = keeper.delivery_kind === 'codex-appserver'
+      ? '$.thread_id'
+      : '$.channel_session_id'
+    const sharedUiPid = keeper.delivery_kind === 'claude-channel'
+      ? keeper.runtime_ui_pid
+      : null
+    this.db.prepare(
+      `UPDATE agents
+       SET delivery_kind = 'none',
+           delivery_payload = NULL,
+           prev_codex_thread_id = CASE
+             WHEN delivery_kind = 'codex-appserver' THEN ?
+             ELSE prev_codex_thread_id
+           END,
+           runtime_ui_pid = CASE
+             WHEN runtime_ui_pid = ? THEN NULL
+             ELSE runtime_ui_pid
+           END
+       WHERE device = ?
+         AND role != '__channel_proxy__'
+         AND agent_id != ?
+         AND delivery_kind = ?
+         AND json_valid(delivery_payload)
+         AND json_extract(delivery_payload, ?) = ?`
+    ).run(
+      keeper.coordinate,
+      sharedUiPid,
+      keeper.device,
+      keepAgentId,
+      keeper.delivery_kind,
+      path,
+      keeper.coordinate
+    )
+  }
+
+  /**
+   * reactiveRebindHosts writes one session onto every host sharing the
+   * proxy's ui pid, which can be several rows left by renames of one Claude
+   * process. Only the identity that process is using now may keep it: the
+   * most recently seen holder wins and the rest are released.
+   */
+  private convergeChannelSession(device: string, csid: string): void {
+    const holder = this.db.prepare(
+      `SELECT agent_id FROM agents
+       WHERE device = ?
+         AND role != '__channel_proxy__'
+         AND delivery_kind = 'claude-channel'
+         AND json_valid(delivery_payload)
+         AND json_extract(delivery_payload, '$.channel_session_id') = ?
+       ORDER BY last_seen_at DESC, registered_at DESC
+       LIMIT 1`
+    ).get(device, csid) as { agent_id: string } | undefined
+    if (holder) this.releaseDeliveryCoordinate(holder.agent_id)
+  }
+
   private reactiveRebindHosts(args: {
     proxy_device: string
     team: string
@@ -873,7 +981,8 @@ export class AgentsRepo {
     this.db.prepare(
       `UPDATE agents
        SET delivery_kind = 'claude-channel',
-           delivery_payload = json_object('channel_session_id', ?)
+           delivery_payload = json_object('channel_session_id', ?),
+           prev_codex_thread_id = NULL
        WHERE role != '__channel_proxy__'
          AND device = ?
          AND runtime_ui_pid IS NOT NULL
@@ -896,9 +1005,10 @@ export class AgentsRepo {
     this.runGuardedLegacyWrite(agent_id, () => {
       this.db.prepare(
         `UPDATE agents
-         SET delivery_kind=?, delivery_payload=?
+         SET delivery_kind=?, delivery_payload=?, prev_codex_thread_id=NULL
          WHERE agent_id=?`
       ).run(serialized.delivery_kind, serialized.delivery_payload, agent_id)
+      this.releaseDeliveryCoordinate(agent_id)
     })
   }
 

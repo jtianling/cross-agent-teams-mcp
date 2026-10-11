@@ -200,6 +200,7 @@ describe('broadcast auto_poke default-on integration', () => {
     const r = await svc.broadcast({ from: 'A', body: 'x', auto_poke: false })
     if ('error' in r) throw new Error('expected success')
     expect([...r.recipients].sort()).toEqual(['B', 'C', 'D'])
+    expect(r.skipped_inactive).toBe(0)
 
     const cRows = db.prepare('SELECT id FROM messages WHERE to_agent_id=?').all('C') as unknown[]
     expect(cRows.length).toBe(1)

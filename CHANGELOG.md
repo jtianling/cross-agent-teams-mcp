@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### BREAKING
+
+- **agent 行 30 天过期.**  cleanup 现在删除 `last_seen_at` 早于 30 天的非 proxy `agents` 行, 所有 device 的行同一规则, 只看 `last_seen_at`, 不看 `registered_at`.  之前"非 proxy agent 行永不清理"的契约取消.  被删身份回来后需要重新注册, 得到新的 `agent_id`, 发给旧 id 的未读邮件不迁移 (邮件本就只保留 30 天); 引用已删身份的邮件行不随之删除, 按自己的 30 天规则过期.  上线后第一次 cleanup 会一次性删掉所有存量过期身份.
+- **广播只发给 7 天内活跃的成员.**  `broadcast` 与 `broadcast_to_role` 只给 `last_seen_at` 在最近 7 天内的成员写 mailbox 行并唤醒, 其余成员不写行, 不唤醒, 不记投递状态; 响应新增 `skipped_inactive` 计数.  没有活跃收件人时返回 `unknown_recipient`, 是被窗口排除导致的还会带上 `skipped_inactive`.  之前"广播不得按 `last_seen_at` 过滤"的契约取消.  `send_message` / `send_message_by_id` 不受窗口影响, 只要收件人行还在就照常写入.
+
+### Changed
+
+- **投递坐标独占.**  一个身份写入 `codex-appserver` 的 `thread_id` 或 `claude-channel` 的 `channel_session_id` 时, 同一事务内把同 device 上其他非 proxy 行的同一坐标释放为 `delivery.kind='none'`, 后来者生效.  被释放的 codex thread 记入旧行的新列 `prev_codex_thread_id` (daemon 启动时自动迁移), 同 thread 座位继承与 identity key 跟随迁移继续把它当作证据, 但它不再是投递地址.  被释放的 claude 行若与新持有者共用非空 `runtime_ui_pid`, 该 pid 一并清空, 防止 proxy 重注册时的 reactive rebind 把坐标写回去.  `__channel_proxy__` 行双向豁免, 其他 device 的行和 kimi / opencode 坐标不动.
+- **过期身份的恢复提示.**  会话仍绑定着一个已不存在的 `agent_id` 时, `unknown_agent` 的 hint 改为说明注册记录已被移除 (多半是 30 天过期), 引导先 `reconnect`, 返回 `need_register` 再用原 name / team 调 `register_agent`.  会话未绑定任何身份时的 hint 不变.
+- **REST 收发计为活跃.**  `POST /api/send` 成功后刷新发件人的 `last_seen_at`, `GET /api/inbox` 成功后刷新 owner 的 `last_seen_at`, 只走 REST 的活跃身份不会被过期清理, 也留在广播窗口内.  `/api/agents`, `DELETE /api/agents/:agent_id` 与 `/api/runtime/*` 仍不刷新.
+
 ## 0.8.1
 
 ### Added
