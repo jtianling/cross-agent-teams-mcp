@@ -1882,6 +1882,11 @@ export function registerBusinessTools(
           'replace a missing old team with the cwd default. The default-team ' +
           'rule applies only to a new registration with a user-supplied name.',
         'DETECTION (run these probes BEFORE choosing `agent_type=`, in order; first match wins):',
+        'Run each `printenv VARIABLE` separately. macOS printenv checks ' +
+          'only the first variable argument; combining names can falsely ' +
+          'report missing runtime variables. An empty result for one ' +
+          'variable says nothing about the others. Do not choose custom ' +
+          'until each applicable probe has actually run.',
         '1. `printenv KIMI_XATS_BASE_URL` non-empty → `agent_type="kimi-code"`; pass that value as `base_url`, and pass `session_id` from `printenv KIMI_XATS_SESSION_ID`. The `xats-kimi` launcher pre-creates the session via the kimi server REST API and exports BOTH variables, so the session id is exact — do NOT derive it from `~/.kimi-code/session_index.jsonl` (its last `workDir`-matching entry can belong to a DIFFERENT kimi session in the same directory; pokes bound that way are delivered to the wrong session). `session_id` is REQUIRED for kimi-code — the daemon does NOT auto-resolve it. These env vars are set ONLY by the `xats-kimi` launcher, so their presence is itself the runtime assertion that the caller is kimi-code.',
         '2. `printenv OPENCODE_XATS_BASE_URL` non-empty → `agent_type="opencode"`; pass that value as `base_url`. Do NOT pass `session_id` — the daemon auto-resolves it as the most recently updated session on that base_url. The env var is set ONLY by the `free-xats-opencode` launcher, so its presence is itself the runtime assertion that the caller is opencode.',
         '3. `printenv CODEX_THREAD_ID` non-empty (Codex CLI or Mac Codex App) → `agent_type="codex"`; pass that value as `thread_id` (REQUIRED for codex per the schema). For Codex CLI, do NOT pass `ui_pid` because the launcher\'s `pre_register_codex_pane` flow handles tmux binding and an explicit pid disables that path. Mac Codex App has no tmux launcher flow; omit `ui_pid` because an App or app-server pid is not conversation-scoped, and reconnect identity is `thread_id` only.',
