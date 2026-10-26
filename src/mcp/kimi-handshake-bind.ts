@@ -90,6 +90,11 @@ export async function attemptKimiHandshakeBind(
     return 'ambiguous'
   }
   const match = candidates[0]
+  if (args.repo.isManaged(match.agent_id)) {
+    args.log?.(`mcp handshake bind skipped: sid=${args.connection_id} `
+      + 'reason=managed_control_required')
+    return 'no_match'
+  }
   const row = args.repo.findById(match.agent_id)
   if (!row || row.delivery.kind !== 'kimi-server') {
     args.log?.(

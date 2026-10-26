@@ -2,14 +2,20 @@ export type ChannelWakeSink = (payload: unknown) => void
 
 interface Entry {
   sessionId: string
+  agentId?: string
   sink: ChannelWakeSink
 }
 
 export class ChannelWakeFanout {
   private readonly entries = new Map<string, Entry>()
 
-  attach(channel_session_id: string, sink: ChannelWakeSink, sessionId: string): void {
-    this.entries.set(channel_session_id, { sessionId, sink })
+  attach(channel_session_id: string, sink: ChannelWakeSink, sessionId: string,
+    agentId?: string): void {
+    this.entries.set(channel_session_id, { sessionId, sink, agentId })
+  }
+
+  owner(channel_session_id: string): string | undefined {
+    return this.entries.get(channel_session_id)?.agentId
   }
 
   detach(channel_session_id: string): void {

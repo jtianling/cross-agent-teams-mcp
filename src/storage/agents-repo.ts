@@ -1,4 +1,5 @@
 import type Database from 'better-sqlite3'
+import { managedIdentityExists } from '../managed/guard.js'
 import { randomUUID } from 'node:crypto'
 import {
   parseDeliveryRow,
@@ -194,12 +195,23 @@ export class AgentsRepo {
 
   private runGuardedLegacyWrite(agent_id: string, write: () => void): void {
     const tx = this.db.transaction(() => {
+      const row = this.findById(agent_id)
+      if (row && managedIdentityExists(this.db, {
+        device: row.device, agent_id,
+      })) throw new Error('managed_control_required')
       if (isGenerationAwareOpencodeRow(this.findById(agent_id))) {
         throw new Error('opencode_runtime_coordinates_required')
       }
       write()
     })
     tx()
+  }
+
+  isManaged(agentId: string): boolean {
+    const row = this.findById(agentId)
+    return row !== undefined && managedIdentityExists(this.db, {
+      device: row.device, agent_id: agentId,
+    })
   }
 
   findByIdentity(args: { device: string; team: string; name: string }): { agent_id: string } | undefined {
@@ -938,6 +950,8 @@ export class AgentsRepo {
        WHERE device = ?
          AND role != '__channel_proxy__'
          AND agent_id != ?
+         AND NOT EXISTS (SELECT 1 FROM managed_claims m
+           WHERE m.agent_id = agents.agent_id AND m.state != 'released')
          AND delivery_kind = ?
          AND json_valid(delivery_payload)
          AND json_extract(delivery_payload, ?) = ?`
@@ -984,6 +998,8 @@ export class AgentsRepo {
            delivery_payload = json_object('channel_session_id', ?),
            prev_codex_thread_id = NULL
        WHERE role != '__channel_proxy__'
+         AND NOT EXISTS (SELECT 1 FROM managed_claims m
+           WHERE m.agent_id = agents.agent_id AND m.state != 'released')
          AND device = ?
          AND runtime_ui_pid IS NOT NULL
          AND runtime_ui_pid = ?

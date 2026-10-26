@@ -1,4 +1,5 @@
 import type Database from 'better-sqlite3'
+import { managedIdentityExists, managedDeliveryExists } from '../managed/guard.js'
 import {
   validateDeliveryForWrite,
   type DeliverySpec,
@@ -236,6 +237,9 @@ export interface RegisterAgentDeps {
   log?: (line: string) => void
   localDevice?: string
   getSessionOrigin?: (connectionId: string) => SessionOriginInfo | undefined
+  authorizeManagedProxy?: (
+    connectionId: string, channel: string, uiPid: number | undefined,
+  ) => boolean
 }
 
 interface InitialOpencodeRuntimeContext {
@@ -324,6 +328,17 @@ export class RegisterAgentService {
       team: input.team,
       project_dir: input.project_dir,
     })
+    if (managedIdentityExists(this.db, {
+      device: resolvedDevice.ok, team, name: input.name,
+      identity_key: input.identity_key,
+    })) return { error: 'agent_id_collision' }
+    if (managedDeliveryExists(this.db, resolvedDevice.ok, validated?.ok)) {
+      const proxyAllowed = role === '__channel_proxy__'
+        && validated?.ok.kind === 'claude-channel'
+        && this.deps.authorizeManagedProxy?.(input.connection_id,
+          validated.ok.channel_session_id, input.claude_ui_pid)
+      if (!proxyAllowed) return { error: 'agent_id_collision' }
+    }
     if (input.opencode_runtime_generation !== undefined) {
       return this.registerInitialOpencodeRuntime({
         input,

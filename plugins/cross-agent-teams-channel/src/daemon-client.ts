@@ -5,6 +5,7 @@ import { findClaudeUiPid } from './find-claude-pid.js'
 export interface RegistrationConfig {
   daemonUrl: string
   token?: string
+  managedToken?: string
   device?: string
   channel_session_id: string
   backoffInitialMs?: number
@@ -65,9 +66,11 @@ export async function runRegistrationSequence(
   config: RegistrationConfig
 ): Promise<RegistrationSequenceResult> {
   const order: string[] = []
-  const requestInit = config.token
-    ? { headers: { Authorization: `Bearer ${config.token}` } }
-    : undefined
+  const requestInit = { headers: {
+    ...(config.token ? { Authorization: `Bearer ${config.token}` } : {}),
+    ...(config.managedToken
+      ? { 'X-Xats-Managed-Proxy-Token': config.managedToken } : {}),
+  } }
   const transport = new StreamableHTTPClientTransport(new URL(config.daemonUrl), {
     requestInit,
   })
@@ -205,8 +208,14 @@ export function runReconnectingProxy(config: ReconnectingProxyConfig): Reconnect
         if (config.onDisconnect) config.onDisconnect()
         try { await seq.close() } catch { /* best-effort */ }
         currentSeq = null
-      } catch {
+      } catch (error) {
         failed = true
+        const detail = error instanceof Error ? error.message : String(error)
+        const redacted = [config.token, config.managedToken].reduce<string>(
+          (text, token) => token ? text.replaceAll(token, '[redacted]') : text,
+          detail,
+        )
+        process.stderr.write(`cross-agent-teams-proxy: ${redacted}\n`)
         // register/subscribe failed — wait and retry.
       }
       if (stopped) break

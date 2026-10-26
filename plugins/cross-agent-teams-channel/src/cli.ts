@@ -27,6 +27,7 @@ interface CliArgs {
   // never puts it on its own row — it only inlines it into the host agent's
   // startup hint.
   identityKey?: string
+  managedToken?: string
 }
 
 export interface ParseCliArgsDeps {
@@ -190,7 +191,9 @@ export function parseCliArgs(
   }
   const rawIdentityKey = env.XATS_IDENTITY_KEY?.trim()
   const identityKey = rawIdentityKey ? rawIdentityKey : undefined
-  return { daemonUrl, token, device, deviceAutoDerivedNotice, identityKey }
+  const managedToken = env.XATS_MANAGED_MCP_TOKEN?.trim() || undefined
+  return { daemonUrl, token, device, deviceAutoDerivedNotice, identityKey,
+    managedToken }
 }
 
 export async function main(
@@ -219,6 +222,7 @@ export async function main(
   const controller = runReconnectingProxy({
     daemonUrl: args.daemonUrl,
     token: args.token,
+    managedToken: args.managedToken,
     device: args.device,
     channel_session_id: csid,
     notificationHandler: (params) => {
@@ -226,6 +230,7 @@ export async function main(
     },
     onSequenceComplete: () => {
       registrationEverSucceeded = true
+      if (args.managedToken) return
       // Announce csid to Claude via host-facing channel notification so Claude
       // can call bind_channel({channel_session_id}) to bind its own agent row.
       const hint = buildStartupHint(csid, args.device, args.identityKey)

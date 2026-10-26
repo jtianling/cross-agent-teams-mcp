@@ -1,6 +1,8 @@
 import Fastify, { type FastifyInstance } from 'fastify'
 import { createServer as createHttpServer, type Server as HttpServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { openDb } from '../storage/db.js'
+import { ManagedService, type ManagedDeps } from '../managed/service.js'
+import { mountManagedRoutes } from '../managed/routes.js'
 import { applySchema } from '../storage/schema.js'
 import { makeAuthHook } from './auth.js'
 import { mountMcp } from '../mcp/transport.js'
@@ -48,6 +50,7 @@ export interface ServerOpts {
   channelWakeFanout?: ChannelWakeFanout
   runtimeControlService?: OpencodeRuntimeControlService
   kimiRuntimeControlService?: KimiRuntimeControlPort
+  managedRuntimeProbe?: ManagedDeps['probe']
 }
 export interface StartOpts extends ServerOpts {
   port: number
@@ -93,6 +96,9 @@ export async function buildServer(opts: ServerOpts): Promise<FastifyInstance> {
   const version = '0.1.0'
   const fanout = opts.fanout ?? new SseFanout()
   const channelWakeFanout = opts.channelWakeFanout ?? new ChannelWakeFanout()
+  const managedLog = opts.mcpLog ?? ((line: string) => console.error(line))
+  const managed = new ManagedService(db, context.localDevice,
+    channelWakeFanout, { log: managedLog, probe: opts.managedRuntimeProbe })
   const runtimeRegisterSvc = new RegisterAgentService(db, {
     localDevice: context.localDevice,
   })
@@ -126,6 +132,7 @@ export async function buildServer(opts: ServerOpts): Promise<FastifyInstance> {
     ?? parsePositiveInt(process.env.ORPHAN_GC_MAX_SESSIONS, DEFAULT_ORPHAN_GC_MAX_SESSIONS)
   const mcp = mountMcp(app, db, fanout, channelWakeFanout, {
     context,
+    managed,
     log: opts.mcpLog,
     orphanSessionLimit: orphanGcMaxSessions,
   })
@@ -138,6 +145,7 @@ export async function buildServer(opts: ServerOpts): Promise<FastifyInstance> {
     runtimeControlService,
     kimiRuntimeControlService,
   })
+  mountManagedRoutes(app, managed, managedLog)
   app.get('/health', async () => ({
     ok: true,
     version,

@@ -17,6 +17,9 @@ import type { SseFanout, SseSink } from '../daemon/sse-fanout.js'
 import type { ChannelWakeFanout } from '../daemon/channel-wake-fanout.js'
 import type { DaemonContext } from '../daemon/server.js'
 import type { SessionOriginInfo } from '../daemon/network-origin.js'
+import type { ManagedService } from '../managed/service.js'
+import { managedIdentityExists, managedDeliveryExists } from '../managed/guard.js'
+import { describeRedactedError } from './log-redact.js'
 
 interface Session {
   transport: StreamableHTTPServerTransport
@@ -48,6 +51,8 @@ interface Session {
     version?: string
   }
   originInfo: SessionOriginInfo
+  managedToken?: string
+  managedProxyToken?: string
 }
 
 export interface OrphanSessionGcOptions {
@@ -82,6 +87,7 @@ export function mountMcp(
     log?: (line: string) => void
     context?: DaemonContext
     orphanSessionLimit?: number
+    managed?: ManagedService
   } = {}
 ): MountMcpResult {
   const sessions = new Map<string, Session>()
@@ -127,6 +133,10 @@ export function mountMcp(
     log,
     localDevice: context.localDevice,
     getSessionOrigin: (connectionId) => sessions.get(connectionId)?.originInfo,
+    authorizeManagedProxy: (connectionId, channel, pid) =>
+      opts.managed?.proxyAuthorized(
+        sessions.get(connectionId)?.managedProxyToken, channel, pid
+      ) ?? false,
   })
 
   function detachOrRestoreFanout(
@@ -148,6 +158,7 @@ export function mountMcp(
   }
 
   function finalizeSessionClose(sessionId: string): void {
+    opts.managed?.detach(sessionId)
     const session = sessions.get(sessionId)
     if (!session) return
     const agentId = session.agentIdHolder.current
@@ -445,6 +456,65 @@ export function mountMcp(
     params?: { name?: string; arguments?: Record<string, unknown> }
   }
 
+  function bindManagedSession(session: Session, token: string): void {
+    session.managedToken = token
+    const agent = opts.managed?.attach(token, session.sessionId)
+    if (!agent) return
+    session.onRegisterSuccess(agent.agent_id, agent.team)
+    registerSvc.bindExistingConnection({
+      connection_id: session.sessionId, agent_type: agent.agent_type!,
+      delivery: agent.delivery, device: agent.device,
+      team: agent.team, name: agent.name,
+    })
+  }
+
+  opts.managed?.setBindingListener(token => {
+    for (const session of sessions.values()) {
+      if (session.managedToken === token) bindManagedSession(session, token)
+    }
+  })
+
+  function managedRequestValid(session: Session, req: FastifyRequest): boolean {
+    if (session.managedProxyToken !== undefined) {
+      return req.headers['x-xats-managed-proxy-token'] === session.managedProxyToken
+        && opts.managed?.claims.byToken(session.managedProxyToken) !== undefined
+    }
+    if (session.managedToken === undefined) return true
+    return req.headers['x-xats-managed-token'] === session.managedToken
+      && opts.managed?.claims.byToken(session.managedToken) !== undefined
+  }
+
+  const managedTools = new Set([
+    'send_message', 'send_message_by_id', 'broadcast', 'broadcast_to_role',
+    'get_inbox', 'list_agents', 'get_delivery_status', 'echo',
+  ])
+
+  async function bindManagedProxy(session: Session): Promise<void> {
+    if (!session.managedProxyToken || !session.agentIdHolder.current) return
+    const proxy = db.prepare(
+      `SELECT claude_ui_pid,
+       json_extract(delivery_payload, '$.channel_session_id') AS channel_session_id
+       FROM agents
+       WHERE agent_id = ? AND role = '__channel_proxy__'`
+    ).get(session.agentIdHolder.current) as {
+      claude_ui_pid: number | null; channel_session_id: string | null
+    } | undefined
+    if (!proxy?.claude_ui_pid || !proxy.channel_session_id
+      || !channelWakeFanout?.has(proxy.channel_session_id)) return
+    try {
+      const result = await opts.managed?.bindClaudeProxy(
+        session.managedProxyToken, proxy.claude_ui_pid, proxy.channel_session_id
+      )
+      if (result && 'error' in result) {
+        log(`managed Claude bind failed: error=${result.error} `
+          + `detail=${result.detail}`)
+      }
+    } catch (error) {
+      log('managed Claude bind failed: '
+        + describeRedactedError(error, session.managedProxyToken))
+    }
+  }
+
   app.post('/mcp', async (req: FastifyRequest, reply: FastifyReply) => {
     const sid = req.headers['mcp-session-id'] as string | undefined
     const body = req.body as ToolsCallBody | undefined
@@ -455,6 +525,72 @@ export function mountMcp(
     if (!session && !isInit) {
       log(`mcp unknown_session: route=POST method=${body?.method ?? 'unknown'} name=${body?.params?.name ?? 'none'} sid=${sid ?? 'none'} sessions=${sessions.size}`)
       return sendControlPlaneReject(reply, 404)
+    }
+
+    const managedToken = req.headers['x-xats-managed-token']
+    const proxyToken = req.headers['x-xats-managed-proxy-token']
+    if (session && (session.managedToken !== managedToken
+      || session.managedProxyToken !== proxyToken)) {
+      return sendControlPlaneReject(reply, 403)
+    }
+    if (proxyToken !== undefined) {
+      if (typeof proxyToken !== 'string' || managedToken !== undefined
+        || originInfo.origin !== 'local'
+        || opts.managed?.claims.byToken(proxyToken)?.agent_type !== 'claude-code') {
+        return sendControlPlaneReject(reply, 403)
+      }
+      if (session?.managedProxyToken && session.managedProxyToken !== proxyToken) {
+        return sendControlPlaneReject(reply, 403)
+      }
+      if (session) session.managedProxyToken = proxyToken
+      if (body?.method === 'tools/call') {
+        const name = body.params?.name
+        const args = body.params?.arguments
+        if (!['register_agent', 'subscribe_channel_wake', 'echo'].includes(name ?? '')
+          || (name === 'register_agent' && args?.role !== '__channel_proxy__')) {
+          return sendControlPlaneReject(reply, 403)
+        }
+      }
+    }
+    if (session?.managedProxyToken && !managedRequestValid(session, req)) {
+      return sendControlPlaneReject(reply, 403)
+    }
+    if (managedToken !== undefined) {
+      if (typeof managedToken !== 'string' || originInfo.origin !== 'local'
+        || !opts.managed?.claims.byToken(managedToken)) {
+        return sendControlPlaneReject(reply, 403)
+      }
+      if (session) bindManagedSession(session, managedToken)
+    }
+    if (session?.managedToken !== undefined
+      && managedToken !== session.managedToken) {
+      return sendControlPlaneReject(reply, 403)
+    }
+    if (body?.method === 'tools/call') {
+      const args = body.params?.arguments
+      const channel = typeof args?.channel_session_id === 'string'
+        ? args.channel_session_id.trim() : undefined
+      if (body.params?.name === 'subscribe_channel_wake'
+        && typeof channel === 'string'
+        && managedDeliveryExists(db, context.localDevice, {
+          kind: 'claude-channel', channel_session_id: channel,
+        })
+        && !opts.managed?.proxyAuthorized(session?.managedProxyToken, channel)) {
+        return sendControlPlaneReject(reply, 403)
+      }
+      const protectedIdentity = managedIdentityExists(db, {
+        device: context.localDevice,
+        agent_id: session?.agentIdHolder.current,
+        identity_key: typeof args?.identity_key === 'string'
+          ? args.identity_key : undefined,
+      })
+      if ((protectedIdentity || managedToken !== undefined)
+        && (!session?.managedToken
+          || !opts.managed?.connectionValid(session.managedToken,
+            session.sessionId)
+          || !managedTools.has(body.params?.name ?? ''))) {
+        return sendControlPlaneReject(reply, 403)
+      }
     }
 
     // register_agent presenting a different Authorization header than the one that
@@ -494,7 +630,9 @@ export function mountMcp(
     // kimi identity headers — before the tool dispatch below can hit
     // unknown_agent. Init requests are handled after handleRequest, once the
     // session id exists.
-    if (!isInit) await ensureKimiHandshakeBind(session, req)
+    if (!isInit && managedToken === undefined) {
+      await ensureKimiHandshakeBind(session, req)
+    }
 
     if (body?.method === 'initialize') {
       const params = body.params as { clientInfo?: { name?: unknown; version?: unknown } } | undefined
@@ -509,11 +647,20 @@ export function mountMcp(
       const initialized = sessions.get(session.transport.sessionId)
       if (initialized) {
         initialized.originInfo = originInfo
+        if (typeof proxyToken === 'string') {
+          initialized.managedProxyToken = proxyToken
+        }
+        if (typeof managedToken === 'string') {
+          bindManagedSession(initialized, managedToken)
+        }
         // The initialize response is already written; start the bind in the
         // background and let the next request await it via inFlight.
-        void ensureKimiHandshakeBind(initialized, req)
+        if (managedToken === undefined) {
+          void ensureKimiHandshakeBind(initialized, req)
+        }
       }
     }
+    if (!isInit && session.managedProxyToken) await bindManagedProxy(session)
     return reply
   })
 
@@ -523,6 +670,9 @@ export function mountMcp(
     if (!session) {
       log(`mcp unknown_session: route=GET sid=${sid ?? 'none'} sessions=${sessions.size}`)
       return sendControlPlaneReject(reply, 404)
+    }
+    if (!managedRequestValid(session, req)) {
+      return sendControlPlaneReject(reply, 403)
     }
     session.lastActivityAt = Date.now()
     await session.transport.handleRequest(req.raw, reply.raw)
@@ -535,6 +685,9 @@ export function mountMcp(
     if (!session) {
       log(`mcp unknown_session: route=DELETE sid=${sid ?? 'none'} sessions=${sessions.size}`)
       return sendControlPlaneReject(reply, 404)
+    }
+    if (!managedRequestValid(session, req)) {
+      return sendControlPlaneReject(reply, 403)
     }
     session.lastActivityAt = Date.now()
     await session.transport.handleRequest(req.raw, reply.raw)

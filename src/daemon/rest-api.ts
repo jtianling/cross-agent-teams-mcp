@@ -22,6 +22,7 @@ import {
   identityKeyLookupSchema,
 } from '../mcp/identity-key-lookup.js'
 import { removeAgentRow } from '../mcp/unregister-self.js'
+import { managedIdentityExists } from '../managed/guard.js'
 import { isStorageError, wrapStorage } from './errors.js'
 import type { ChannelWakeFanout } from './channel-wake-fanout.js'
 import type { SessionOriginInfo } from './network-origin.js'
@@ -212,6 +213,9 @@ async function handleAgents(ctx: RestCtx, req: FastifyRequest, reply: FastifyRep
 // rows most in need of cleanup.
 async function handleDeleteAgent(ctx: RestCtx, req: FastifyRequest, reply: FastifyReply): Promise<void> {
   const { agent_id } = req.params as { agent_id: string }
+  if (managedIdentityExists(ctx.db, { device: ctx.localDevice, agent_id })) {
+    return reply.code(409).send({ error: 'managed_control_required' })
+  }
   const result = await wrapStorage(() => removeAgentRow(ctx.db, ctx.agents, agent_id))
   if (isErrorResult(result)) {
     return reply.code(result.error === 'storage_unavailable' ? 503 : 404).send({ error: result.error })
@@ -387,6 +391,15 @@ export function mountRestApi(
   // is token (401) then loopback (403); a remote caller with a correct token still
   // gets 403 and no data-layer action runs (short-circuit in the gate).
   app.addHook('onRequest', restLoopbackGate)
+  app.addHook('preHandler', async (req, reply) => {
+    if (!req.url.startsWith('/api/runtime/')) return
+    const parsed = z.object({ identity_key: z.string() }).safeParse(req.body)
+    if (parsed.success && managedIdentityExists(db, {
+      device: localDevice, identity_key: parsed.data.identity_key,
+    })) {
+      await reply.code(409).send({ error: 'managed_control_required' })
+    }
+  })
   app.post('/api/send', (req, reply) => handleSend(ctx, req, reply))
   app.get('/api/inbox', (req, reply) => handleInbox(ctx, req, reply))
   app.get('/api/agents', (req, reply) => handleAgents(ctx, req, reply))
