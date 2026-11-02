@@ -356,6 +356,37 @@ The agent picks the right tool (`send_message`, `broadcast`, `broadcast_to_role`
 >
 > List agents on team backend.
 
+**定时提醒**
+
+daemon 支持在指定时刻或按固定间隔, 每天, 每周, 每月向本机指定
+teammate 发送提示并尝试唤醒.  目标 agent 通过 `get_inbox` 查收提示.
+
+```sh
+cross-agent-teams-mcp schedules add --name daily-review \
+  --team default --agent steward --prompt '检查需求和任务进展' \
+  --kind daily --time 09:00 --timezone Asia/Singapore --count forever
+
+cross-agent-teams-mcp schedules add --name once-review \
+  --team default --agent steward --prompt '检查发布结果' \
+  --kind once --at '2030-01-01T10:00:00+08:00'
+
+cross-agent-teams-mcp schedules list
+cross-agent-teams-mcp schedules runs --id '<完整计划 UUID>'
+cross-agent-teams-mcp schedules pause --id '<完整计划 UUID>'
+cross-agent-teams-mcp schedules resume --id '<完整计划 UUID>'
+cross-agent-teams-mcp schedules remove --id '<完整计划 UUID>'
+```
+
+将 team 和 agent 替换为实际接收者, 一次性提醒需填写未来时刻.
+命令连接现有本机 daemon, 沿用 `CROSS_AGENT_TEAMS_MCP_TOKEN` 鉴权,
+也可传 `--port` 或 `--pid-file` 指定连接.  升级后首次使用需重启 daemon,
+之后增删或修改计划立即生效, 计划在重启后保留.
+
+同一计划的上一条提示尚未查收时会合并并重试唤醒, 避免重复堆积消息.
+休眠或停机可能延迟提醒, 循环计划重启后跳过错过的时刻, 到期的一次性提醒补发一次.
+更多时间类型, 次数限制, 修改命令和 HTTP 接口见
+[定时唤醒说明](docs/scheduled-agent-wakes.md).
+
 ## 4. Cross-host / cross-device collaboration
 
 Most users only need the single-host setup above; the `device` axis is invisible in loopback-only setups and you can skip this entire section.  Read on only if you want agents on multiple physical machines (LAN, tailscale, etc.) to share one daemon.
