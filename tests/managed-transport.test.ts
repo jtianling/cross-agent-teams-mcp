@@ -27,13 +27,20 @@ describe('managed REST and MCP ownership', () => {
   const bind = (control: ControlInput) => post('bind', { ...control, runtime: {
     agent_type: 'codex', thread_id: randomUUID(), ws_url: 'ws://127.0.0.1:8799/',
   } })
-  const rpc = (token: string, payload: object, session?: string) => app.inject({
-    method: 'POST', url: '/mcp', headers: {
-      accept: 'application/json, text/event-stream',
-      'x-xats-managed-token': token,
-      ...(session ? { 'mcp-session-id': session } : {}),
-    }, payload,
-  })
+  const rpc = async (token: string, payload: object, session?: string) => {
+    const response = await app.inject({
+      method: 'POST', url: '/mcp', headers: {
+        accept: 'application/json, text/event-stream',
+        'x-xats-managed-token': token,
+        ...(session ? { 'mcp-session-id': session } : {}),
+      }, payload,
+    })
+    const request = response.raw.req
+    if (typeof request.socket.destroySoon !== 'function') {
+      request.socket.destroySoon = () => request.destroy()
+    }
+    return response
+  }
   const initialize = async (token: string) => {
     const res = await rpc(token, { jsonrpc: '2.0', id: 1, method: 'initialize',
       params: { protocolVersion: '2025-06-18', capabilities: {},

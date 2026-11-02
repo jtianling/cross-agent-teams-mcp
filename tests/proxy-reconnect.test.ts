@@ -10,8 +10,8 @@ const tmp = () => mkdtempSync(join(tmpdir(), 'atm-proxy-reconn-'))
 describe('proxy reconnect on daemon disconnect', () => {
   const cleanups: string[] = []
   afterEach(() => {
-    vi.restoreAllMocks()
     vi.useRealTimers()
+    vi.restoreAllMocks()
     cleanups.forEach(d => rmSync(d, { recursive: true, force: true }))
     cleanups.length = 0
   })

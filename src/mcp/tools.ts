@@ -1773,25 +1773,19 @@ export function registerBusinessTools(
           + `status=${launchBinding.status}`
           + (launchBinding.status === 'unbound'
             ? ` reason=${launchBinding.reason}` : ` pane=${launchBinding.pane_id}`))
-        return { ...envelope, launch_binding: launchBinding,
-          ...(launchBinding.status === 'unbound' && launchBinding.retry
-            ? { hint: LAUNCH_BINDING_RETRY_HINT } : {}),
-        }
-      }
-      if (autoBound) return envelope
-      if (casDrift && !registerGenerationValid) {
-        // The residue of the raced session's seat could NOT be cleared (no
-        // valid minted generation), so the standard no-pane hint would be a
-        // lie — a stale tmux binding may still be attached to this row.
-        return {
-          ...envelope,
-          hint: 'Runtime auto-bind failed closed on a registration ' +
+        const hint = casDrift && !registerGenerationValid
+          ? 'Runtime auto-bind failed closed on a registration ' +
             'invariant error (invalid register_generation) after a ' +
             'concurrent-registration conflict; a residual tmux pane ' +
             'binding from the raced session may remain on this row. Call ' +
-            '`bind_runtime_identity(...)` to repair the binding explicitly.',
+            '`bind_runtime_identity(...)` to repair the binding explicitly.'
+          : launchBinding.status === 'unbound' && launchBinding.retry
+            ? LAUNCH_BINDING_RETRY_HINT : undefined
+        return { ...envelope, launch_binding: launchBinding,
+          ...(hint === undefined ? {} : { hint }),
         }
       }
+      if (autoBound) return envelope
       if (!nativeDeliveryBound) {
         return {
           ...envelope,

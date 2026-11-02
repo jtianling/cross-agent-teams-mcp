@@ -80,6 +80,7 @@ describe('register_agent client routing', () => {
       team: 'default',
       thread_id: '11111111-1111-4111-8111-111111111111',
       ws_url: 'ws://127.0.0.1:8799',
+      launch_binding: { status: 'unbound', reason: 'registration_changed' },
     })
     expect(registerCodexSelfMock).toHaveBeenCalledWith({
       connection_id: expect.any(String),
@@ -261,6 +262,9 @@ describe('register_agent client routing', () => {
       expect(String(obj.hint)).toContain(
         'invariant error (invalid register_generation)'
       )
+      expect(obj.launch_binding).toEqual({
+        status: 'unbound', reason: 'registration_changed',
+      })
       expect(fresh).toContainEqual(
         expect.stringContaining('no valid register_generation')
       )
