@@ -7,7 +7,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { openDb } from '../src/storage/db.js'
 import { applySchema } from '../src/storage/schema.js'
 import { CodexPanePreRegRepo } from '../src/mcp/codex-pane-pre-register-repo.js'
-import { mintCodexRecoveryNonce } from '../src/mcp/codex-recovery-nonce.js'
+import { mintPaneChallenge } from './helpers/pane-challenge.js'
 import { __testOverrides as autoBindOverrides } from '../src/mcp/auto-bind-codex-pane.js'
 import { isAlive } from '../src/daemon/pid.js'
 
@@ -396,7 +396,7 @@ describe('register_agent same-thread precedence (codex)', () => {
     // its pre-reg row is consumed by its own session and it gets its key.
     const shell = await registerCodex(url, {
       name: 'shell-codex', thread_id: THREAD_SHELL,
-      recovery_nonce: mintCodexRecoveryNonce('%99'),
+      recovery_nonce: mintPaneChallenge(dbPath, '%99'),
     })
     expect(shell.obj.agent_id).toBeDefined()
 
@@ -450,7 +450,7 @@ describe('register_agent same-thread precedence (codex)', () => {
 
     const rec = await registerCodex(url, {
       name: 'aoe-codex', thread_id: THREAD_NEW,
-      recovery_nonce: mintCodexRecoveryNonce('%67'),
+      recovery_nonce: mintPaneChallenge(dbPath, '%67'),
     })
     expect(rec.obj.agent_id).toBeDefined()
     expect(bindRuntimeIdentityMock).toHaveBeenCalledWith(
@@ -934,7 +934,7 @@ describe('register_agent same-thread precedence (codex)', () => {
     // same thread.
     const back = await registerCodex(url, {
       name: 'aoe-codex', thread_id: THREAD_T,
-      recovery_nonce: mintCodexRecoveryNonce('%67'),
+      recovery_nonce: mintPaneChallenge(dbPath, '%67'),
     })
     expect(back.obj.agent_id).toBeDefined()
 

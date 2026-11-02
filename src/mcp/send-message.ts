@@ -8,6 +8,7 @@ import { runFanoutWithRetry } from './fanout-with-retry.js'
 import { recordInitialDeliveryStatuses } from './delivery-status.js'
 import { isMessageRead } from './message-read.js'
 import { ACK_DEADLINE_MS } from './unread-watchdog.js'
+import type { FanoutResultEnvelope } from './fanout-with-retry.js'
 
 export type { AutoPokeFn, AutoPokeSkipReason } from './auto-poke-fanout.js'
 
@@ -35,6 +36,12 @@ export interface SendInput {
 }
 
 export type AckStatus = 'read' | 'not_yet'
+
+export interface PersistedMessage {
+  message_id: string
+  event_id: number
+  recipient_id: string
+}
 
 export interface AckResult {
   status: AckStatus
@@ -134,7 +141,9 @@ export class SendMessageService {
     private deps: SendMessageDeps = {}
   ) {}
 
-  async send(input: SendInput): Promise<SendResult> {
+  async send(input: SendInput,
+    onPersisted?: (message: PersistedMessage) => void
+  ): Promise<SendResult> {
     const hasId = typeof input.to_agent_id === 'string' && input.to_agent_id.length > 0
     const hasName = typeof input.to_agent_name === 'string' && input.to_agent_name.length > 0
     if (!hasId && !hasName) return { error: 'missing_recipient' }
@@ -177,7 +186,10 @@ export class SendMessageService {
       delivery: parseDeliveryRow(rcpt),
     }
 
-    const baseResult = this.insert({ fromTeam, toTeam, from: input.from, toAgentId: rcpt.agent_id, input })
+    const baseResult = this.insert({
+      fromTeam, toTeam, from: input.from, toAgentId: rcpt.agent_id,
+      input, onPersisted,
+    })
 
     const autoPokeEnabled = input.auto_poke !== false
     if (!autoPokeEnabled) {
@@ -216,8 +228,39 @@ export class SendMessageService {
     }
   }
 
+  async wakeExisting(from: string, messageId: string, waker = from): Promise<
+    FanoutResultEnvelope | { error: 'unknown_message' | 'unknown_recipient' }
+  > {
+    const message = this.db.prepare(`SELECT from_team, to_agent_id,
+      to_team, body, sent_at
+      FROM messages WHERE id=? AND from_agent_id=?`)
+      .get(messageId, from) as { from_team: string;
+        to_agent_id: string; to_team: string;
+        body: string; sent_at: string } | undefined
+    if (!message) return { error: 'unknown_message' }
+    const actor = this.agents.findById(waker)
+    if (!actor || actor.team !== message.from_team) {
+      return { error: 'unknown_recipient' }
+    }
+    const recipient = this.agents.findById(message.to_agent_id)
+    if (!recipient || recipient.team !== message.to_team) {
+      return { error: 'unknown_recipient' }
+    }
+    if (isMessageRead(this.db, messageId, recipient.agent_id)) {
+      return { poked: false, retry_scheduled: false }
+    }
+    return runFanoutWithRetry({
+      db: this.db, team: message.to_team, fromAgentId: waker,
+      recipients: [{ agent_id: recipient.agent_id,
+        tmux_pane_id: recipient.tmux_pane_id, delivery: recipient.delivery }],
+      body: message.body, deps: this.deps,
+      messageId, sentAt: message.sent_at,
+    })
+  }
+
   private insert(args: {
     fromTeam: string; toTeam: string; from: string; toAgentId: string; input: SendInput
+    onPersisted?: (message: PersistedMessage) => void
   }): { message_id: string; event_id: number; recipients: string[]; sent_at: string } {
     const tx = this.db.transaction(() => {
       const needReply = args.input.need_reply !== false ? 1 : 0
@@ -244,6 +287,8 @@ export class SendMessageService {
       ).run(id, event_id, args.fromTeam, args.toTeam, args.from,
         args.toAgentId,
         null, args.input.subject ?? null, args.input.body, needReply, sent_at, ackDeadline)
+      args.onPersisted?.({ message_id: id, event_id,
+        recipient_id: args.toAgentId })
       return { message_id: id, event_id, sent_at }
     })
     const { message_id, event_id, sent_at } = tx()

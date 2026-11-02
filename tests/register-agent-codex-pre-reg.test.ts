@@ -6,7 +6,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { openDb } from '../src/storage/db.js'
 import { applySchema } from '../src/storage/schema.js'
-import { mintCodexRecoveryNonce } from '../src/mcp/codex-recovery-nonce.js'
+import { mintPaneChallenge } from './helpers/pane-challenge.js'
 
 vi.mock('../src/mcp/codex-seeding-poke.js', async importOriginal => ({
   ...await importOriginal<typeof import('../src/mcp/codex-seeding-poke.js')>(),
@@ -145,7 +145,7 @@ describe('register_agent codex pre-reg auto-bind', () => {
       name: 'register_agent',
       arguments: {
         agent_type: 'codex', model: 'gpt-5', role: 'worker', name: 'new-gpt',
-        thread_id: VALID_THREAD_ID, recovery_nonce: mintCodexRecoveryNonce('%1972'),
+        thread_id: VALID_THREAD_ID, recovery_nonce: mintPaneChallenge(dbPath, '%1972'),
       },
     })
     const obj = await parseTool(resp)
@@ -205,7 +205,9 @@ describe('register_agent codex pre-reg auto-bind', () => {
     const obj = await parseTool(resp)
 
     expect(obj.agent_id).toBeDefined()
-    // codex-appserver delivery is bound natively; no tmux fallback hint expected.
+    expect(obj.launch_binding).toEqual({
+      status: 'unbound', reason: 'binding_not_verified',
+    })
     expect(obj.hint).toBeUndefined()
     expect(bindRuntimeIdentityMock).not.toHaveBeenCalled()
 
@@ -248,15 +250,17 @@ describe('register_agent codex pre-reg auto-bind', () => {
       name: 'register_agent',
       arguments: {
         agent_type: 'codex', model: 'gpt-5', role: 'worker', name: 'new-gpt',
-        thread_id: VALID_THREAD_ID, recovery_nonce: mintCodexRecoveryNonce('%1972'),
+        thread_id: VALID_THREAD_ID, recovery_nonce: mintPaneChallenge(dbPath, '%1972'),
       },
     })
     const obj = await parseTool(resp)
 
     expect(obj.agent_id).toBeDefined()
     expect(bindRuntimeIdentityMock).toHaveBeenCalled()
-    // codex-appserver delivery is bound natively; no tmux fallback hint expected.
-    expect(obj.hint).toBeUndefined()
+    expect(obj.launch_binding).toMatchObject({
+      status: 'unbound', reason: 'verification_failed',
+    })
+    expect(obj.hint).toContain('pre_register_codex_pane')
 
     const db = openDb(dbPath)
     applySchema(db)

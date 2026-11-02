@@ -421,7 +421,7 @@ export async function autoBindCodexPane(
     })
     if ('error' in verified) return false
 
-    return commitClaimedPane(input, chosen, verified)
+    return commitClaimedPane(input, chosen, verified, now)
   } catch {
     return false
   }
@@ -576,12 +576,13 @@ function collapseForegroundCarrier(
 function commitClaimedPane(
   input: AutoBindCodexPaneInput,
   chosen: Candidate,
-  verified: VerifiedRuntimeIdentity
+  verified: VerifiedRuntimeIdentity,
+  now: () => Date,
 ): AutoBindCodexPaneResult {
   const consumedKey: { value: string | null } = { value: null }
   try {
     const outcome = input.runAtomic(() =>
-      runClaimCommit(input, chosen, verified, consumedKey)
+      runClaimCommit(input, chosen, verified, consumedKey, now)
     )
     if (outcome === 'bound_consumed') {
       // Post-commit, best-effort: cancelling a recovery schedule is in-memory
@@ -618,8 +619,14 @@ function runClaimCommit(
   input: AutoBindCodexPaneInput,
   chosen: Candidate,
   verified: VerifiedRuntimeIdentity,
-  consumedKey: { value: string | null }
+  consumedKey: { value: string | null },
+  now: () => Date,
 ): AutoBindCodexPaneResult {
+  if (chosen.row.expires_at <= now().toISOString()) {
+    input.log?.(`auto-bind skip: pane=${chosen.pane_id} `
+      + 'reason=pre_registration_expired stage=commit')
+    return false
+  }
   if (!reArbitrateClaim(input, chosen)) return false
   const written = input.bindRuntimeIdentitySvc.commit(
     input.callerAgentId,

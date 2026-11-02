@@ -391,7 +391,9 @@ describe('codex seeding poke', () => {
     })
     cancelCodexSeedingSchedule(LEFT.pane_id, { reason: 'row_replaced' })
     // A new generation for LEFT mints a replacement token.
-    const replacement = mintCodexRecoveryNonce(LEFT.pane_id)
+    const replacement = mintCodexRecoveryNonce(LEFT.pane_id, {
+      launch_id: 'U_LEFT_NEW', expires_at: EXPIRES,
+    })
 
     releaseFirstSend?.()
     await vi.advanceTimersByTimeAsync(0)

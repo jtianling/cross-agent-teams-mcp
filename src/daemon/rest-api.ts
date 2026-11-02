@@ -23,6 +23,7 @@ import {
 } from '../mcp/identity-key-lookup.js'
 import { removeAgentRow } from '../mcp/unregister-self.js'
 import { managedIdentityExists } from '../managed/guard.js'
+import { mountPaneLookupRoutes } from '../pane-lookup/routes.js'
 import { isStorageError, wrapStorage } from './errors.js'
 import type { ChannelWakeFanout } from './channel-wake-fanout.js'
 import type { SessionOriginInfo } from './network-origin.js'
@@ -114,7 +115,10 @@ function peerOrigin(req: FastifyRequest): SessionOriginInfo['origin'] | undefine
 async function restLoopbackGate(req: FastifyRequest, reply: FastifyReply): Promise<void> {
   if (!req.url.startsWith('/api/')) return
   if (peerOrigin(req) !== 'local') {
-    await reply.code(403).send({ error: 'remote_forbidden' })
+    const paneLookup = req.url.split('?')[0] === '/api/runtime/pane/lookup'
+    await reply.code(403).send(paneLookup
+      ? { ok: false, error: 'remote_forbidden', detail: 'Pane lookup requires loopback' }
+      : { error: 'remote_forbidden' })
   }
 }
 
@@ -393,6 +397,7 @@ export function mountRestApi(
   app.addHook('onRequest', restLoopbackGate)
   app.addHook('preHandler', async (req, reply) => {
     if (!req.url.startsWith('/api/runtime/')) return
+    if (req.url.split('?')[0] === '/api/runtime/pane/lookup') return
     const parsed = z.object({ identity_key: z.string() }).safeParse(req.body)
     if (parsed.success && managedIdentityExists(db, {
       device: localDevice, identity_key: parsed.data.identity_key,
@@ -403,6 +408,7 @@ export function mountRestApi(
   app.post('/api/send', (req, reply) => handleSend(ctx, req, reply))
   app.get('/api/inbox', (req, reply) => handleInbox(ctx, req, reply))
   app.get('/api/agents', (req, reply) => handleAgents(ctx, req, reply))
+  mountPaneLookupRoutes(app, db, localDevice, deps.channelWakeFanout)
   const codexBindingLookup = new CodexBindingLookup(
     new CodexBindingRepo(db), localDevice
   )

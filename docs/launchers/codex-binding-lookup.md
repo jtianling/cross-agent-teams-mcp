@@ -70,6 +70,8 @@ Codex thread.  禁止用相同 cwd, 启动时间或 rollout 遍历顺序推断 p
 注册的 Codex 不提供 thread, 客户端不得退回 cwd/time 猜测或静默创建新会话.
 
 本接口证明本次启动已经完成登记的 thread, 不证明 UI 当前选中的 thread.
+Codex 注册的新增 `launch_binding` 反馈及过期后的安全重试流程见
+[challenge 生命周期](codex-pane-challenge-lifecycle.md).  本接口 v1 响应保持不变.
 新启动器通过会话级 `XATS_CODEX_LAUNCH_ID` 支持显式
 `reconnect({launch_id, thread_id})`.  `/clear` 后调用成功时, agent delivery
 与本接口的绑定快照会在同一事务中更新.  fork 和子代理线程不能走此路径.

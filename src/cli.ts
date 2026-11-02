@@ -87,6 +87,12 @@ async function runDaemon(): Promise<void> {
     // unit test can never probe the operator's tmux server as a side effect.
     paneVisibleProbe: defaultPaneVisibleSync,
   })
+  const published = acquirePidFile(args.pidPath, started.port)
+  if (!published.ok) {
+    await started.app.close()
+    console.error('daemon pid file ownership changed pid=' + published.pid)
+    process.exit(1)
+  }
   const companion = started.loopbackCompanion
   wireShutdown(started.app, args.pidPath, {
     extraForceClose: companion
@@ -500,6 +506,26 @@ export async function runOpencodeRuntimeControl(
 
 async function main(): Promise<void> {
   const cmd = process.argv[2]
+  if (cmd === 'schedules') {
+    const { runScheduleCli } = await import('./schedules/cli.js')
+    const result = await runScheduleCli(process.argv.slice(3), {
+      host: process.env.CROSS_AGENT_TEAMS_MCP_HOST ?? '127.0.0.1',
+      port: resolveDaemonPort(parseArg('--port')),
+      token: process.env.CROSS_AGENT_TEAMS_MCP_TOKEN,
+    })
+    console.log(JSON.stringify(result))
+    return
+  }
+  if (cmd === 'reminders') {
+    const { runReminderCli } = await import('./reminders/cli.js')
+    const result = await runReminderCli(process.argv.slice(3), {
+      host: process.env.CROSS_AGENT_TEAMS_MCP_HOST ?? '127.0.0.1',
+      port: resolveDaemonPort(parseArg('--port')),
+      token: process.env.CROSS_AGENT_TEAMS_MCP_TOKEN,
+    })
+    console.log(JSON.stringify(result))
+    return
+  }
   if (cmd === 'daemon') {
     await runDaemon()
     return
@@ -520,6 +546,8 @@ async function main(): Promise<void> {
     'usage: cross-agent-teams-mcp '
       + '<daemon|pre-register-codex-pane|reserve-opencode-runtime|'
       + 'commit-opencode-runtime> [options]'
+      + ' | reminders <add|list|remove> [options]'
+      + ' | schedules <add|list|show|update|pause|resume|remove|runs> [options]'
   )
   process.exit(2)
 }

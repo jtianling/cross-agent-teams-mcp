@@ -11,12 +11,19 @@ import {
   cancelCodexRecoverySchedule,
 } from '../src/mcp/codex-recovery-poke.js'
 
+
+function mintTestNonce(paneId: string): string {
+  return mintCodexRecoveryNonce(paneId, {
+    launch_id: 'test-launch', expires_at: '2999-01-01T00:00:00Z',
+  })
+}
+
 describe('codex recovery nonce registry', () => {
   afterEach(() => { clearAllCodexRecoveryNonces() })
 
   it('a nonce names the pane it was issued for, and two panes never collide', () => {
-    const a = mintCodexRecoveryNonce('%10')
-    const b = mintCodexRecoveryNonce('%20')
+    const a = mintTestNonce('%10')
+    const b = mintTestNonce('%20')
     expect(a).not.toBe(b)
     expect(resolveCodexRecoveryNonce(a)).toBe('%10')
     expect(resolveCodexRecoveryNonce(b)).toBe('%20')
@@ -25,7 +32,7 @@ describe('codex recovery nonce registry', () => {
   it('spending a nonce is single use', () => {
     // A token that stayed valid could re-target a LATER registration at a pane
     // whose row someone else has since consumed.
-    const nonce = mintCodexRecoveryNonce('%10')
+    const nonce = mintTestNonce('%10')
     expect(consumeCodexRecoveryNonce(nonce)).toBe('%10')
     expect(consumeCodexRecoveryNonce(nonce)).toBeUndefined()
     expect(resolveCodexRecoveryNonce(nonce)).toBeUndefined()
@@ -35,16 +42,16 @@ describe('codex recovery nonce registry', () => {
     // A newer recovery generation supersedes the older one; leaving the old
     // token valid would let a stale poke select a row the newer generation has
     // already moved past.
-    const old = mintCodexRecoveryNonce('%10')
-    const fresh = mintCodexRecoveryNonce('%10')
+    const old = mintTestNonce('%10')
+    const fresh = mintTestNonce('%10')
     expect(fresh).not.toBe(old)
     expect(resolveCodexRecoveryNonce(old)).toBeUndefined()
     expect(resolveCodexRecoveryNonce(fresh)).toBe('%10')
   })
 
   it('clearing a pane drops its nonce and leaves other panes alone', () => {
-    const a = mintCodexRecoveryNonce('%10')
-    const b = mintCodexRecoveryNonce('%20')
+    const a = mintTestNonce('%10')
+    const b = mintTestNonce('%20')
     clearCodexRecoveryNoncesForPane('%10')
     expect(resolveCodexRecoveryNonce(a)).toBeUndefined()
     expect(resolveCodexRecoveryNonce(b)).toBe('%20')
@@ -67,7 +74,7 @@ describe('codex recovery nonce registry', () => {
   it('cancelling a pane schedule invalidates that pane token', () => {
     // The token belongs to the schedule: once the row is consumed, replaced or
     // expired, a surviving nonce would still point at this pane.
-    const nonce = mintCodexRecoveryNonce('%77')
+    const nonce = mintTestNonce('%77')
     expect(resolveCodexRecoveryNonce(nonce)).toBe('%77')
     cancelCodexRecoverySchedule('%77')
     expect(resolveCodexRecoveryNonce(nonce)).toBeUndefined()

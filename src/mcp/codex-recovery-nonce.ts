@@ -15,7 +15,13 @@ import { randomUUID } from 'node:crypto'
  * is gone (the schedule it belongs to is gone too), and persisting it would
  * outlive the pane state it names.
  */
-const paneByNonce = new Map<string, string>()
+export interface CodexPaneChallenge {
+  pane_id: string
+  launch_id: string
+  expires_at: string
+}
+
+const paneByNonce = new Map<string, CodexPaneChallenge>()
 const nonceByPane = new Map<string, string>()
 // Panes whose current nonce is known to have reached the pane.  Minting
 // happens BEFORE the write, so "a nonce exists" and "a notice is sitting in
@@ -31,10 +37,12 @@ const deliveredPanes = new Set<string>()
  * The new nonce starts UNDELIVERED — it is minted so it can be written into
  * the notice, and the write may still fail.
  */
-export function mintCodexRecoveryNonce(paneId: string): string {
+export function mintCodexRecoveryNonce(
+  paneId: string, scope: Omit<CodexPaneChallenge, 'pane_id'>
+): string {
   clearCodexRecoveryNoncesForPane(paneId)
   const nonce = randomUUID()
-  paneByNonce.set(nonce, paneId)
+  paneByNonce.set(nonce, { pane_id: paneId, ...scope })
   nonceByPane.set(paneId, nonce)
   return nonce
 }
@@ -53,8 +61,9 @@ export function mintCodexRecoveryNonce(paneId: string): string {
  * no-op, which is exactly the required outcome.
  */
 export function markCodexRecoveryNonceDelivered(nonce: string): void {
-  const paneId = paneByNonce.get(nonce)
-  if (paneId === undefined) return
+  const challenge = paneByNonce.get(nonce)
+  if (!challenge || !challengeLive(challenge)) return
+  const paneId = challenge.pane_id
   if (nonceByPane.get(paneId) !== nonce) return
   deliveredPanes.add(paneId)
 }
@@ -73,12 +82,31 @@ export function markCodexRecoveryNonceDelivered(nonce: string): void {
  * therefore, NOT held.
  */
 export function hasDeliveredCodexRecoveryNonce(paneId: string): boolean {
-  return deliveredPanes.has(paneId)
+  const nonce = nonceByPane.get(paneId)
+  const challenge = nonce === undefined ? undefined : paneByNonce.get(nonce)
+  return challenge !== undefined && challengeLive(challenge)
+    && deliveredPanes.has(paneId)
 }
 
 /** The pane a nonce names, without spending it. */
 export function resolveCodexRecoveryNonce(nonce: string): string | undefined {
-  return paneByNonce.get(nonce)
+  const challenge = paneByNonce.get(nonce)
+  return challenge && challengeLive(challenge) ? challenge.pane_id : undefined
+}
+
+function challengeLive(challenge: CodexPaneChallenge): boolean {
+  return Date.parse(challenge.expires_at) > Date.now()
+}
+
+export function takeCodexPaneChallenge(nonce: string):
+  | { ok: true; challenge: CodexPaneChallenge }
+  | { ok: false; reason: 'challenge_expired' | 'challenge_invalid' } {
+  const challenge = paneByNonce.get(nonce)
+  if (!challenge) return { ok: false, reason: 'challenge_invalid' }
+  clearCodexRecoveryNoncesForPane(challenge.pane_id)
+  return challengeLive(challenge)
+    ? { ok: true, challenge }
+    : { ok: false, reason: 'challenge_expired' }
 }
 
 /**
@@ -87,14 +115,8 @@ export function resolveCodexRecoveryNonce(nonce: string): string | undefined {
  * else.
  */
 export function consumeCodexRecoveryNonce(nonce: string): string | undefined {
-  const paneId = paneByNonce.get(nonce)
-  if (paneId === undefined) return undefined
-  paneByNonce.delete(nonce)
-  if (nonceByPane.get(paneId) === nonce) {
-    nonceByPane.delete(paneId)
-    deliveredPanes.delete(paneId)
-  }
-  return paneId
+  const result = takeCodexPaneChallenge(nonce)
+  return result.ok ? result.challenge.pane_id : undefined
 }
 
 /** Drop the pane's nonce — its schedule was cancelled, replaced or expired. */

@@ -1,3 +1,4 @@
+import { mintPaneChallenge } from './helpers/pane-challenge.js'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -13,7 +14,7 @@ import { __testOverrides as autoBindOverrides } from '../src/mcp/auto-bind-codex
 import * as carrierProbes from '../src/mcp/auto-bind-codex-pane.js'
 import {
   clearAllCodexRecoveryNonces,
-  mintCodexRecoveryNonce,
+  markCodexRecoveryNonceDelivered,
 } from '../src/mcp/codex-recovery-nonce.js'
 
 const detectTmuxPaneMock = vi.fn()
@@ -159,6 +160,7 @@ describe('register_agent selects its pre-reg row by recovery nonce', () => {
     delete autoBindOverrides.listPanes
     delete autoBindOverrides.ttyProcesses
     clearAllCodexRecoveryNonces()
+    vi.useRealTimers()
   })
 
   async function startWithBothPanesPending(): Promise<{
@@ -245,6 +247,104 @@ describe('register_agent selects its pre-reg row by recovery nonce', () => {
     return rows.map(r => r.pane_id)
   }
 
+  it('reports delivered then expired registration and safely retries a new challenge', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime('2026-10-27T17:05:57Z')
+    const h = await startWithBothPanesPending()
+    const oldNonce = mintPaneChallenge(h.dbPath, '%10')
+    markCodexRecoveryNonceDelivered(oldNonce)
+    vi.setSystemTime('2026-10-28T08:16:24Z')
+    const late = await registerCodex(h.url, {
+      name: 'agent-left', thread_id: THREAD_A, recovery_nonce: oldNonce,
+    })
+    expect(late.obj.agent_id).toBeDefined()
+    expect(late.obj.launch_binding).toEqual({
+      status: 'unbound', reason: 'challenge_expired',
+      retry: 'launcher_pre_register',
+    })
+    expect(late.obj.hint).toContain('pre_register_codex_pane')
+    expect(bindRuntimeIdentityMock).not.toHaveBeenCalled()
+    const db = openDb(h.dbPath)
+    expect(new CodexBindingRepo(db).read('%10')?.thread_id).toBeNull()
+    db.close()
+    expect(h.logLines.join('\n')).not.toContain(oldNonce)
+    const launcher = new Client({ name: 'launcher', version: '0.0.0' })
+    const transport = new StreamableHTTPClientTransport(h.url)
+    await launcher.connect(transport)
+    const renewed = await launcher.callTool({
+      name: 'pre_register_codex_pane', arguments: {
+        pane_id: '%10', xats_agent_id: PANES[0].uuid,
+      },
+    })
+    expect(await parseTool(renewed)).toMatchObject({ ok: true })
+    const freshNonce = mintPaneChallenge(h.dbPath, '%10')
+    const reused = await registerCodex(h.url, {
+      name: 'agent-left', thread_id: THREAD_A, recovery_nonce: oldNonce,
+    })
+    expect(reused.obj.launch_binding).toMatchObject({
+      status: 'unbound', reason: 'challenge_invalid',
+    })
+    expect(readPreRegPanes(h.dbPath)).toContain('%10')
+    const fresh = await registerCodex(h.url, {
+      name: 'agent-left', thread_id: THREAD_A, recovery_nonce: freshNonce,
+    })
+    expect(fresh.obj.agent_id).toBe(late.obj.agent_id)
+    expect(fresh.obj.launch_binding).toEqual({
+      status: 'bound', pane_id: '%10', launch_id: PANES[0].uuid,
+    })
+    const after = openDb(h.dbPath)
+    expect(new CodexBindingRepo(after).read('%10')).toMatchObject({
+      agent_id: late.obj.agent_id, thread_id: THREAD_A, runtime_ui_pid: 5010,
+    })
+    after.close()
+    await late.close(); await reused.close(); await fresh.close()
+    await transport.close(); await launcher.close(); await h.app.close()
+  })
+
+  it('rejects a nonce for a replaced launch without consuming the new row', async () => {
+    const h = await startWithBothPanesPending()
+    const nonce = mintPaneChallenge(h.dbPath, '%10')
+    const db = openDb(h.dbPath)
+    new CodexPanePreRegRepo(db).upsert({
+      pane_id: '%10', xats_agent_id: 'replacement-launch',
+      expires_at: new Date(Date.now() + 60_000).toISOString(),
+    })
+    db.close()
+    const result = await registerCodex(h.url, {
+      name: 'agent-left', thread_id: THREAD_A, recovery_nonce: nonce,
+    })
+    expect(result.obj.launch_binding).toMatchObject({
+      status: 'unbound', reason: 'launch_changed',
+    })
+    expect(readPreRegPanes(h.dbPath)).toContain('%10')
+    expect(bindRuntimeIdentityMock).not.toHaveBeenCalled()
+    await result.close(); await h.app.close()
+  })
+
+  it('does not commit when carrier verification crosses the registration deadline', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime('2026-10-27T17:05:57Z')
+    const h = await startWithBothPanesPending()
+    const nonce = mintPaneChallenge(h.dbPath, '%10')
+    bindRuntimeIdentityMock.mockImplementationOnce(async () => {
+      vi.setSystemTime('2026-10-27T17:07:57Z')
+      return { ok: true, tmux_pane_id: '%10', tty: 'ttys001',
+        ui_pid: 5010, verification_mode: 'verified_pid_tty_pane' }
+    })
+    const result = await registerCodex(h.url, {
+      name: 'agent-left', thread_id: THREAD_A, recovery_nonce: nonce,
+    })
+    expect(result.obj.launch_binding).toMatchObject({
+      status: 'unbound', reason: 'challenge_expired',
+    })
+    const db = openDb(h.dbPath)
+    expect(new CodexBindingRepo(db).read('%10')?.thread_id).toBeNull()
+    db.close()
+    expect(readPreRegPanes(h.dbPath)).toContain('%10')
+    expect(h.logLines.join('\n')).toContain('pre_registration_expired')
+    await result.close(); await h.app.close()
+  })
+
   it('two overlapping pre-reg windows: each caller binds ITS OWN pane', async () => {
     // Today both registrations are refused with candidate_count and neither
     // binds — which also blocks the consume step, the only way an identity key
@@ -255,14 +355,14 @@ describe('register_agent selects its pre-reg row by recovery nonce', () => {
     const right = await registerCodex(url, {
       name: 'agent-right',
       thread_id: THREAD_B,
-      recovery_nonce: mintCodexRecoveryNonce('%20'),
+      recovery_nonce: mintPaneChallenge(dbPath, '%20'),
     })
     expect(right.obj.agent_id).toBeDefined()
 
     const left = await registerCodex(url, {
       name: 'agent-left',
       thread_id: THREAD_A,
-      recovery_nonce: mintCodexRecoveryNonce('%10'),
+      recovery_nonce: mintPaneChallenge(dbPath, '%10'),
     })
     expect(left.obj.agent_id).toBeDefined()
 
@@ -318,7 +418,7 @@ describe('register_agent selects its pre-reg row by recovery nonce', () => {
     const left = await registerCodex(url, {
       name: 'agent-left',
       thread_id: THREAD_A,
-      recovery_nonce: mintCodexRecoveryNonce('%10'),
+      recovery_nonce: mintPaneChallenge(dbPath, '%10'),
     })
     expect(left.obj.agent_id).toBeDefined()
 
@@ -351,8 +451,7 @@ describe('register_agent selects its pre-reg row by recovery nonce', () => {
     await app.close()
   })
 
-  it('a stale or invented nonce falls back instead of erroring', async () => {
-    // An unknown token means "no correlation offered", never a failed call.
+  it('reports invalid nonce without consuming another pane', async () => {
     const { app, dbPath, url, logLines } = await startWithBothPanesPending()
 
     const left = await registerCodex(url, {
@@ -362,10 +461,13 @@ describe('register_agent selects its pre-reg row by recovery nonce', () => {
     })
     expect(left.obj.agent_id).toBeDefined()
     expect(left.obj.error).toBeUndefined()
+    expect(left.obj.launch_binding).toMatchObject({
+      status: 'unbound', reason: 'challenge_invalid',
+    })
 
     expect(readPreRegPanes(dbPath)).toEqual(['%10', '%20'])
     expect(logLines).toContainEqual(expect.stringContaining(
-      'reason=pane_nonce_required'
+      'reason=challenge_invalid'
     ))
 
     await left.close()
@@ -377,11 +479,11 @@ describe('register_agent selects its pre-reg row by recovery nonce', () => {
       const { app, dbPath, url } = await startWithBothPanesPending()
       const first = await registerCodex(url, {
         name: 'agent-left', thread_id: THREAD_A,
-        recovery_nonce: mintCodexRecoveryNonce('%10'),
+        recovery_nonce: mintPaneChallenge(dbPath, '%10'),
       })
       const again = await registerCodex(url, {
         name: 'agent-left', thread_id: THREAD_A,
-        recovery_nonce: mintCodexRecoveryNonce('%20'),
+        recovery_nonce: mintPaneChallenge(dbPath, '%20'),
       })
       expect(readRow(dbPath, 'agent-left')).toEqual({
         tmux_pane_id: '%20', runtime_ui_pid: 5020,
@@ -402,14 +504,14 @@ describe('register_agent selects its pre-reg row by recovery nonce', () => {
       bindRuntimeIdentityMock.mockResolvedValueOnce({ error: 'pid_has_no_tty' })
       const initial = await registerCodex(url, {
         name: 'agent-left', thread_id: THREAD_A,
-        recovery_nonce: mintCodexRecoveryNonce('%10'),
+        recovery_nonce: mintPaneChallenge(dbPath, '%10'),
       })
       expect(evaluateSeedingMock).toHaveBeenCalledTimes(3)
       expect(evaluateSeedingMock.mock.calls[2][0]).toMatchObject({ pane_id: '%10' })
       expect(readPreRegPanes(dbPath)).toContain('%10')
       const retry = await registerCodex(url, {
         name: 'agent-left', thread_id: THREAD_A,
-        recovery_nonce: mintCodexRecoveryNonce('%10'),
+        recovery_nonce: mintPaneChallenge(dbPath, '%10'),
       })
       expect(readRow(dbPath, 'agent-left').tmux_pane_id).toBe('%10')
       await initial.close()
@@ -429,7 +531,7 @@ describe('register_agent selects its pre-reg row by recovery nonce', () => {
     })
     const failed = await registerCodex(url, {
       name: 'agent-left', thread_id: THREAD_A,
-      recovery_nonce: mintCodexRecoveryNonce('%10'),
+      recovery_nonce: mintPaneChallenge(dbPath, '%10'),
     })
     expect(evaluateSeedingMock).toHaveBeenCalledTimes(2)
     await failed.close()

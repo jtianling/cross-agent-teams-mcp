@@ -625,7 +625,9 @@ async function sendAfterGuard(
   // Minted per send, not per schedule: a retry of the same generation reissues
   // and invalidates the previous token, so only the notice actually sitting in
   // the pane can be quoted back.
-  const nonce = mintCodexRecoveryNonce(row.pane_id)
+  const nonce = mintCodexRecoveryNonce(row.pane_id, {
+    launch_id: row.xats_agent_id, expires_at: row.expires_at,
+  })
   const result = await tmuxPoke({
     pane_id: row.pane_id,
     content: buildCodexRecoveryPokeContent({ ...holder, nonce }),

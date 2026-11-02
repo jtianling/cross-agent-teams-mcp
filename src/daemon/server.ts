@@ -31,9 +31,18 @@ import { RegisterOpencodeSelfService } from '../mcp/register-opencode-self.js'
 import { dispatchOpencodeServerPoke } from '../mcp/opencode-server-dispatch.js'
 import { resolveLocalDeviceLabel } from './local-device.js'
 import { bindHostCoversIpv4Loopback, classifyPeerAddress, type SessionOriginInfo } from './network-origin.js'
+import { ReminderMonitor, type ReminderMonitorDeps } from '../reminders/monitor.js'
+import { mountReminderRoutes } from '../reminders/routes.js'
+import { WakeScheduler, type SchedulerDeps } from '../schedules/service.js'
+import { mountScheduleRoutes } from '../schedules/routes.js'
+import { SendMessageService } from '../mcp/send-message.js'
+import { EventsOutbox } from '../storage/events-outbox.js'
+import { createAutoPokeImpl } from '../mcp/tools.js'
 
 export interface ServerOpts {
   dbPath: string
+  reminderMonitorDeps?: ReminderMonitorDeps
+  schedulerDeps?: SchedulerDeps
   token?: string
   localDevice?: string
   cleanupIntervalMs?: number
@@ -146,6 +155,23 @@ export async function buildServer(opts: ServerOpts): Promise<FastifyInstance> {
     kimiRuntimeControlService,
   })
   mountManagedRoutes(app, managed, managedLog)
+  const reminderAgents = new AgentsRepo(db)
+  const reminderSender = new SendMessageService(
+    db, reminderAgents, new EventsOutbox(db), {
+      poke: createAutoPokeImpl(db, reminderAgents,
+        channelWakeFanout, context.localDevice),
+    }
+  )
+  const reminders = new ReminderMonitor(
+    db, reminderSender, context.localDevice,
+    { log: managedLog, ...opts.reminderMonitorDeps }
+  )
+  mountReminderRoutes(app, reminders, managedLog)
+  reminders.start()
+  const scheduler = new WakeScheduler(db, reminderSender, context.localDevice,
+    { log: managedLog, ...opts.schedulerDeps })
+  mountScheduleRoutes(app, scheduler, managedLog)
+  scheduler.start()
   app.get('/health', async () => ({
     ok: true,
     version,
@@ -198,6 +224,8 @@ export async function buildServer(opts: ServerOpts): Promise<FastifyInstance> {
     clearInterval(interval)
     clearInterval(orphanGcInterval)
     clearInterval(unreadWatchdogInterval)
+    await reminders.stop()
+    await scheduler.stop()
     // Closes the gate before db.close(): a tick fired moments ago must not
     // start alerting (and spawning tmux probes) for a server already down.
     unreadWatchdog.stop()

@@ -6,13 +6,19 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { openDb } from '../src/storage/db.js'
 import { applySchema } from '../src/storage/schema.js'
-import { mintCodexRecoveryNonce } from '../src/mcp/codex-recovery-nonce.js'
+import { mintPaneChallenge } from './helpers/pane-challenge.js'
 
 vi.mock('../src/mcp/codex-seeding-poke.js', async importOriginal => ({
   ...await importOriginal<typeof import('../src/mcp/codex-seeding-poke.js')>(),
   evaluateCodexSeedingOnPreRegister: vi.fn(),
 }))
-import { __testOverrides as autoBindOverrides } from '../src/mcp/auto-bind-codex-pane.js'
+vi.mock('../src/mcp/auto-bind-codex-pane.js', async importOriginal => ({
+  ...await importOriginal<typeof import('../src/mcp/auto-bind-codex-pane.js')>(),
+  defaultPaneTtySync: vi.fn(() => undefined),
+}))
+import {
+  __testOverrides as autoBindOverrides, defaultPaneTtySync,
+} from '../src/mcp/auto-bind-codex-pane.js'
 
 const detectTmuxPaneMock = vi.fn()
 const bindRuntimeIdentityMock = vi.fn()
@@ -107,6 +113,7 @@ describe('register_agent pre-reg overwrite race (stale bind)', () => {
     bindRuntimeIdentityMock.mockReset()
     evaluateRecoveryMock.mockReset()
     cancelRecoveryMock.mockReset()
+    vi.mocked(defaultPaneTtySync).mockClear()
     detectTmuxPaneMock.mockResolvedValue({ error: 'not_found', candidates: [] })
   })
 
@@ -170,6 +177,7 @@ describe('register_agent pre-reg overwrite race (stale bind)', () => {
         arguments: { pane_id: '%1972', xats_agent_id: 'U9', identity_key: 'K9' },
       })
       expect(await parseTool(overwrite)).toMatchObject({ ok: true })
+      expect(defaultPaneTtySync).toHaveBeenCalledWith('%1972')
       return {
         ok: true,
         tmux_pane_id: '%1972',
@@ -190,7 +198,7 @@ describe('register_agent pre-reg overwrite race (stale bind)', () => {
         name: 'Y',
         team: 'aoe',
         thread_id: VALID_THREAD_ID,
-        recovery_nonce: mintCodexRecoveryNonce('%1972'),
+        recovery_nonce: mintPaneChallenge(dbPath, '%1972'),
       },
     })
     const obj = await parseTool(resp)

@@ -91,7 +91,11 @@ import {
 } from './codex-seeding-poke.js'
 import type { SessionOriginInfo } from '../daemon/network-origin.js'
 import { isAlive } from '../daemon/pid.js'
-import { consumeCodexRecoveryNonce } from './codex-recovery-nonce.js'
+import { takeCodexPaneChallenge } from './codex-recovery-nonce.js'
+import {
+  LAUNCH_BINDING_RETRY_HINT, unboundLaunch, verifiedLaunchBinding,
+  type CodexPaneBindAttempt,
+} from './codex-launch-binding.js'
 import type { DaemonContext } from '../daemon/server.js'
 
 export interface AgentIdHolder { current: string | undefined }
@@ -810,20 +814,33 @@ export function registerBusinessTools(
    * infer one from "exactly one machine-wide candidate".  Spending it here
    * (rather than after a successful bind) keeps it single-use even when the
    * bind then fails: a token that survived a failure could re-target a later
-   * registration at a pane that has moved on.  An unknown token resolves to
-   * nothing and the scan proceeds exactly as before.
+   * registration at a pane that has moved on. Invalid or expired challenges
+   * must not fall through to another pane.
    */
   async function tryCodexPreRegScan(
     callerAgentId: string,
     expectedRegisterGeneration: number,
     recoveryNonce?: string
-  ): Promise<boolean> {
-    const targetPaneId = recoveryNonce === undefined
-      ? undefined
-      : consumeCodexRecoveryNonce(recoveryNonce)
+  ): Promise<CodexPaneBindAttempt> {
+    const challenge = recoveryNonce === undefined
+      ? undefined : takeCodexPaneChallenge(recoveryNonce)
+    if (challenge && !challenge.ok) {
+      log?.(`codex launch binding: caller=${callerAgentId} `
+        + `status=unbound reason=${challenge.reason}`)
+      return unboundLaunch(challenge.reason)
+    }
+    const targetPaneId = challenge?.ok ? challenge.challenge.pane_id : undefined
     const targetedRow = targetPaneId === undefined
       ? undefined
       : codexPanePreRegRepo.getByPaneId(targetPaneId)
+    if (challenge?.ok && (!targetedRow
+      || targetedRow.xats_agent_id !== challenge.challenge.launch_id
+      || targetedRow.expires_at !== challenge.challenge.expires_at)) {
+      const reason = targetedRow ? 'launch_changed' : 'pre_registration_missing'
+      log?.(`codex launch binding: caller=${callerAgentId} `
+        + `pane=${targetPaneId} status=unbound reason=${reason}`)
+      return unboundLaunch(reason)
+    }
     if (recoveryNonce !== undefined) {
       log?.(
         `codex-recovery nonce (debug): caller=${callerAgentId} ` +
@@ -882,17 +899,23 @@ export function registerBusinessTools(
     if (auto === false) {
       if (targetedRow !== undefined) {
         const current = codexPanePreRegRepo.getByPaneId(targetedRow.pane_id)
-        if (JSON.stringify(current) === JSON.stringify(targetedRow)) {
+        if (JSON.stringify(current) === JSON.stringify(targetedRow)
+          && Date.parse(targetedRow.expires_at) > Date.now()) {
           evaluateCodexSeedingOnPreRegister(targetedRow, codexSeedingDeps)
         }
       }
-      return false
+      return unboundLaunch(targetedRow &&
+        Date.parse(targetedRow.expires_at) <= Date.now()
+        ? 'challenge_expired' : 'verification_failed')
     }
     // Seat-follow only after a CONSUMED row: a stale outcome means the
     // pre-reg row was overwritten during the bind, and re-attaching the
     // seat key here would bypass the full-snapshot consume protection.
     if (auto === 'bound_consumed') runCodexSeatFollow(callerAgentId)
-    return true
+    return { bound: true, feedback: verifiedLaunchBinding(
+      db, callerAgentId, recoveryLocalDevice, true, expectedRegisterGeneration,
+      recoveryNonce !== undefined,
+    ) }
   }
 
   function paneHasPendingPreReg(paneId: string): boolean {
@@ -1038,9 +1061,9 @@ export function registerBusinessTools(
 
     if (inferredAgent === 'codex') {
       if (args.recovery_nonce !== undefined) {
-        return tryCodexPreRegScan(
+        return (await tryCodexPreRegScan(
           callerAgentId, expectedRegisterGeneration, args.recovery_nonce
-        )
+        )).bound
       }
       // Same-thread evidence DIRECTS the resolution instead of ending it: a
       // unique seat is inherited exactly, and only a registration with NO
@@ -1079,9 +1102,9 @@ export function registerBusinessTools(
         // Scan ONLY.  The seat being gone says nothing about which pane the
         // caller occupies now, so the global detection below stays out of
         // reach — unlike the no-evidence path, which may fall through to it.
-        return tryCodexPreRegScan(
+        return (await tryCodexPreRegScan(
           callerAgentId, expectedRegisterGeneration, args.recovery_nonce
-        )
+        )).bound
       }
       if (evidence.kind === 'ambiguous') {
         logSameThreadDecision({
@@ -1100,9 +1123,9 @@ export function registerBusinessTools(
         seatCount: evidence.seatCount,
         agentIds: [],
       })
-      if (await tryCodexPreRegScan(
+      if ((await tryCodexPreRegScan(
         callerAgentId, expectedRegisterGeneration, args.recovery_nonce
-      )) {
+      )).bound) {
         return true
       }
     }
@@ -1181,7 +1204,7 @@ export function registerBusinessTools(
       "Internal field for the cross-agent-teams-mcp channel proxy.  Stores the proxy's parent Claude Code UI pid (`process.ppid`) so that Claude Code hosts registering in the same lineage can auto-bind their claude-channel delivery.  Only valid when role='__channel_proxy__'; rejected otherwise."
     ),
     recovery_nonce: z.string().min(1).optional().describe(
-      'One-time token quoted verbatim in a cross-agent-teams notice written into your pane — either a recovery notice (re-register as a named identity) or a pane token notice (a first registration while several panes are starting at once). Pass it back EXACTLY as given on the register_agent call you make in response: the daemon sent it to one specific tmux pane, so it is what tells the daemon which pane you are. It says nothing about who you register as. Omitting it is safe and only means the daemon falls back to guessing; inventing one has no effect.'
+      'One-time token quoted verbatim in a cross-agent-teams notice written into your pane. Pass it back EXACTLY as given; it associates this pane and launch, and does not choose your name or team. It expires with the launcher pre-registration. Codex registration returns launch_binding separately from identity success: unbound means no completed launch proof, even with agent_id/thread_id. For an expired or invalid token, ask the launcher to pre-register its verified current pane/launch and use the new challenge. Never infer pane binding from cwd, old seat metadata, or loaded threads.'
     ),
     delivery: deliverySchema.optional(),
   }).strict(
@@ -1406,6 +1429,7 @@ export function registerBusinessTools(
     args: {
       agent_type?: AgentType
       agent_type_name?: string
+      recovery_nonce?: string
       model?: string
       device?: string
       name: string
@@ -1724,9 +1748,13 @@ export function registerBusinessTools(
         args.agent_type === 'codex'
           ? actualPriorSnapshot?.codex_thread_id ?? undefined
           : undefined
+      const challengeAttempt = !casDrift && registerGenerationValid
+        && args.agent_type === 'codex' && args.recovery_nonce !== undefined
+        ? await tryCodexPreRegScan(res.agent_id, registerGeneration,
+          args.recovery_nonce) : undefined
       const autoBound = casDrift || !registerGenerationValid
         ? false
-        : await autoBindRuntimeIdentity(
+        : challengeAttempt?.bound ?? await autoBindRuntimeIdentity(
             args,
             res.agent_id,
             priorCodexThreadId,
@@ -1735,6 +1763,21 @@ export function registerBusinessTools(
       const envelope = autoBoundChannelCsid !== undefined
         ? { ...publicRes, channel_session_id: autoBoundChannelCsid }
         : publicRes
+      if (args.agent_type === 'codex') {
+        const launchBinding = casDrift || !registerGenerationValid
+          ? unboundLaunch('registration_changed',
+            args.recovery_nonce !== undefined).feedback
+          : challengeAttempt?.feedback ?? verifiedLaunchBinding(
+            db, res.agent_id, recoveryLocalDevice, autoBound, registerGeneration)
+        log?.(`codex launch binding: caller=${res.agent_id} `
+          + `status=${launchBinding.status}`
+          + (launchBinding.status === 'unbound'
+            ? ` reason=${launchBinding.reason}` : ` pane=${launchBinding.pane_id}`))
+        return { ...envelope, launch_binding: launchBinding,
+          ...(launchBinding.status === 'unbound' && launchBinding.retry
+            ? { hint: LAUNCH_BINDING_RETRY_HINT } : {}),
+        }
+      }
       if (autoBound) return envelope
       if (casDrift && !registerGenerationValid) {
         // The residue of the raced session's seat could NOT be cleared (no

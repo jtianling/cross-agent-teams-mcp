@@ -1,10 +1,14 @@
-import { describe, it, expect, afterEach } from 'vitest'
+import { describe, it, expect, afterEach, vi } from 'vitest'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { startServer } from '../src/daemon/server.js'
+
+vi.mock('../src/daemon/tmux-pane-detect.js', () => ({
+  detectTmuxPane: async () => ({ error: 'not_found', candidates: [] }),
+}))
 
 const tmp = (): string => mkdtempSync(join(tmpdir(), 'atm-hint-'))
 
@@ -67,6 +71,9 @@ describe('register_agent tmux_pane_id hint', () => {
 
     expect(obj.agent_id).toBeDefined()
     expect(obj.hint).toBeUndefined()
+    expect(obj.launch_binding).toEqual({
+      status: 'unbound', reason: 'binding_not_verified',
+    })
 
     await t.close(); await app.close()
   })
