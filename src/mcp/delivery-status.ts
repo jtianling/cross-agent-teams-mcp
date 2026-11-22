@@ -103,6 +103,24 @@ export function updateDeliveryStatus(
 export class GetDeliveryStatusService {
   constructor(private db: Database.Database) {}
 
+  cancelUnreadAlert(caller: string, messageId: string, sameRecipient: boolean) {
+    return this.db.transaction(() => {
+      const owned = this.db.prepare(
+        'SELECT to_agent_id FROM messages WHERE id=? AND from_agent_id=?'
+      ).get(messageId, caller) as { to_agent_id: string | null } | undefined
+      if (!owned) return { error: 'unknown_message' }
+
+      const scope = sameRecipient ? 'to_agent_id=?' : 'id=?'
+      const rows = this.db.prepare(
+        `UPDATE messages SET ack_deadline_at=NULL
+          WHERE from_agent_id=? AND ${scope} AND ack_deadline_at IS NOT NULL
+          RETURNING ack_alerted_at`
+      ).all(caller, sameRecipient ? owned.to_agent_id : messageId) as
+        Array<{ ack_alerted_at: string | null }>
+      return { cancelled: rows.filter(row => row.ack_alerted_at === null).length }
+    }).immediate()
+  }
+
   get(args: { caller: string; message_id: string }):
     | { message_id: string; statuses: DeliveryStatusRow[] }
     | { error: 'unknown_message' } {

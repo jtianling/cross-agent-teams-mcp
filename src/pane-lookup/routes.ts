@@ -1,7 +1,8 @@
+import { batchProbe } from '../daemon/batch-probe.js'
 import type Database from 'better-sqlite3'
 import type { FastifyInstance } from 'fastify'
 import type { ChannelWakeFanout } from '../daemon/channel-wake-fanout.js'
-import { PaneProbeError } from './probes.js'
+import { defaultPaneProbes, PaneProbeError } from './probes.js'
 import { PaneLookupService } from './service.js'
 import { paneLookupSchema } from './schema.js'
 
@@ -9,7 +10,11 @@ export function mountPaneLookupRoutes(
   app: FastifyInstance, db: Database.Database, device: string,
   channels?: ChannelWakeFanout,
 ): void {
-  const service = new PaneLookupService(db, device, channels)
+  const service = new PaneLookupService(db, device, channels, {
+    ...defaultPaneProbes,
+    panes: batchProbe(defaultPaneProbes.panes, socket =>
+      JSON.stringify([socket.path, socket.device, socket.inode, socket.uid])),
+  })
   app.post('/api/runtime/pane/lookup', {
     errorHandler: async (error, _req, reply) => {
       console.error(`pane lookup request failed: code=${error.code ?? 'unknown'}`)

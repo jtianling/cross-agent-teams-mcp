@@ -343,3 +343,13 @@ The alert MUST NOT include the original message body.
 - **WHEN** the daemon emits the unread alert for `m1`
 - **THEN** the injected text does not contain `secret-payload`
 
+
+### Requirement: 发送方可取消未读告警
+
+发送方可用 `cancel_unread_alert({message_id})` 取消一条消息的待发告警.  告警中须包含消息 ID.  设置 `same_recipient_pending: true` 时, 取消该发送方此前发给同一收件人的待发告警.  后发消息仍独立计时, 取消不产生已读回执.  已开始派发的告警可能仍然送达.
+
+#### Scenario: 按收件人取消
+
+- **WHEN** 发送方在第一条告警后用其消息 ID 批量取消
+- **THEN** 后续扫描跳过同一发送方此前发给该收件人的消息
+- **AND** 其他发送方和其他收件人的消息继续按原定期限检查

@@ -404,7 +404,7 @@ describe('watchdog runner gate', () => {
 describe('unread alert text', () => {
   it('announces itself as an alert rather than new mail', () => {
     const text = buildUnreadAlert({
-      recipientName: 'bob', recipientTeam: 'alpha', subject: 'ping', skipReason: null,
+      messageId: 'msg-id', recipientName: 'bob', recipientTeam: 'alpha', subject: 'ping', skipReason: null,
     })
     expect(text).toContain('不是新邮件')
     expect(text).toContain('无需调 get_inbox')
@@ -413,7 +413,7 @@ describe('unread alert text', () => {
 
   it('names the recipient and the stall', () => {
     const text = buildUnreadAlert({
-      recipientName: 'bob', recipientTeam: 'alpha', subject: 'ping', skipReason: null,
+      messageId: 'msg-id', recipientName: 'bob', recipientTeam: 'alpha', subject: 'ping', skipReason: null,
     })
     expect(text).toContain('bob@alpha')
     expect(text).toContain('15 分钟未被读取')
@@ -421,7 +421,7 @@ describe('unread alert text', () => {
 
   it('names which message stalled', () => {
     const text = buildUnreadAlert({
-      recipientName: 'bob', recipientTeam: 'alpha', subject: 'deploy review', skipReason: null,
+      messageId: 'msg-id', recipientName: 'bob', recipientTeam: 'alpha', subject: 'deploy review', skipReason: null,
     })
     // A sender with several messages outstanding to the same recipient cannot
     // act on an alert that does not say which one.
@@ -431,7 +431,7 @@ describe('unread alert text', () => {
   it('marks an absent subject explicitly', () => {
     for (const subject of [null, '']) {
       const text = buildUnreadAlert({
-        recipientName: 'bob', recipientTeam: 'alpha', subject, skipReason: null,
+        messageId: 'msg-id', recipientName: 'bob', recipientTeam: 'alpha', subject, skipReason: null,
       })
       expect(text).toContain('(无 subject)')
     }
@@ -439,14 +439,14 @@ describe('unread alert text', () => {
 
   it('carries the last skip reason', () => {
     const text = buildUnreadAlert({
-      recipientName: 'bob', recipientTeam: 'alpha', subject: 'ping', skipReason: 'pane_reassigned',
+      messageId: 'msg-id', recipientName: 'bob', recipientTeam: 'alpha', subject: 'ping', skipReason: 'pane_reassigned',
     })
     expect(text).toContain('pane_reassigned')
   })
 
   it('states an absent skip reason explicitly instead of omitting it', () => {
     const text = buildUnreadAlert({
-      recipientName: 'bob', recipientTeam: 'alpha', subject: 'ping', skipReason: null,
+      messageId: 'msg-id', recipientName: 'bob', recipientTeam: 'alpha', subject: 'ping', skipReason: null,
     })
     expect(text).toContain('无 skip reason')
   })

@@ -6,7 +6,24 @@ on:
       - release
 
 jobs:
+  darwin-carriers:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - run: node scripts/build-darwin-carrier.mjs native-dist arm64
+      - run: node scripts/build-darwin-carrier.mjs native-dist x64
+      - run: python3 tests/native/darwin-carrier.py "native-dist/carrier-$(node -p process.arch).node"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: darwin-carriers
+          path: native-dist/*.node
+
   publish:
+    needs: darwin-carriers
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -28,4 +45,13 @@ jobs:
 
       - run: pnpm test
 
-      - run: npx -y npm@11 publish --provenance --access public --ignore-scripts
+      - uses: actions/download-artifact@v4
+        with:
+          name: darwin-carriers
+          path: dist
+      - run: |
+          tarball=$(npm pack --ignore-scripts --silent)
+          for arch in arm64 x64; do
+            tar -tzf "$tarball" "package/dist/carrier-$arch.node" >/dev/null
+          done
+          npx -y npm@11 publish "$tarball" --provenance --access public --ignore-scripts

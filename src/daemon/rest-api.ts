@@ -409,7 +409,7 @@ export function mountRestApi(
   app.get('/api/inbox', (req, reply) => handleInbox(ctx, req, reply))
   app.get('/api/agents', (req, reply) => handleAgents(ctx, req, reply))
   mountPaneLookupRoutes(app, db, localDevice, deps.channelWakeFanout)
-  const codexBindingLookup = new CodexBindingLookup(
+  const codexBindingLookup = deps.context?.bindingLookup ?? new CodexBindingLookup(
     new CodexBindingRepo(db), localDevice
   )
   app.post(

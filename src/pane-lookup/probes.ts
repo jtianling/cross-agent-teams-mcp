@@ -1,3 +1,4 @@
+import { probeExecutable } from '../daemon/probe-executable.js'
 import { execFile } from 'node:child_process'
 import { realpath, stat } from 'node:fs/promises'
 import { promisify } from 'node:util'
@@ -87,7 +88,7 @@ export function parsePaneFields(line: string): z.infer<typeof paneRowSchema> {
 async function inspectPanes(socket: SocketSnapshot): Promise<PaneSnapshot[]> {
   let stdout: string
   try {
-    const result = await exec('tmux', [
+    const result = await exec(probeExecutable('tmux'), [
       '-S', socket.path, 'list-panes', '-a', '-F', PANE_FORMAT,
     ], { timeout: PROBE_TIMEOUT_MS, maxBuffer: PROBE_MAX_BYTES,
       env: probeEnvironment() })
@@ -137,7 +138,7 @@ export function parseProcessSnapshot(line: string): ProcessSnapshot | undefined 
 async function inspectProcess(pid: number): Promise<ProcessSnapshot | undefined> {
   let stdout: string
   try {
-    const result = await exec('ps', [
+    const result = await exec(probeExecutable('ps'), [
       '-p', String(pid), '-o', 'pid=,pgid=,tpgid=,tty=,lstart=,stat=,args=',
     ], { timeout: PROBE_TIMEOUT_MS, maxBuffer: PROBE_MAX_BYTES,
       env: probeEnvironment() })

@@ -486,7 +486,7 @@ export function mountMcp(
 
   const managedTools = new Set([
     'send_message', 'send_message_by_id', 'broadcast', 'broadcast_to_role',
-    'get_inbox', 'list_agents', 'get_delivery_status', 'echo',
+    'get_inbox', 'list_agents', 'get_delivery_status', 'cancel_unread_alert', 'echo',
   ])
 
   async function bindManagedProxy(session: Session): Promise<void> {

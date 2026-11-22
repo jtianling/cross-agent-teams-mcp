@@ -9,7 +9,7 @@ Prerequisites:
 Manual scenario (broadcast replaces human relay):
 1. In each of opencode, Claude Code, Codex CLI, call `register_agent` with a distinct `role`.
 2. From opencode, call `broadcast({ body: "shared context X" })`.
-3. In Claude Code and Codex CLI, call `get_inbox({ since_event_id: 0 })`; both receive X.
+3. In Claude Code and Codex CLI, call `get_inbox({})`; both receive X.
 
 Record stdout transcripts per agent as evidence.
 

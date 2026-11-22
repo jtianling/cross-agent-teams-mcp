@@ -168,6 +168,7 @@ export interface UnreadWatchdogResult {
  * and the alert is a pointer, not a redelivery.
  */
 export function buildUnreadAlert(args: {
+  messageId: string
   recipientName: string | null
   recipientTeam: string | null
   subject: string | null
@@ -185,6 +186,8 @@ export function buildUnreadAlert(args: {
     `你发给 ${who} 的消息 (subject: ${subject}) 已 ${ACK_DEADLINE_MINUTES} 分钟未被读取.`,
     `最后投递状态: ${reason}.`,
     `对方可能已失联, 请自行决定是否接管后续工作.`,
+    `如已确认对方收到, 可取消此前发给对方的其余待发告警:`,
+    `cancel_unread_alert({message_id:"${args.messageId}",same_recipient_pending:true})`,
   ].join('\n')
 }
 
@@ -254,6 +257,7 @@ export async function runUnreadWatchdogScan(
     // it through the poke layer would make it depend on that layer's errors.
     if (row.sender_exists === 0) continue
     const prompt = buildUnreadAlert({
+      messageId: row.id,
       recipientName: row.recipient_name,
       recipientTeam: row.recipient_team,
       subject: row.subject,
@@ -308,7 +312,7 @@ function retryWindowOpen(row: DueRow, now: number): boolean {
  */
 function claimRow(db: Database.Database, messageId: string, nowIso: string): boolean {
   const res = db
-    .prepare(`UPDATE messages SET ack_alerted_at=? WHERE id=? AND ack_alerted_at IS NULL`)
+    .prepare(`UPDATE messages SET ack_alerted_at=? WHERE id=? AND ack_alerted_at IS NULL AND ack_deadline_at IS NOT NULL`)
     .run(nowIso, messageId)
   return res.changes === 1
 }

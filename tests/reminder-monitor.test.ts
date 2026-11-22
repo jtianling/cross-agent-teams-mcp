@@ -6,7 +6,7 @@ import { EventsOutbox } from '../src/storage/events-outbox.js'
 import { SendMessageService } from '../src/mcp/send-message.js'
 import { ReminderMonitor } from '../src/reminders/monitor.js'
 import { ReminderWatchesRepo } from '../src/reminders/repo.js'
-import { type Reminder } from '../src/reminders/schema.js'
+import { ReminderError, type Reminder } from '../src/reminders/schema.js'
 import { insertAgent } from './helpers/insert-agent.js'
 
 const LIST = 'bfe44969-fcb1-49a2-a9c3-a4c711f83bbd'
@@ -299,6 +299,24 @@ describe('reminder monitor', () => {
     await h.monitor.run()
     expect(h.reader.read).toHaveBeenCalledTimes(count)
     expect(h.monitor.list()).toEqual([])
+  })
+
+  it('shares host authorization failures for one sweep and recovers on the next', async () => {
+    const h = setup()
+    await h.monitor.add(INPUT)
+    await h.monitor.add({ ...INPUT, event: 'completed' })
+    h.reader.read.mockClear()
+    h.reader.read.mockRejectedValueOnce(new ReminderError(
+      'reminders_not_authorized', 'Reminders access denied'
+    ))
+    await h.monitor.run()
+    expect(h.reader.read).toHaveBeenCalledTimes(1)
+    expect(h.monitor.list().map(w => w.last_error)).toEqual([
+      'Reminders access denied', 'Reminders access denied',
+    ])
+    await h.monitor.run()
+    expect(h.reader.read).toHaveBeenCalledTimes(3)
+    expect(h.monitor.list().every(w => w.last_error === null)).toBe(true)
   })
 
   it('isolates errors and retries a missing recipient without advancing state', async () => {

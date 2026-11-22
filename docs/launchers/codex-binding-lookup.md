@@ -60,6 +60,13 @@ Codex thread.  禁止用相同 cwd, 启动时间或 rollout 遍历顺序推断 p
    pid.  同进程组 wrapper/native 视为一个 carrier.  异步探测后再次检查数据库
    快照, 任何变化均不能返回先前结果.
 
+macOS 本机构建会用系统 clang++ 和当前 Node 的头文件编译 N-API 模块.
+首次需要核验已完成的绑定时, daemon 通过专用 `xats-observer-*` 会话建立
+tmux 控制连接.  观察窗格的生命周期由 daemon 的私有 Unix socket 控制.
+后续请求复用连接, 实时读取 pane/TTY 和内核进程状态.  控制连接断开或
+socket 换代时, 当前探测失败, 后续请求可重新建连.  此机制也用于带 launch ID
+的 MCP 重连.  Linux 及缺少匹配架构模块的安装沿用命令行探针.
+
 客户端仍须在 lookup 前后复核实际 pane, launcher UUID 和自己的启动代际,
 并通过 CAS 保存结果.  HTTP 查询与客户端稍后的写入并非同一事务.
 

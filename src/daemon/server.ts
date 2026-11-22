@@ -1,3 +1,5 @@
+import { bindingProbes } from './tmux-control/binding.js'
+import type { CodexBindingLookup } from '../mcp/codex-binding-lookup.js'
 import Fastify, { type FastifyInstance } from 'fastify'
 import { createServer as createHttpServer, type Server as HttpServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { openDb } from '../storage/db.js'
@@ -84,6 +86,7 @@ export interface DaemonContext {
    *  service reports pane visibility as `'unknown'`, so an in-process server
    *  never shells out to the host's tmux. */
   paneVisibleProbe?: (paneId: string) => boolean
+  bindingLookup?: CodexBindingLookup
 }
 
 function parsePositiveInt(raw: string | undefined, fallback: number): number {
@@ -106,6 +109,9 @@ export async function buildServer(opts: ServerOpts): Promise<FastifyInstance> {
   const fanout = opts.fanout ?? new SseFanout()
   const channelWakeFanout = opts.channelWakeFanout ?? new ChannelWakeFanout()
   const managedLog = opts.mcpLog ?? ((line: string) => console.error(line))
+  const binding = bindingProbes(db, context.localDevice)
+  context.bindingLookup = binding?.lookup
+  if (binding) app.addHook('onClose', () => binding.close())
   const managed = new ManagedService(db, context.localDevice,
     channelWakeFanout, { log: managedLog, probe: opts.managedRuntimeProbe })
   const runtimeRegisterSvc = new RegisterAgentService(db, {

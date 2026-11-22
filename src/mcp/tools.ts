@@ -176,6 +176,7 @@ const AWAIT_ACK_S_SCHEMA = z.number().int().min(0).max(30).default(10)
 // a costlier failure than the silent stall this feature exists to remove.
 const AWAIT_ACK_DESC = [
   'Returns ack:{status:"read"|"not_yet", waited_ms} — a REAL receipt: status "read" means the recipient\'s own get_inbox actually returned this message, which no transport-level "poked" can prove.',
+  'Use cancel_unread_alert with the returned message_id to cancel a pending sender alert.',
   'await_ack_s controls the wait (default 10s, 0 disables, max 30).',
   'ack.status "not_yet" is NOT a failure, NOT a timeout, and NOT a verdict — it only means the recipient had not read it during those few seconds.  DO NOT change your behaviour because of it: do not give up on the recipient, do not take over its work, do not poll, do not re-send.',
   'If a message sent with need_reply (the default) is still unread 15 minutes later, the daemon ATTEMPTS to poke YOU with a separate delivery alert naming the recipient and the last delivery status.  A transient failure (your own pane busy, a channel write error) is retried on the following sweeps for about 10 minutes, but a hard failure is not retried and the attempt is then abandoned silently, so treat the alert as a strong heads-up rather than a guarantee.  A send with need_reply:false gets no alert at all — for those, the ack you get back is the only delivery signal there will ever be.',
@@ -2247,7 +2248,7 @@ export function registerBusinessTools(
     const connectionId = getSessionId?.() ?? caller()
     if (!connectionId) return { error: 'unknown_agent' }
     const service = new CodexLaunchReconnectService(
-      db, context?.localDevice ?? 'local'
+      db, context?.localDevice ?? 'local', { lookup: context?.bindingLookup }
     )
     const result = await service.reconnect(args)
     if (!result.ok) return result
@@ -2965,21 +2966,40 @@ export function registerBusinessTools(
       title: 'Get inbox',
       description: [
         'Return messages addressed to the caller (by agent_id or matching role) within the caller team.',
-        'Default behaviour (since_event_id omitted): the daemon reads the caller\'s server-side cursor (`agents.last_processed_event_id`), returns mail past it, and ADVANCES the cursor to the highest returned event_id in the same transaction. Subsequent default calls return only newer mail.',
+        'The daemon reads the caller\'s server-side cursor (`agents.last_processed_event_id`), returns mail past it, and ADVANCES the cursor to the highest returned event_id in the same transaction. Subsequent default calls return only newer mail.',
         'Pagination via `limit` advances the cursor only to the last RETURNED event_id; the next default call resumes from there.',
-        'Explicit `since_event_id` (any number, including 0) is read-only inspection: the daemon uses the supplied value as the lower bound and does NOT advance the stored cursor — useful for re-reading history or debugging without disturbing live read position.',
         'REPLY GUIDANCE: every returned message carries `from_agent_id`, `from_name`, and `from_device` for the sender. When replying via `send_message`, construct `to_agent_name` as `from_name + ":" + from_device` whenever `from_device !== <your own device>` — otherwise the daemon resolves the bare name on YOUR device, misses the cross-device sender, and returns `unknown_recipient`. Bare `from_name` is correct only when `from_device === <your own device>`. `send_message_by_id({to_agent_id: from_agent_id, ...})` always works regardless of device and is the safe fallback when device is unknown.',
         'Retention: messages older than 30 days are deleted by the cleanup routine regardless of read state. Agents that go offline for more than 30 days forfeit any unread mail in that window.'
       ].join(' '),
       inputSchema: {
-        since_event_id: z.number().int().optional(),
         limit: z.number().int().optional()
       }
     },
-    async (args: { since_event_id?: number; limit?: number }) => {
+    async ({ limit }: { limit?: number }) => {
       const who = requireAgent()
       if (typeof who !== 'string') return toText(who)
-      return run(() => inboxSvc.get({ caller: who, ...args }))
+      return run(() => inboxSvc.get({ caller: who, limit }))
+    }
+  )
+
+  server.registerTool(
+    'cancel_unread_alert',
+    {
+      title: 'Cancel unread alert',
+      description: 'Cancel future unread alerts for a message you sent. Set '
+        + 'same_recipient_pending to include your existing mail to that recipient. '
+        + 'New messages keep their own alerts. An alert already dispatching may arrive.',
+      inputSchema: {
+        message_id: z.string().min(1),
+        same_recipient_pending: z.boolean().default(false),
+      },
+    },
+    async ({ message_id, same_recipient_pending }) => {
+      const who = requireAgent()
+      if (typeof who !== 'string') return toText(who)
+      return run(() => deliveryStatusSvc.cancelUnreadAlert(
+        who, message_id, same_recipient_pending
+      ))
     }
   )
 

@@ -96,6 +96,20 @@ describe('exact Codex launch binding lifecycle', () => {
       expect(await lookup.lookup(input)).toMatchObject({ ok: true })
     })
 
+  it('batches simultaneous checks and takes fresh evidence on the next call', async () => {
+    await complete()
+    listPanes.mockClear()
+    ttyProcesses.mockClear()
+    const replies = await Promise.all([lookup.lookup(input), lookup.lookup(input)])
+    expect(replies.every(reply => reply.ok)).toBe(true)
+    expect(listPanes).toHaveBeenCalledTimes(1)
+    expect(ttyProcesses).toHaveBeenCalledTimes(1)
+    ttyProcesses.mockResolvedValueOnce([])
+    expect(await lookup.lookup(input)).toEqual({ ok: false, error: 'stale' })
+    expect(listPanes).toHaveBeenCalledTimes(2)
+    expect(ttyProcesses).toHaveBeenCalledTimes(2)
+  })
+
   it('invalidates the old launch immediately and never leaks its thread', async () => {
     await complete()
     announce(NEXT)

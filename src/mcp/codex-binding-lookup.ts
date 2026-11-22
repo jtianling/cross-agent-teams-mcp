@@ -1,3 +1,4 @@
+import { batchProbe } from '../daemon/batch-probe.js'
 import { z } from 'zod'
 import { CodexBindingRepo, type CodexBindingRow } from './codex-binding-repo.js'
 import {
@@ -23,10 +24,17 @@ type Result = Failure | (Input & { ok: true; thread_id: string })
 interface ProbeDeps {
   listPanes?: () => Promise<PaneTtyEntry[]>
   ttyProcesses?: (tty: string) => Promise<string[]>
+  verifyCarrier?: (tty: string, pid: number, launch: string) =>
+    'ok' | 'stale' | 'ambiguous'
   now?: () => Date
 }
 
 export class CodexBindingLookup {
+  private readonly listPanes = batchProbe(() =>
+    (this.probes.listPanes ?? defaultListPanes)())
+  private readonly ttyProcesses = batchProbe((tty: string) =>
+    (this.probes.ttyProcesses ?? defaultTtyProcesses)(tty))
+
   constructor(
     private readonly repo: CodexBindingRepo,
     private readonly localDevice: string,
@@ -65,15 +73,20 @@ export class CodexBindingLookup {
   }
 
   private async checkCarrier(row: CodexBindingRow): Promise<Failure | undefined> {
-    const panes = await (this.probes.listPanes ?? defaultListPanes)()
+    const panes = await this.listPanes('')
     const matches = panes.filter(p => p.pane_id === row.pane_id)
     if (matches.length > 1) return { ok: false, error: 'ambiguous' }
     if (matches.length === 0 || matches[0].tty !== row.runtime_tty) {
       return { ok: false, error: 'stale' }
     }
-    const lines = await (this.probes.ttyProcesses ?? defaultTtyProcesses)(
-      matches[0].tty
-    )
+    if (this.probes.verifyCarrier) {
+      if (!row.runtime_ui_pid) return { ok: false, error: 'stale' }
+      const status = this.probes.verifyCarrier(
+        matches[0].tty, row.runtime_ui_pid, row.launch_id
+      )
+      return status === 'ok' ? undefined : { ok: false, error: status }
+    }
+    const lines = await this.ttyProcesses(matches[0].tty)
     const entries = lines.map(parseCarrierPsLine).filter(
       (entry): entry is CarrierPsEntry => entry !== undefined
         && isForegroundCodexEntry(entry, row.launch_id)

@@ -1,3 +1,4 @@
+import { probeExecutable } from '../daemon/probe-executable.js'
 import { execFile, execFileSync } from 'node:child_process'
 import { promisify } from 'node:util'
 import type { CodexPanePreRegRepo, CodexPanePreRegRow } from './codex-pane-pre-register-repo.js'
@@ -84,7 +85,7 @@ function normalizeTty(raw: string | undefined): string | undefined {
 export async function defaultListPanes(): Promise<PaneTtyEntry[]> {
   const exec = promisify(execFile)
   const { stdout } = await exec(
-    'tmux',
+    probeExecutable('tmux'),
     ['list-panes', '-a', '-F', '#{pane_id}\t#{pane_tty}'],
     { timeout: TMUX_LIST_TIMEOUT_MS }
   )
@@ -104,7 +105,7 @@ export async function defaultListPanes(): Promise<PaneTtyEntry[]> {
 export async function defaultTtyProcesses(tty: string): Promise<string[]> {
   const exec = promisify(execFile)
   const { stdout } = await exec(
-    'ps',
+    probeExecutable('ps'),
     ['-t', tty, '-o', 'pid=,pgid=,tpgid=,stat=,command='],
     { timeout: PS_LIST_TIMEOUT_MS }
   )
@@ -266,7 +267,7 @@ export const FOREGROUND_PROBE_TIMEOUT_MS = 2_000
  *  Tests MUST inject a replacement: this shells out to real `ps`. */
 export function defaultForegroundProbeSync(tty: string): string[] {
   const stdout = execFileSync(
-    'ps',
+    probeExecutable('ps'),
     ['-t', tty, '-o', 'pid=,pgid=,tpgid=,stat=,command='],
     { timeout: FOREGROUND_PROBE_TIMEOUT_MS, encoding: 'utf8' }
   )
@@ -277,7 +278,7 @@ export function defaultForegroundProbeSync(tty: string): string[] {
  *  pane id.  Tests MUST inject a replacement: this shells out to real tmux. */
 export function defaultPaneTtySync(paneId: string): string | undefined {
   const stdout = execFileSync(
-    'tmux',
+    probeExecutable('tmux'),
     ['display-message', '-p', '-t', paneId, '#{pane_tty}'],
     { timeout: TMUX_LIST_TIMEOUT_MS, encoding: 'utf8' }
   )
@@ -291,7 +292,7 @@ export function defaultPaneTtySync(paneId: string): string | undefined {
  *  rather than as a missing pane.  Tests MUST inject a replacement. */
 export function defaultPaneVisibleSync(paneId: string): boolean {
   const stdout = execFileSync(
-    'tmux',
+    probeExecutable('tmux'),
     ['list-panes', '-a', '-F', '#{pane_id}'],
     { timeout: TMUX_LIST_TIMEOUT_MS, encoding: 'utf8' }
   )

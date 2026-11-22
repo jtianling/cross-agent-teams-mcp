@@ -182,12 +182,9 @@ For every recipient, the persisted `messages` row MUST have `from_team` and `to_
 
 ### Requirement: get_inbox returns messages after cursor
 
-`get_inbox({ since_event_id?: number, limit?: number = 50 })` SHALL return messages addressed to the caller (by `to_agent_id`, or by `to_role` where the caller's role matches) with `to_team = caller.team` and `event_id > effective_since`, ordered by `event_id` ascending, capped by `limit` (max 200). Response MUST include `{ messages, has_more, last_event_id }` where `last_event_id` is the highest returned event_id (or `effective_since` if none). Each returned message MUST include `need_reply: boolean`.
+`get_inbox({ limit?: number = 50 })` SHALL return messages addressed to the caller (by `to_agent_id`, or by `to_role` where the caller's role matches) with `to_team = caller.team` and `event_id > effective_since`, ordered by `event_id` ascending, capped by `limit` (max 200). Response MUST include `{ messages, has_more, last_event_id }` where `last_event_id` is the highest returned event_id (or `effective_since` if none). Each returned message MUST include `need_reply: boolean`.
 
-The server MUST resolve `effective_since` and decide cursor advancement as follows:
-
-1. **Argument omitted** (`since_event_id` is `undefined`): `effective_since = caller.last_processed_event_id`. After producing the response, if `last_event_id > caller.last_processed_event_id`, the daemon MUST advance the caller's row: `UPDATE agents SET last_processed_event_id = :last_event_id WHERE agent_id = :caller AND last_processed_event_id < :last_event_id`. The advance MUST happen in the same transaction as the read so that two concurrent calls cannot both see the same unread tail.
-2. **Argument supplied** (any explicit number, including `0`): `effective_since = since_event_id`. The daemon MUST NOT advance the stored cursor — explicit reads are inspection / re-reads / debugging and have no side effect on `last_processed_event_id`.
+MCP 使用调用方的服务端已读游标作为 `effective_since`.  查询和推进游标必须在同一事务中完成, 游标只推进到本次返回的最后一条消息.  HTTP 调试接口保留显式起点查询, 见 rest-fallback-api.
 
 Cross-team messages are delivered to the recipient's inbox normally, because the cross-team `send_message` writes the recipient's team as `to_team`.
 
@@ -217,23 +214,6 @@ Cross-team messages are delivered to the recipient's inbox normally, because the
 - **THEN** response is `{ messages: [], has_more: false, last_event_id: 15 }`
 - **AND** the caller's `agents.last_processed_event_id` is unchanged at `15`
 
-#### Scenario: Explicit since_event_id does not advance the stored cursor
-
-- **GIVEN** caller's `last_processed_event_id = 50`
-- **AND** messages addressed to caller with event_ids 51, 52, 53
-- **WHEN** caller calls `get_inbox({ since_event_id: 0 })`
-- **THEN** response contains every message addressed to caller with `event_id > 0`, including 51..53
-- **AND** the caller's `agents.last_processed_event_id` is unchanged at `50`
-
-#### Scenario: Explicit since_event_id higher than stored cursor still does not advance it
-
-- **GIVEN** caller's `last_processed_event_id = 10`
-- **AND** messages with event_ids 20, 30 addressed to caller
-- **WHEN** caller calls `get_inbox({ since_event_id: 25 })`
-- **THEN** response contains the message with event_id 30
-- **AND** `last_event_id === 30`
-- **AND** the caller's `agents.last_processed_event_id` is unchanged at `10`
-
 #### Scenario: Cursor-based pagination has_more
 
 - **GIVEN** caller's `last_processed_event_id = 0`
@@ -254,7 +234,7 @@ Cross-team messages are delivered to the recipient's inbox normally, because the
 #### Scenario: Inbox exposes reply expectation
 
 - **GIVEN** agent `sess-A` sends `send_message_by_id({to_agent_id:'sess-B', body:'FYI', need_reply:false, auto_poke:false})`
-- **WHEN** `sess-B` calls `get_inbox({since_event_id: 0})`
+- **WHEN** `sess-B` calls `get_inbox({})`
 - **THEN** the returned message has `need_reply=false`
 
 ### Requirement: Mailbox messages are deleted after 30-day retention window
@@ -302,7 +282,7 @@ The cleanup routine MUST NOT consult `last_processed_event_id` when deciding whe
 
 ### Requirement: Offline delivery via events outbox
 
-Messages addressed to an agent that is currently offline SHALL be persisted in `events` and `messages` as usual. When the agent reconnects and calls `get_inbox({since_event_id: <its stored cursor>})`, it SHALL receive those messages.
+Messages addressed to an agent that is currently offline SHALL be persisted in `events` and `messages` as usual. When the agent reconnects and calls `get_inbox({})`, it SHALL receive those messages.
 
 This contract applies to same-team and cross-team messages alike.
 
@@ -310,7 +290,7 @@ This contract applies to same-team and cross-team messages alike.
 
 - **GIVEN** agent `sess-A` is currently disconnected with stored cursor 5
 - **WHEN** agent `sess-B` sends a message to `sess-A` creating event 6
-- **AND** `sess-A` reconnects and calls `get_inbox({since_event_id: 5})`
+- **AND** `sess-A` reconnects and calls `get_inbox({})`
 - **THEN** the message is returned
 
 ### Requirement: Fire-and-forget delivery contract for send_message and broadcast

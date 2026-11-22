@@ -126,10 +126,20 @@ export class ReminderMonitor {
 
   private async sweep(): Promise<void> {
     try {
+      let denied: ReminderError | undefined
       for (const watch of this.list()) {
         if (this.stopped) return
+        if (denied) {
+          this.recordError(watch.id, denied)
+          continue
+        }
         try { await this.check(watch) }
-        catch (error) { this.recordError(watch.id, error) }
+        catch (error) {
+          if (error instanceof ReminderError && error.code === 'reminders_not_authorized') {
+            denied = error
+          }
+          this.recordError(watch.id, error)
+        }
       }
     } catch (error) {
       this.log(`reminder-monitor scan failed: ${String(error)}`)

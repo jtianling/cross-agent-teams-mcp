@@ -1,3 +1,4 @@
+import { probeExecutable } from '../daemon/probe-executable.js'
 import { execFile } from 'node:child_process'
 import { z } from 'zod'
 import {
@@ -41,7 +42,7 @@ async function readNative(
 function run(args: string[], signal: AbortSignal): Promise<unknown> {
   return new Promise((resolve, reject) => {
     signal.throwIfAborted()
-    execFile('remindctl', [...args, '--json', '--no-input'], {
+    execFile(probeExecutable('remindctl'), [...args, '--json', '--no-input'], {
       timeout: COMMAND_TIMEOUT_MS,
       maxBuffer: MAX_OUTPUT_BYTES,
       signal,

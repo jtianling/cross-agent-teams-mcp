@@ -116,7 +116,7 @@ describe('identity-key OpenCode runtime reconnect', () => {
       })
       expect(parseTool(await client.callTool({
         name: 'get_inbox',
-        arguments: { since_event_id: 17 },
+        arguments: {},
       }))).toMatchObject({ messages: [] })
       expect(requests).toEqual([
         '/global/health',
