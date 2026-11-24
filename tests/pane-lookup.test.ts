@@ -219,13 +219,55 @@ describe('exact read-only pane identity lookup', () => {
   })
 
   it('parses printable tmux separators without splitting a pipe in the socket path', () => {
-    expect(parsePaneFields('/tmp/a|b/socket|100|1793000000|%1|101|/dev/pts/1'))
-      .toEqual(['/tmp/a|b/socket', 100, 1793000000, '%1', 101, '/dev/pts/1'])
-    expect(parsePaneFields('/tmp/socket|100|1793000000|%1|101|/dev/pts/1'))
-      .toEqual(['/tmp/socket', 100, 1793000000, '%1', 101, '/dev/pts/1'])
+    expect(parsePaneFields('/tmp/a|b/socket|100|1793000000|%1|101|/dev/pts/1|0'))
+      .toEqual(['/tmp/a|b/socket', 100, 1793000000, '%1', 101, '/dev/pts/1', false])
+    expect(parsePaneFields('/tmp/socket|100|1793000000|%1|101|/dev/pts/1|0'))
+      .toEqual(['/tmp/socket', 100, 1793000000, '%1', 101, '/dev/pts/1', false])
     const escaped = '/tmp/socket\\037100\\0371793000000\\037%1\\037101\\037/dev/pts/1'
     expect(() => parsePaneFields(escaped)).toThrow('tmux_response_invalid')
-    expect(() => parsePaneFields('/tmp/socket|bad-pid|1793000000|%1|101|/dev/pts/1'))
+    expect(() => parsePaneFields('/tmp/socket|bad-pid|1793000000|%1|101|/dev/pts/1|0'))
       .toThrow('tmux_response_invalid')
+  })
+
+  it('accepts the zero-PID empty-TTY inventory shape without relaxing live fields', () => {
+    const socket = '/private/tmp/tmux-501/isolated-aoe'
+    expect(parsePaneFields(`${socket}|25952|1794566104|%28|0||1`))
+      .toEqual([socket, 25952, 1794566104, '%28', 0, '', true])
+    for (const row of [
+      `${socket}|0|1794566104|%28|0||1`,
+      `${socket}|25952|0|%28|0||1`,
+      `${socket}|25952|1794566104|%28|-1||1`,
+      `${socket}|25952|1794566104|%28|||1`,
+      `${socket}|25952|1794566104|%28|70516||0`,
+      `${socket}|25952|1794566104|%28|0||2`,
+      `${socket}|25952|1794566104|%28|0|`,
+    ]) expect(() => parsePaneFields(row)).toThrow('tmux_response_invalid')
+  })
+
+  it('does not treat an explicitly dead pane with a leftover PID as a live identity', async () => {
+    seed()
+    vi.mocked(probes.panes).mockResolvedValue([{ ...pane, dead: true }])
+    expect(await service.lookup(input)).toMatchObject({ identity: {
+      status: 'unverifiable', reason: 'pane_not_running' } })
+    expect(probes.process).not.toHaveBeenCalled()
+  })
+
+  it('verifies the live target while unrelated zero-PID panes remain in inventory', async () => {
+    const id = seed()
+    vi.mocked(probes.panes).mockResolvedValue([pane,
+      ...['%28', '%35', '%19', '%2'].map(pane_id => ({ ...pane,
+        pane_id, pane_pid: 0, tty: '' })),
+    ])
+    expect(await service.lookup(input)).toMatchObject({ identity: {
+      status: 'verified', agent: { agent_id: id } } })
+    expect(probes.process).not.toHaveBeenCalledWith(0)
+  })
+
+  it('returns an unverifiable identity for a zero-PID target without probing a process', async () => {
+    seed()
+    vi.mocked(probes.panes).mockResolvedValue([{ ...pane, pane_pid: 0, tty: '' }])
+    expect(await service.lookup(input)).toMatchObject({ identity: {
+      status: 'unverifiable', reason: 'pane_not_running', agent: null } })
+    expect(probes.process).not.toHaveBeenCalled()
   })
 })

@@ -72,6 +72,7 @@ export interface McpSessionMetrics {
 }
 
 export interface MountMcpResult {
+  releaseAgents: (agentIds: string[]) => void
   /**
    * Force-close unregistered sessions that cross the configured idle window,
    * max-age window, or orphan-session count limit. Registered sessions are
@@ -752,5 +753,14 @@ export function mountMcp(
     }
   }
 
-  return { reapOrphanSessions, sessionMetrics }
+  function releaseAgents(agentIds: string[]): void {
+    const removed = new Set(agentIds)
+    const targets = Array.from(sessions.values()).filter(session =>
+      session.agentIdHolder.current !== undefined
+      && removed.has(session.agentIdHolder.current))
+    for (const session of targets) closeSessionByConnectionId(session.sessionId)
+    for (const id of removed) fanout.detach(id)
+  }
+
+  return { reapOrphanSessions, sessionMetrics, releaseAgents }
 }

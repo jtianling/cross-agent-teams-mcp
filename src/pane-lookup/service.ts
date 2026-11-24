@@ -84,6 +84,9 @@ export class PaneLookupService {
     const targets = panes.filter(p => p.pane_id === input.tmux.pane_id)
     if (targets.length === 0) return { status: 'stale', reason: 'pane_not_found' }
     if (targets.length > 1) return { status: 'ambiguous', reason: 'duplicate_pane_id' }
+    if (targets[0].dead === true || targets[0].pane_pid <= 0 || !targets[0].tty) {
+      return { status: 'unverifiable', reason: 'pane_not_running' }
+    }
     return undefined
   }
 

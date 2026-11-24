@@ -42,6 +42,7 @@ import { EventsOutbox } from '../storage/events-outbox.js'
 import { createAutoPokeImpl } from '../mcp/tools.js'
 import { RuntimeHandoffService, type HandoffDeps } from '../handoff/service.js'
 import { mountHandoffRoutes } from '../handoff/routes.js'
+import type { PaneProbes } from '../pane-lookup/probes.js'
 
 export interface ServerOpts {
   dbPath: string
@@ -65,6 +66,7 @@ export interface ServerOpts {
   kimiRuntimeControlService?: KimiRuntimeControlPort
   managedRuntimeProbe?: ManagedDeps['probe']
   handoffRuntimeProbe?: HandoffDeps['probe']
+  paneReleaseProbes?: PaneProbes
 }
 export interface StartOpts extends ServerOpts {
   port: number
@@ -162,6 +164,8 @@ export async function buildServer(opts: ServerOpts): Promise<FastifyInstance> {
     context,
     runtimeControlService,
     kimiRuntimeControlService,
+    paneReleaseProbes: opts.paneReleaseProbes,
+    releaseSessions: mcp.releaseAgents,
   })
   mountManagedRoutes(app, managed, managedLog)
   mountHandoffRoutes(app, new RuntimeHandoffService(db, context.localDevice,

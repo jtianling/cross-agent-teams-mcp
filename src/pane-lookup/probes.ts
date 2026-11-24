@@ -12,7 +12,7 @@ const PROBE_MAX_BYTES = 1024 * 1024
 const FIELD_SEPARATOR = '|'
 const PANE_FORMAT = [
   '#{socket_path}', '#{pid}', '#{start_time}', '#{pane_id}',
-  '#{pane_pid}', '#{pane_tty}',
+  '#{pane_pid}', '#{pane_tty}', '#{pane_dead}',
 ].join(FIELD_SEPARATOR)
 
 export class PaneProbeError extends Error {
@@ -34,6 +34,7 @@ export interface PaneSnapshot {
   pane_id: string
   pane_pid: number
   tty: string
+  dead?: boolean
 }
 export interface ProcessSnapshot {
   pid: number
@@ -48,6 +49,7 @@ export interface PaneProbes {
   socket(path: string): Promise<SocketSnapshot>
   panes(socket: SocketSnapshot): Promise<PaneSnapshot[]>
   process(pid: number): Promise<ProcessSnapshot | undefined>
+  ttyProcesses?(tty: string): Promise<ProcessSnapshot[]>
 }
 
 function probeEnvironment(): NodeJS.ProcessEnv {
@@ -69,19 +71,33 @@ async function inspectSocket(path: string): Promise<SocketSnapshot> {
   }
 }
 
-const integerText = z.string().regex(/^\d+$/).transform(Number)
-  .pipe(z.number().int().positive().max(Number.MAX_SAFE_INTEGER))
+const nonnegativeIntegerText = z.string().regex(/^\d+$/).transform(Number)
+  .pipe(z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER))
+const integerText = nonnegativeIntegerText.refine(value => value > 0)
 const paneRowSchema = z.tuple([
   tmuxCoordinatesSchema.shape.socket_path, integerText, integerText,
-  z.string().regex(/^%\d+$/), integerText, z.string().min(1),
-])
+  z.string().regex(/^%\d+$/), nonnegativeIntegerText, z.string(),
+  z.enum(['0', '1']).transform(value => value === '1'),
+]).superRefine((fields, context) => {
+  if (fields[4] > 0 && !normalizeTty(fields[5])) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: [5],
+      message: 'A running pane must have a TTY' })
+  }
+})
+const PANE_FIELD_NAMES = ['socket_path', 'server_pid', 'server_started_at',
+  'pane_id', 'pane_pid', 'pane_tty', 'pane_dead'] as const
 
 export function parsePaneFields(line: string): z.infer<typeof paneRowSchema> {
   const fields = line.split(FIELD_SEPARATOR)
   const parsed = paneRowSchema.safeParse([
-    fields.slice(0, -5).join(FIELD_SEPARATOR), ...fields.slice(-5),
+    fields.slice(0, -6).join(FIELD_SEPARATOR), ...fields.slice(-6),
   ])
-  if (!parsed.success) throw new PaneProbeError('tmux_response_invalid')
+  if (!parsed.success) {
+    const detail = parsed.error.issues.map(issue =>
+      `${PANE_FIELD_NAMES[Number(issue.path[0])] ?? 'row'}: ${issue.message}`)
+      .join('; ')
+    throw new PaneProbeError('tmux_response_invalid', new Error(detail))
+  }
   return parsed.data
 }
 
@@ -97,13 +113,13 @@ async function inspectPanes(socket: SocketSnapshot): Promise<PaneSnapshot[]> {
     throw new PaneProbeError('tmux_query_failed', error)
   }
   return Promise.all(stdout.split('\n').filter(Boolean).map(async line => {
-    const [path, pid, started, pane, panePid, tty] = parsePaneFields(line)
+    const [path, pid, started, pane, panePid, tty, dead] = parsePaneFields(line)
     const normalized = normalizeTty(tty)
-    if (!normalized) throw new PaneProbeError('pane_tty_missing')
+    if (panePid > 0 && !normalized) throw new PaneProbeError('pane_tty_missing')
     try {
       return { socket_path: await realpath(path), server_pid: pid,
         server_started_at: started, pane_id: pane, pane_pid: panePid,
-        tty: normalized }
+        tty: normalized ?? tty, dead }
     } catch (error) {
       throw new PaneProbeError('reported_socket_inspection_failed', error)
     }
@@ -160,4 +176,25 @@ async function inspectProcess(pid: number): Promise<ProcessSnapshot | undefined>
 
 export const defaultPaneProbes: PaneProbes = {
   socket: inspectSocket, panes: inspectPanes, process: inspectProcess,
+  ttyProcesses: inspectTtyProcesses,
+}
+
+async function inspectTtyProcesses(tty: string): Promise<ProcessSnapshot[]> {
+  let stdout: string
+  try {
+    const result = await exec(probeExecutable('ps'), [
+      '-t', tty, '-o', 'pid=,pgid=,tpgid=,tty=,lstart=,stat=,args=',
+    ], { timeout: PROBE_TIMEOUT_MS, maxBuffer: PROBE_MAX_BYTES,
+      env: probeEnvironment() })
+    stdout = result.stdout
+  } catch (error) {
+    throw new PaneProbeError('tty_process_query_failed', error)
+  }
+  return stdout.split('\n').filter(line => line.trim().length > 0).map(line => {
+    const process = parseProcessSnapshot(line)
+    if (!process || process.tty !== tty) {
+      throw new PaneProbeError('tty_process_response_invalid')
+    }
+    return process
+  })
 }

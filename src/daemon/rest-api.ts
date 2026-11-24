@@ -24,6 +24,9 @@ import {
 import { removeAgentRow } from '../mcp/unregister-self.js'
 import { managedIdentityExists } from '../managed/guard.js'
 import { mountPaneLookupRoutes } from '../pane-lookup/routes.js'
+import { mountPaneReleaseRoutes } from '../pane-release/routes.js'
+import { releaseFailure } from '../pane-release/schema.js'
+import type { PaneProbes } from '../pane-lookup/probes.js'
 import { isStorageError, wrapStorage } from './errors.js'
 import type { ChannelWakeFanout } from './channel-wake-fanout.js'
 import type { SessionOriginInfo } from './network-origin.js'
@@ -47,6 +50,8 @@ export interface RestApiDeps {
   context?: DaemonContext
   runtimeControlService: OpencodeRuntimeControlService
   kimiRuntimeControlService: KimiRuntimeControlService
+  paneReleaseProbes?: PaneProbes
+  releaseSessions?: (agentIds: string[]) => void
 }
 
 export interface KimiRuntimeControlService {
@@ -115,6 +120,11 @@ function peerOrigin(req: FastifyRequest): SessionOriginInfo['origin'] | undefine
 async function restLoopbackGate(req: FastifyRequest, reply: FastifyReply): Promise<void> {
   if (!req.url.startsWith('/api/')) return
   if (peerOrigin(req) !== 'local') {
+    if (req.url.split('?')[0] === '/api/runtime/panes/release') {
+      await reply.code(403).send(releaseFailure('remote_forbidden',
+        'Pane release requires loopback'))
+      return
+    }
     const paneLookup = req.url.split('?')[0] === '/api/runtime/pane/lookup'
     await reply.code(403).send(paneLookup
       ? { ok: false, error: 'remote_forbidden', detail: 'Pane lookup requires loopback' }
@@ -409,6 +419,10 @@ export function mountRestApi(
   app.get('/api/inbox', (req, reply) => handleInbox(ctx, req, reply))
   app.get('/api/agents', (req, reply) => handleAgents(ctx, req, reply))
   mountPaneLookupRoutes(app, db, localDevice, deps.channelWakeFanout)
+  mountPaneReleaseRoutes(app, db, localDevice, {
+    log: message => console.error(message),
+    probes: deps.paneReleaseProbes, onReleased: deps.releaseSessions,
+  }, deps.channelWakeFanout)
   const codexBindingLookup = deps.context?.bindingLookup ?? new CodexBindingLookup(
     new CodexBindingRepo(db), localDevice
   )
