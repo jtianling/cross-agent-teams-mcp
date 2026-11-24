@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+
+script_path=$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$0")
+script_dir=$(dirname "$script_path")
+exec node "$script_dir/scripts/start-only-xats.mjs" "$@"
