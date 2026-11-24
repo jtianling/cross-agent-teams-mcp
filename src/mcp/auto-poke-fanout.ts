@@ -2,12 +2,16 @@ import { runQuietGuard } from './poke-guard.js'
 import { isTmuxAvailable } from '../daemon/tmux-cli.js'
 import { scheduleRetry as defaultScheduleRetry, type RetryAgentLookup, type RetryContext } from './poke-retry.js'
 import { scheduleKimiRetry as defaultScheduleKimiRetry, type KimiRetryContext } from './kimi-poke-retry.js'
+import type { AgentType } from '../lib/agent-type.js'
 import type { DeliverySpec } from '../lib/delivery-spec.js'
 import type { DeliverySkipReason } from './delivery-status.js'
 import { memoizePaneSnapshot, type PaneSnapshotLoader } from './pane-host-verify.js'
 
 export type AutoPokeSkipReason =
   | 'no_pane'
+  | 'inbox_only'
+  | 'agy_busy'
+  | 'agy_unavailable'
   | 'guard_failed'
   | 'tmux_unavailable'
   | 'self'
@@ -25,12 +29,14 @@ export interface AutoPokeArgs {
   paneId: string | null
   body: string
   skipGuard?: boolean
+  expectedAgentType?: 'antigravity'
   paneSnapshot?: PaneSnapshotLoader
 }
 
 export type AutoPokeFn = (args: AutoPokeArgs) => Promise<{ ok: true } | { ok: false; reason?: AutoPokeSkipReason }>
 
 export interface AutoPokeRecipient {
+  agent_type?: AgentType | null
   agent_id: string
   tmux_pane_id: string | null
   delivery?: DeliverySpec
@@ -97,6 +103,9 @@ export async function fanoutAutoPoke(args: {
       if (r.agent_id === args.fromAgentId) {
         return { agent_id: r.agent_id, poked: false, reason: 'self' as AutoPokeSkipReason, paneId: null as string | null }
       }
+      if (r.agent_type === 'antigravity' && r.delivery?.kind !== 'antigravity-pty') {
+        return { agent_id: r.agent_id, poked: false, reason: 'inbox_only' as const, paneId: null }
+      }
       if (!nonTmuxTransport && !r.tmux_pane_id) {
         return { agent_id: r.agent_id, poked: false, reason: 'no_pane' as AutoPokeSkipReason, paneId: null }
       }
@@ -134,10 +143,11 @@ export async function fanoutAutoPoke(args: {
       // kimi deferrals never have a pane, so they cannot use the tmux
       // scheduler. kimi_pending_interaction is deliberately absent here: it
       // waits on a human approval and cannot clear on a timer.
-      if (!res.poked && res.reason === 'kimi_session_busy') {
+      if (!res.poked && (res.reason === 'kimi_session_busy' || res.reason === 'agy_busy')) {
         scheduleKimiFn({
           agentId: res.agent_id,
           messageId: args.retry.messageId,
+          busyReason: res.reason,
           alreadyReadFn: () => args.retry?.alreadyReadFn?.(res.agent_id) ?? false,
           attemptFn: async () => {
             const out = await pokeFn({
@@ -145,7 +155,9 @@ export async function fanoutAutoPoke(args: {
               fromAgentId: args.fromAgentId,
               targetAgentId: res.agent_id,
               paneId: res.paneId,
-              body: args.body
+              body: args.body,
+              ...(res.reason === 'agy_busy'
+                ? { expectedAgentType: 'antigravity' as const } : {}),
             })
             if (out.ok) return { ok: true }
             return { ok: false, reason: out.reason ?? 'unknown' }

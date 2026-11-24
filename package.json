@@ -5,11 +5,16 @@
   "type": "module",
   "bin": {
     "cross-agent-teams-mcp": "./dist/cli.js",
-    "cross-agent-teams-channel": "./dist/channel-cli.js"
+    "cross-agent-teams-channel": "./dist/channel-cli.js",
+    "xats-agy": "./scripts/xats-agy",
+    "xats-agy-mcp": "./dist/agy-mcp.js"
   },
   "files": [
     "dist",
     "src",
+    "scripts/xats-agy",
+    "scripts/agy_*.py",
+    "docs/launchers/antigravity.md",
     "README.md",
     "README.zh-CN.md",
     "LICENSE"

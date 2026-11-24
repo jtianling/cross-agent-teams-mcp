@@ -54,7 +54,7 @@ export function recordInitialDeliveryStatuses(
       const delivered = args.delivered.has(agentId)
       const status: WakeStatus = delivered
         ? 'delivered'
-        : reason === 'guard_failed' ? 'retrying' : 'skipped'
+        : reason === 'guard_failed' || reason === 'agy_busy' ? 'retrying' : 'skipped'
       stmt.run(
         args.messageId,
         agentId,

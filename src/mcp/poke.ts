@@ -54,6 +54,7 @@ export interface PokeInput {
 }
 
 export type PokeResult =
+  | { ok: true; transport_used: 'antigravity-pty' }
   | {
       ok: true
       transport_used: 'claude-channel'
@@ -91,6 +92,7 @@ interface TargetRow {
   agent_id: string
   agent_type: import('../lib/agent-type.js').AgentType | null
   device: string
+  name: string
   team: string
   tmux_pane_id: string | null
   runtime_ui_pid: number | null
@@ -326,6 +328,7 @@ function loadTargetRow(
          agent_id,
          agent_type,
          device,
+         name,
          team,
          tmux_pane_id,
          runtime_ui_pid,
@@ -362,6 +365,13 @@ async function dispatchToTarget(
     row.device !== (deps.localDevice ?? 'local')
     || (stillOwnsPane(deps.db, row.agent_id, paneId)
       && confirmCodexForegroundCarrier(deps, row, paneId))
+  if (target.agent_type === 'antigravity') {
+    const localMail = deps.allowCrossTeam && target.device === (deps.localDevice ?? 'local')
+    return dispatchPoke({ tmuxPoke: tmuxPokeImpl }, dispatchTarget, {
+      content: input.prompt, meta: {},
+      mailboxTarget: localMail ? { name: target.name, team: target.team } : undefined,
+    })
+  }
   if (!fanout) {
     if (delivery.kind === 'codex-appserver' || delivery.kind === 'opencode-server' || delivery.kind === 'kimi-server') {
       return dispatchPoke(

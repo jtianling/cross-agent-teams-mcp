@@ -19,6 +19,7 @@ import { SseFanout } from './sse-fanout.js'
 import { ChannelWakeFanout } from './channel-wake-fanout.js'
 import { clearAllRetries } from '../mcp/poke-retry.js'
 import { clearAllKimiRetries } from '../mcp/kimi-poke-retry.js'
+import { restoreAgyRetries } from '../mcp/restore-agy-retries.js'
 import { clearAllCodexRecoverySchedules } from '../mcp/codex-recovery-poke.js'
 import { clearAllCodexSeedingSchedules } from '../mcp/codex-seeding-poke.js'
 import {
@@ -172,11 +173,11 @@ export async function buildServer(opts: ServerOpts): Promise<FastifyInstance> {
     channelWakeFanout, { log: managedLog, probe: opts.handoffRuntimeProbe }),
   managedLog)
   const reminderAgents = new AgentsRepo(db)
+  const autoPoke = createAutoPokeImpl(db, reminderAgents, channelWakeFanout,
+    context.localDevice)
+  restoreAgyRetries(db, autoPoke)
   const reminderSender = new SendMessageService(
-    db, reminderAgents, new EventsOutbox(db), {
-      poke: createAutoPokeImpl(db, reminderAgents,
-        channelWakeFanout, context.localDevice),
-    }
+    db, reminderAgents, new EventsOutbox(db), { poke: autoPoke }
   )
   const reminders = new ReminderMonitor(
     db, reminderSender, context.localDevice,

@@ -72,6 +72,7 @@ describe('DeliverySpec discriminated union shape', () => {
   it('narrows kind via discriminated field', () => {
     const describe = (spec: DeliverySpec): string => {
       if (spec.kind === 'none') return 'none';
+      if (spec.kind === 'antigravity-pty') return spec.launch_id;
       if (spec.kind === 'claude-channel') return spec.channel_session_id;
       if (spec.kind === 'codex-appserver') return spec.thread_id;
       return spec.session_id;

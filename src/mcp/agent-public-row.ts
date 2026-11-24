@@ -3,6 +3,7 @@ import type { DeliverySpec } from '../lib/delivery-spec.js'
 
 export type PublicDelivery =
   | { kind: 'none' }
+  | { kind: 'antigravity-pty' }
   | { kind: 'codex-appserver' }
   | { kind: 'opencode-server' }
   | { kind: 'kimi-server' }

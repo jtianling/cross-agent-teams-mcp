@@ -13,5 +13,5 @@
     "sourceMap": true,
     "types": ["node", "vitest/globals"]
   },
-  "include": ["src/**/*", "tests/**/*", "plugins/cross-agent-teams-channel/src/**/*"]
+  "include": ["src/**/*", "tests/**/*", "plugins/*/src/**/*"]
 }

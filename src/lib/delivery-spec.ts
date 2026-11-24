@@ -1,4 +1,14 @@
+import { z } from 'zod';
 import { kimiBaseUrlIssue } from './kimi-url.js';
+
+export const agyLaunchIdSchema = z.string().regex(
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+  'expected UUID v4',
+);
+
+const agyPayload = z.object({ launch_id: agyLaunchIdSchema }).strict();
+const agyDelivery = agyPayload.extend({ kind: z.literal('antigravity-pty') });
+export type DeliveryAntigravityPty = z.infer<typeof agyDelivery>;
 
 export type DeliveryNone = {
   kind: 'none';
@@ -33,6 +43,7 @@ export type DeliveryKimiServer = {
 
 export type DeliverySpec =
   | DeliveryNone
+  | DeliveryAntigravityPty
   | DeliveryClaudeChannel
   | DeliveryCodexAppserver
   | DeliveryOpencodeServer
@@ -42,6 +53,7 @@ export type DeliveryKind = DeliverySpec['kind'];
 
 export const DELIVERY_KINDS: readonly DeliveryKind[] = [
   'none',
+  'antigravity-pty',
   'claude-channel',
   'codex-appserver',
   'opencode-server',
@@ -71,6 +83,11 @@ export function parseDeliveryRow(row: DeliveryRow): DeliverySpec {
     throw new Error('corrupt_delivery_payload');
   }
   const record = payload as Record<string, unknown>;
+  if (kind === 'antigravity-pty') {
+    const parsed = agyPayload.safeParse(record);
+    if (!parsed.success) throw new Error('corrupt_delivery_payload');
+    return { kind, ...parsed.data };
+  }
   if (kind === 'claude-channel') {
     const csid = record.channel_session_id;
     if (typeof csid !== 'string' || csid.length === 0) {
@@ -179,7 +196,9 @@ export function serializeDelivery(spec: DeliverySpec): DeliveryRow {
   if (spec.kind === 'none') {
     return { delivery_kind: 'none', delivery_payload: null };
   }
-  const { kind, ...rest } = spec;
+  const { kind, ...rest } = spec.kind === 'antigravity-pty'
+    ? agyDelivery.parse(spec)
+    : spec;
   return {
     delivery_kind: kind,
     delivery_payload: JSON.stringify(rest),
@@ -188,6 +207,8 @@ export function serializeDelivery(spec: DeliverySpec): DeliveryRow {
 
 export type DeliveryValidationReason =
   | 'unknown_kind'
+  | 'invalid_launch_id'
+  | 'unexpected_delivery_field'
   | 'missing_channel_session_id'
   | 'invalid_thread_id'
   | 'invalid_ws_url'
@@ -219,6 +240,15 @@ export function validateDeliveryForWrite(input: unknown): ValidateDeliveryResult
   }
   const record = input as Record<string, unknown>;
   const kind = record.kind;
+  if (kind === 'antigravity-pty') {
+    const result = agyDelivery.safeParse(record);
+    if (result.success) return { ok: result.data };
+    const extra = result.error.issues.some(i => i.code === 'unrecognized_keys');
+    return {
+      error: 'invalid_delivery',
+      reason: extra ? 'unexpected_delivery_field' : 'invalid_launch_id',
+    };
+  }
   if (kind === 'none') {
     return { ok: { kind: 'none' } };
   }

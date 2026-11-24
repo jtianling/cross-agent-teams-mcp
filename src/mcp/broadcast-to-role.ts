@@ -105,10 +105,11 @@ export class BroadcastToRoleService {
     const cutoff = fanoutActiveCutoff()
     const members = `FROM agents WHERE team=? AND role=? AND agent_id != ?`
     const rawRows = this.db.prepare(
-      `SELECT agent_id, tmux_pane_id, delivery_kind, delivery_payload
+      `SELECT agent_id, agent_type, tmux_pane_id, delivery_kind, delivery_payload
        ${members} AND last_seen_at >= ?`
     ).all(team, role, from, cutoff) as Array<{
       agent_id: string
+      agent_type: AutoPokeRecipient['agent_type']
       tmux_pane_id: string | null
       delivery_kind: string
       delivery_payload: string | null
@@ -118,6 +119,7 @@ export class BroadcastToRoleService {
     ).get(team, role, from, cutoff) as { n: number }
     const rows = rawRows.map((row) => ({
       agent_id: row.agent_id,
+      agent_type: row.agent_type,
       tmux_pane_id: row.tmux_pane_id,
       delivery: parseDeliveryRow(row),
     }))

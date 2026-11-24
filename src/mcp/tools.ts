@@ -1,6 +1,7 @@
 import type Database from 'better-sqlite3'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
+import { agyLaunchIdSchema } from '../lib/delivery-spec.js'
 import { CodexLaunchReconnectService } from './reconnect-codex-launch.js'
 import {
   AgentsRepo,
@@ -60,7 +61,7 @@ import { listAgentsForTeam } from './list-agents.js'
 import { detectTmuxPane } from '../daemon/tmux-pane-detect.js'
 import { bindRuntimeIdentity } from '../daemon/runtime-identity.js'
 import type { DetectAgentKind } from '../daemon/tmux-pane-detect.js'
-import type { AgentType } from '../lib/agent-type.js'
+import { agentTypes, type AgentType } from '../lib/agent-type.js'
 import { CodexPanePreRegRepo } from './codex-pane-pre-register-repo.js'
 import {
   PreRegisterCodexPaneService,
@@ -110,7 +111,7 @@ const deliverySchema = z.object({
   kind: z.string(),
 }).passthrough()
 
-const agentTypeSchema = z.enum(['codex', 'claude-code', 'opencode', 'kimi-code', 'custom'])
+const agentTypeSchema = z.enum(agentTypes)
 
 const detectTmuxPaneSchema = z.object({
   agent: z.enum(['codex', 'claude-code', 'opencode', 'custom']),
@@ -175,6 +176,8 @@ const AWAIT_ACK_S_SCHEMA = z.number().int().min(0).max(30).default(10)
 // `not_yet` as "the recipient is dead" and takes the work over itself creates
 // a costlier failure than the silent stall this feature exists to remove.
 const AWAIT_ACK_DESC = [
+  'Antigravity wake results: agy_busy defers until the native composer is ready; ' +
+    'agy_unavailable means the launcher could not deliver; inbox_only means pull delivery.',
   'Returns ack:{status:"read"|"not_yet", waited_ms} — a REAL receipt: status "read" means the recipient\'s own get_inbox actually returned this message, which no transport-level "poked" can prove.',
   'Use cancel_unread_alert with the returned message_id to cancel a pending sender alert.',
   'await_ack_s controls the wait (default 10s, 0 disables, max 30).',
@@ -194,7 +197,7 @@ const SEND_MESSAGE_DESC = [
     'including for cross-team sends. The daemon does not parse these forms; ' +
     'never pass the whole shorthand as to_agent_name. The team notation is ' +
     'distinct from the name:device suffix, which the daemon does parse.',
-  'REPLY RULE: when replying to a message returned by get_inbox, treat its `from_device` as authoritative — if it differs from your own device, you MUST send to `from_name + ":" + from_device` (bare `from_name` would resolve on YOUR device and miss the actual sender). Same-device replies can use the bare name. The safe fallback for unknown device is send_message_by_id({to_agent_id: from_agent_id, ...}).',
+  'REPLY RULE: when replying to a message returned by get_inbox, treat its `from_device` as authoritative — if it differs from your own device, you MUST send to `from_name + ":" + from_device` (bare `from_name` would resolve on YOUR device and miss the actual sender). Same-device replies can use the bare name. For cross-team replies use to_team=from_team. Within your team, send_message_by_id({to_agent_id: from_agent_id, ...}) also works.',
   'For multi-recipient use broadcast (same-team) or broadcast_to_role (same-team, by role).',
   '除非用户明确指定 to_team, 不要跨 team 沟通 (explicitly set to_team only when user asks).',
   'Reports poked, poke_skip_reasons (no_pane, guard_failed, tmux_unavailable, pane_reassigned, channel_sink_failed, self, kimi_session_busy, kimi_pending_interaction, kimi_session_archived); on guard_failed and kimi_session_busy daemon retries at 30s/180s/600s (retry_scheduled, retry_delays_s); stops early on poked.  kimi_session_busy / kimi_pending_interaction mean the kimi session was mid-turn or waiting on a human approval so the wake-up was NOT injected — the mailbox row is written regardless and the recipient sees it on its next get_inbox; kimi_pending_interaction is never retried.  kimi_session_archived means the target\'s kimi session is archived, so the wake-up was NOT injected and never will be for these coordinates; it is never retried and the mailbox row is still written.  It is a permanent condition, not a deferral: the recipient\'s registered session_id is stale and it must re-register before pokes can land.  pane_reassigned means the recorded tmux pane is no longer hosted by the target (another agent took it over, or the target process is gone), so nothing was injected; it is never retried and the mailbox row is still written.  channel_sink_failed means the target\'s Claude channel subscriber was attached but its write threw, and no tmux pane was available to fall back to, so nothing was injected; the mailbox row is still written and the subscriber stays attached.',
@@ -251,7 +254,12 @@ const RECONNECT_DESC = [
     'or subagent threads. Never copy a launch_id from another pane. ' +
     'Codex must NOT read or pass XATS_IDENTITY_KEY: shared app-server ' +
     'environment values do not identify the calling pane.',
-  'BRANCH 1 (non-Codex callers only): if `printenv XATS_IDENTITY_KEY` is ' +
+  'Antigravity (agy) sessions with a session-scoped identity key call ' +
+    'reconnect({identity_key}) alone to recover their native TUI mailbox. ' +
+    'A live launcher retains its binding: re-register with its current launch ID. ' +
+    'For idle wake after a launcher restart, register_agent again with the new ' +
+    'XATS_AGY_LAUNCH_ID as agy_launch_id and the same name, team and identity_key.',
+  'BRANCH 1 (other non-Codex callers only): if `printenv XATS_IDENTITY_KEY` is ' +
     'non-empty, call `reconnect({identity_key: <that value>, ui_pid: ' +
     '$PPID})` before considering the runtime branches ' +
     'below. `identity_key` is the only lookup that survives a pane restart, ' +
@@ -412,8 +420,13 @@ export function createAutoPokeImpl(
       .prepare('SELECT name, team FROM agents WHERE agent_id=?')
       .get(args.fromAgentId) as { name: string | null; team: string } | undefined
     const target = db
-      .prepare('SELECT name, team FROM agents WHERE agent_id=?')
-      .get(args.targetAgentId) as { name: string | null; team: string } | undefined
+      .prepare('SELECT name, team, agent_type FROM agents WHERE agent_id=?')
+      .get(args.targetAgentId) as {
+        name: string | null; team: string; agent_type: AgentType | null
+      } | undefined
+    if (args.expectedAgentType && target?.agent_type !== args.expectedAgentType) {
+      return { ok: false, reason: 'agy_unavailable' }
+    }
     const hint = buildAutoPokeHint(row, args.fromAgentId, target)
     const res = await poke(
       {
@@ -435,6 +448,9 @@ export function createAutoPokeImpl(
     }
     // kimi deferrals are "not injected yet", not delivery failures: they route
     // to the kimi retry gradient, and pending_interaction to nothing at all.
+    if (err === 'inbox_only' || err === 'agy_busy' || err === 'agy_unavailable') {
+      return { ok: false, reason: err }
+    }
     if (err === 'kimi_session_busy') return { ok: false, reason: 'kimi_session_busy' }
     if (err === 'kimi_pending_interaction') {
       return { ok: false, reason: 'kimi_pending_interaction' }
@@ -479,7 +495,9 @@ function inferRuntimeAgentKind(
   args: { agent_type?: AgentType; delivery?: { kind?: string }; model?: string },
   clientInfo: SessionClientInfo | undefined
 ): DetectAgentKind | undefined {
-  if (args.agent_type === 'custom') return undefined
+  if (args.agent_type === 'custom' || args.agent_type === 'antigravity') {
+    return undefined
+  }
   // kimi-code has no tmux runtime-bind matcher; its delivery is HTTP-only.
   if (args.agent_type === 'kimi-code') return undefined
   if (args.agent_type) return args.agent_type
@@ -1188,9 +1206,13 @@ export function registerBusinessTools(
     team: z.string().optional(),
     project_dir: z.string().min(1).optional(),
     agent_type: agentTypeSchema,
+    agy_launch_id: agyLaunchIdSchema.optional().describe(
+      'Antigravity only. Use the current session XATS_AGY_LAUNCH_ID (UUID v4) ' +
+      'and the exact name and team supplied to the local PTY launcher.'
+    ),
     agent_type_name: z.string().min(1).optional(),
     ui_pid: z.number().int().positive().optional().describe(
-      'STRONGLY RECOMMENDED. Visible agent UI process pid (e.g. Claude Code CLI pid — `$PPID` from a Bash tool call inside Claude Code). Enables one-shot pid → tty → pane binding at registration; without it, tmux-based cross-agent poke delivery typically stays off.'
+      'Omit for Antigravity (agy). STRONGLY RECOMMENDED for pane binding. Visible agent UI process pid (e.g. Claude Code CLI pid — `$PPID` from a Bash tool call inside Claude Code). Enables one-shot pid → tty → pane binding at registration; without it, tmux-based cross-agent poke delivery typically stays off.'
     ),
     channel_session_id: z.string().min(1).optional(),
     thread_id: z.string().min(1).refine(v => v.trim().length > 0, { message: 'thread_id must not be empty' }).optional(),
@@ -1216,6 +1238,32 @@ export function registerBusinessTools(
   )
 
   const registerAgentArgsSchema = registerAgentInputSchema.superRefine((value, ctx) => {
+    if (value.delivery?.kind === 'antigravity-pty') {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom, path: ['delivery'],
+        message: 'antigravity-pty delivery requires a verified agy_launch_id',
+      })
+    }
+    if (value.agy_launch_id !== undefined) {
+      if (value.agent_type !== 'antigravity') ctx.addIssue({
+        code: z.ZodIssueCode.custom, path: ['agy_launch_id'],
+        message: 'agy_launch_id requires agent_type="antigravity"',
+      })
+      if (!value.team || value.team.trim() !== value.team) ctx.addIssue({
+        code: z.ZodIssueCode.custom, path: ['team'],
+        message: 'agy_launch_id requires the exact explicit launcher team',
+      })
+    }
+    if (value.agent_type === 'antigravity') {
+      const fields = ['ui_pid', 'claude_ui_pid', 'delivery', 'recovery_nonce'] as const
+      for (const field of fields) {
+        if (value[field] !== undefined) ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [field],
+          message: `${field} is unsupported for the Antigravity TUI mailbox`,
+        })
+      }
+    }
     // `thread_id` and `ws_url` are codex-exclusive transport fields.
     // `auth_token_ref` is shared between codex-appserver and opencode-server deliveries.
     const hasCodexOnlyFields =
@@ -1433,6 +1481,7 @@ export function registerBusinessTools(
     args: {
       agent_type?: AgentType
       agent_type_name?: string
+      agy_launch_id?: string
       recovery_nonce?: string
       model?: string
       device?: string
@@ -1588,6 +1637,22 @@ export function registerBusinessTools(
       args.ws_url !== undefined ||
       args.auth_token_ref !== undefined
     const preUpsertSnapshot = captureCodexPreUpsertSnapshot(args)
+    const directInput = {
+      connection_id: connectionId,
+      agent_type: args.agent_type,
+      agent_type_name: args.agent_type_name,
+      model: args.model,
+      device: args.device,
+      name: args.name,
+      role: args.role,
+      team: args.team,
+      project_dir: args.project_dir,
+      delivery: args.delivery,
+      claude_ui_pid: args.claude_ui_pid,
+      runtime_ui_pid:
+        args.agent_type === 'claude-code' ? args.ui_pid : undefined,
+      identity_key: args.identity_key,
+    }
     const res =
       args.agent_type === 'codex' &&
       args.delivery === undefined &&
@@ -1605,22 +1670,9 @@ export function registerBusinessTools(
             auth_token_ref: args.auth_token_ref,
             identity_key: args.identity_key,
           })
-        : registerSvc.register({
-            connection_id: connectionId,
-            agent_type: args.agent_type,
-            agent_type_name: args.agent_type_name,
-            model: args.model,
-            device: args.device,
-            name: args.name,
-            role: args.role,
-            team: args.team,
-            project_dir: args.project_dir,
-            delivery: args.delivery,
-            claude_ui_pid: args.claude_ui_pid,
-            runtime_ui_pid:
-              args.agent_type === 'claude-code' ? args.ui_pid : undefined,
-            identity_key: args.identity_key,
-          })
+        : args.agent_type === 'antigravity'
+          ? await registerSvc.registerAntigravity(directInput, args.agy_launch_id)
+          : registerSvc.register(directInput)
     if ('thread_id' in res && 'agent_id' in res) {
       nativeDeliveryBound = true
     }
@@ -1638,6 +1690,7 @@ export function registerBusinessTools(
       } else if (fanout) {
         try { fanout.rebind(res.agent_id, res.team) } catch { /* best-effort */ }
       }
+      if (args.agent_type === 'antigravity') return publicRes
       if (args.agent_type === 'claude-code' && args.channel_session_id !== undefined) {
         const channelBind = bindChannelSvc
           ? bindChannelSvc.bind({
@@ -1932,7 +1985,21 @@ export function registerBusinessTools(
         '2. `printenv OPENCODE_XATS_BASE_URL` non-empty → `agent_type="opencode"`; pass that value as `base_url`. Do NOT pass `session_id` — the daemon auto-resolves it as the most recently updated session on that base_url. The env var is set ONLY by the `free-xats-opencode` launcher, so its presence is itself the runtime assertion that the caller is opencode.',
         '3. `printenv CODEX_THREAD_ID` non-empty (Codex CLI or Mac Codex App) → `agent_type="codex"`; pass that value as `thread_id` (REQUIRED for codex per the schema). For Codex CLI, do NOT pass `ui_pid` because the launcher\'s `pre_register_codex_pane` flow handles tmux binding and an explicit pid disables that path. Mac Codex App has no tmux launcher flow; omit `ui_pid` because an App or app-server pid is not conversation-scoped, and reconnect identity is `thread_id` only.',
         '4. `printenv CLAUDECODE` non-empty OR `printenv CLAUDE_CODE_ENTRYPOINT` non-empty → `agent_type="claude-code"`; pass `$PPID` as `ui_pid` to enable channel auto-bind.',
-        '5. None of the above → `agent_type="custom"` with `agent_type_name="<the harness you are running under, e.g. cursor, opencode, ...>"` (`agent_type_name` is required when `agent_type="custom"`). Detect the harness name from your runtime environment if you can — e.g. `printenv CURSOR_TRACE_ID` non-empty means cursor — but do NOT guess from system-wide signals like "binary X exists on PATH": such probes detect what the user has installed, not what runtime you are inside, and pick the wrong agent type. When unsure, prefer `agent_type_name="unknown"` over a wrong guess.',
+        '5. When the current session explicitly identifies its harness as ' +
+          'Antigravity CLI (agy), use `agent_type="antigravity"`. A model name, ' +
+          'project path, or installed agy binary is insufficient. The native TUI ' +
+          'reads messages with get_inbox. In this agy session run ' +
+          '`printenv XATS_AGY_LAUNCH_ID`. When set, automatically pass that ' +
+          'value as agy_launch_id with the exact name and explicit team from ' +
+          'the launcher command (`printenv XATS_AGY_NAME` and ' +
+          '`printenv XATS_AGY_TEAM` in that session). Ask if either label is ' +
+          'missing. Never guess either label or derive the team ' +
+          'from cwd. A ready local launcher enables wake when the TUI is idle. ' +
+          'After restart, re-register the same name, team and identity_key ' +
+          'with the new launch ID after the previous launcher exits. A live ' +
+          'same-name launcher keeps its binding. Without a launch ID use inbox only. ' +
+          'Omit ui_pid, pane, external delivery and other transport coordinates.',
+        '6. None of the above → `agent_type="custom"` with `agent_type_name="<the harness you are running under, e.g. cursor, opencode, ...>"` (`agent_type_name` is required when `agent_type="custom"`). Detect the harness name from your runtime environment if you can — e.g. `printenv CURSOR_TRACE_ID` non-empty means cursor — but do NOT guess from system-wide signals like "binary X exists on PATH": such probes detect what the user has installed, not what runtime you are inside, and pick the wrong agent type. When unsure, prefer `agent_type_name="unknown"` over a wrong guess.',
         'Calling this tool again with the same `(device, team, name)` identity reuses the existing `agent_id` and refreshes `tmux_pane_id` and `model`; no duplicate row is created.',
         'IDENTITY KEY (not part of the DETECTION sequence above — it says nothing about which runtime you are, and applies to every `agent_type`): run `printenv XATS_IDENTITY_KEY`; when it is non-empty, pass that value as `identity_key` on EVERY `register_agent` call, including the very first one. The key is the launcher-minted, restart-stable handle that later lets `reconnect({identity_key})` recover this identity after the pane is restarted — a restart changes `ui_pid`, `thread_id`, and the session id, so no other lookup can. Omitting it on the first registration silently disables recovery for this pane: nothing fails, every later recovery just returns `need_register`. When the key is already held by another live pane the call is rejected with `identity_key_conflict` naming that pane\'s team and name, and no row is written. CAVEAT for `agent_type="kimi-code"`: whether this variable is yours depends on where your tools run. With an in-process kimi engine the TUI spawns them and the value is the one your launcher exported — correct, pass it. Under a SERVER-HOSTED kimi engine they are spawned by the long-lived shared server instead, so `printenv` returns whatever the shell that launched that SERVER exported: the same value for every session on it, naming a DIFFERENT pane, and passing it would claim another agent\'s key. kimi does not scope this variable per session in either mode. So pass it only when the launcher that started this pane states the key is session-scoped; when you cannot tell, omit it — losing recovery is recoverable, claiming someone else\'s identity is not. CAVEAT for `agent_type="codex"`: the value you can read is NOT yours, so do NOT pass `identity_key` at all. Your tool calls execute inside the shared `codex --remote` app-server, whose environment is the one exported by the shell that launched THAT SERVER — so `printenv XATS_IDENTITY_KEY` returns another pane\'s key or nothing, never your own. Your pane\'s real key does exist in the pane process\'s own environment, where you cannot reach it; the launcher delivers it to the daemon out-of-band via `pre_register_codex_pane`, and the daemon attaches it to your row when it binds your pane. Passing what you can read would claim a key that is not yours, and omitting it costs you nothing here — this is the one `agent_type` for which omission is the CORRECT answer rather than a fallback.',
         'Use `agent_type="custom"` for unsupported agent harnesses; provide `agent_type_name` for observability.',
@@ -1954,7 +2021,7 @@ export function registerBusinessTools(
         'When the end user has not explicitly specified `team`, callers should pass `project_dir` as the current working directory so the daemon derives a project-scoped default team from its basename; if omitted, it falls back to `default`.',
         'REPORTING RULE: on success the response carries the actual `team` the daemon assigned. When summarizing the registration to the user, surface that returned `team` value verbatim; NEVER derive or paraphrase the team from `project_dir`, cwd, or your own pre-call assumption. Failing to read the response masks the daemon\'s `default` fallback (e.g. when `project_dir` was forgotten) and produces misleading "team: X (from cwd basename)" reports that break later cross-team send_message diagnostics.',
         '`agent_type` must describe the runtime behind `ui_pid`, not merely the current MCP caller. For example, if `ui_pid` points at an external editor process, pass `agent_type="custom"` with `agent_type_name=<editor>` even when the registration request is issued from a different harness.',
-        'STRONGLY RECOMMENDED: pass `ui_pid` unless it is truly unobtainable (codex and opencode callers excepted). Without it, automatic runtime binding usually fails to converge and tmux-based cross-agent poke delivery stays off until a separate `bind_runtime_identity(...)` call. From Claude Code, `$PPID` inside a Bash tool call is the `claude` CLI pid. With `ui_pid` the daemon binds via verified pid → tty → pane evidence in one shot.',
+        'STRONGLY RECOMMENDED: pass `ui_pid` unless it is truly unobtainable (codex, opencode and antigravity callers excepted). Without it, automatic runtime binding usually fails to converge and tmux-based cross-agent poke delivery stays off until a separate `bind_runtime_identity(...)` call. From Claude Code, `$PPID` inside a Bash tool call is the `claude` CLI pid. With `ui_pid` the daemon binds via verified pid → tty → pane evidence in one shot.',
         'After registration, the daemon best-effort attempts runtime binding for recognized local clients so tmux-based poke delivery can come up without a second tool call.',
         'If automatic runtime binding does not converge, call `bind_runtime_identity(...)` explicitly so the daemon can verify and persist your pane binding.',
         '`detect_tmux_pane(...)` remains available as a debugging aid for ambiguous or missing matches, but it does not write registry state by itself.',
@@ -1964,6 +2031,7 @@ export function registerBusinessTools(
     },
     async (args: {
       agent_type: AgentType
+      agy_launch_id?: string
       agent_type_name?: string
       device?: string
       model?: string; name: string; role?: string; team?: string;
@@ -2343,6 +2411,7 @@ export function registerBusinessTools(
     const res = await executeRegister({
       agent_type: stored?.agent_type ?? undefined,
       agent_type_name: stored?.agent_type_name ?? undefined,
+      identity_key: args.identity_key,
       name: match.name,
       team: match.team,
       device: match.device,
@@ -2971,7 +3040,7 @@ export function registerBusinessTools(
         'Return messages addressed to the caller (by agent_id or matching role) within the caller team.',
         'The daemon reads the caller\'s server-side cursor (`agents.last_processed_event_id`), returns mail past it, and ADVANCES the cursor to the highest returned event_id in the same transaction. Subsequent default calls return only newer mail.',
         'Pagination via `limit` advances the cursor only to the last RETURNED event_id; the next default call resumes from there.',
-        'REPLY GUIDANCE: every returned message carries `from_agent_id`, `from_name`, and `from_device` for the sender. When replying via `send_message`, construct `to_agent_name` as `from_name + ":" + from_device` whenever `from_device !== <your own device>` — otherwise the daemon resolves the bare name on YOUR device, misses the cross-device sender, and returns `unknown_recipient`. Bare `from_name` is correct only when `from_device === <your own device>`. `send_message_by_id({to_agent_id: from_agent_id, ...})` always works regardless of device and is the safe fallback when device is unknown.',
+        'REPLY GUIDANCE: every returned message carries `from_agent_id`, `from_name`, and `from_device` for the sender. When replying via `send_message`, construct `to_agent_name` as `from_name + ":" + from_device` whenever `from_device !== <your own device>` — otherwise the daemon resolves the bare name on YOUR device, misses the cross-device sender, and returns `unknown_recipient`. Bare `from_name` is correct only when `from_device === <your own device>`. For a cross-team reply, pass the original from_team as to_team. Within the same team, send_message_by_id also works with the returned from_agent_id.',
         'Retention: messages older than 30 days are deleted by the cleanup routine regardless of read state. Agents that go offline for more than 30 days forfeit any unread mail in that window.'
       ].join(' '),
       inputSchema: {

@@ -45,6 +45,10 @@ npx mcpsmgr add jtianling/cross-agent-teams-mcp -a claude-code
 claude --dangerously-load-development-channels server:cross-agent-teams-channel
 ```
 
+### Antigravity CLI
+
+通过 `xats-agy` 启动原生 TUI, 可以让空闲会话接收新邮件提示并调用 xats 回信.  [启动与恢复说明](docs/launchers/antigravity.md)
+
 ### 其它 agent (Codex, opencode, ...)
 
 ```bash

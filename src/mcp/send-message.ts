@@ -1,9 +1,9 @@
 import type Database from 'better-sqlite3'
 import { randomUUID } from 'node:crypto'
-import type { AgentsRepo } from '../storage/agents-repo.js'
+import type { AgentRow, AgentsRepo } from '../storage/agents-repo.js'
 import type { EventsOutbox } from '../storage/events-outbox.js'
 import type { AutoPokeSkipReason, FanoutDeps } from './auto-poke-fanout.js'
-import { parseDeliveryRow, type DeliverySpec } from '../lib/delivery-spec.js'
+import { parseDeliveryRow } from '../lib/delivery-spec.js'
 import { runFanoutWithRetry } from './fanout-with-retry.js'
 import { recordInitialDeliveryStatuses } from './delivery-status.js'
 import { isMessageRead } from './message-read.js'
@@ -66,13 +66,8 @@ export type SendResult =
   | { error: 'missing_recipient' }
   | { error: 'invalid_to_agent_name' }
 
-interface RecipientPokeRow {
-  agent_id: string
-  tmux_pane_id: string | null
-  delivery: DeliverySpec
-}
-
 interface RecipientLookupRow {
+  agent_type: AgentRow['agent_type']
   agent_id: string
   team: string
   tmux_pane_id: string | null
@@ -171,6 +166,7 @@ export class SendMessageService {
     const rcpt = this.db.prepare(
       `SELECT
          agent_id,
+         agent_type,
          team,
          tmux_pane_id,
          delivery_kind,
@@ -180,8 +176,9 @@ export class SendMessageService {
     )
       .get(resolvedId) as RecipientLookupRow | undefined
     if (!rcpt || rcpt.team !== toTeam) return { error: 'unknown_recipient' }
-    const recipientRow: RecipientPokeRow = {
+    const recipientRow = {
       agent_id: rcpt.agent_id,
+      agent_type: rcpt.agent_type,
       tmux_pane_id: rcpt.tmux_pane_id,
       delivery: parseDeliveryRow(rcpt),
     }
@@ -251,8 +248,7 @@ export class SendMessageService {
     }
     return runFanoutWithRetry({
       db: this.db, team: message.to_team, fromAgentId: waker,
-      recipients: [{ agent_id: recipient.agent_id,
-        tmux_pane_id: recipient.tmux_pane_id, delivery: recipient.delivery }],
+      recipients: [recipient],
       body: message.body, deps: this.deps,
       messageId, sentAt: message.sent_at,
     })

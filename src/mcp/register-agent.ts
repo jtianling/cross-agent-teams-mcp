@@ -2,12 +2,14 @@ import type Database from 'better-sqlite3'
 import { managedIdentityExists, managedDeliveryExists } from '../managed/guard.js'
 import { handoffRegistrationAllowed } from '../handoff/guard.js'
 import {
+  agyLaunchIdSchema,
   validateDeliveryForWrite,
   type DeliverySpec,
   type DeliveryValidationReason,
 } from '../lib/delivery-spec.js'
 import type { AgentType } from '../lib/agent-type.js'
 import { deriveDefaultTeam } from '../lib/default-team.js'
+import { requestAgyLauncher } from './antigravity-pty.js'
 import { canonicalKimiBaseUrl } from './kimi-session-state.js'
 import { canonicalOpencodeBaseUrl } from '../lib/opencode-url.js'
 import {
@@ -61,7 +63,10 @@ type BaseRegisterResult =
       register_generation: number
     }
   | { error: 'agent_id_collision' }
-  | { error: 'invalid_delivery'; reason: DeliveryValidationReason }
+  | {
+      error: 'invalid_delivery'
+      reason: DeliveryValidationReason | 'antigravity_transport_unsupported'
+    }
   | { error: 'claude_ui_pid_requires_channel_proxy' }
   | { error: 'device_spoofing_from_loopback' }
   | { error: 'device_required_from_remote' }
@@ -142,6 +147,7 @@ function runtimeAddress(delivery: DeliverySpec | undefined): string | undefined 
   if (delivery === undefined || delivery.kind === 'none') return undefined
   const key = (...parts: string[]): string =>
     [delivery.kind, ...parts].join('\u0000')
+  if (delivery.kind === 'antigravity-pty') return key(delivery.launch_id)
   if (delivery.kind === 'codex-appserver') return key(delivery.thread_id)
   if (delivery.kind === 'claude-channel') {
     return key(delivery.channel_session_id)
@@ -267,6 +273,53 @@ export class RegisterAgentService {
     this.deps = deps
   }
 
+  async registerAntigravity(input: RegisterInput, launchId?: string) {
+    const device = this.deps.localDevice ?? 'local'
+    const originInfo = this.deps.getSessionOrigin?.(input.connection_id)
+    const resolved = resolveEffectiveDevice({
+      localDevice: device, originInfo, requestedDevice: input.device,
+    })
+    if (input.agent_type !== 'antigravity') return { error: 'invalid_agy_launch' as const }
+    if (launchId !== undefined) {
+      if (!agyLaunchIdSchema.safeParse(launchId).success ||
+        !input.team || input.team.trim() !== input.team) {
+        return { error: 'invalid_agy_launch' as const }
+      }
+      if (originInfo?.origin === 'remote' || 'error' in resolved || resolved.ok !== device) {
+        return { error: 'local_launch_required' as const }
+      }
+    }
+    if ('error' in resolved) return resolved
+    const team = deriveDefaultTeam(input)
+    const { name } = input
+    const target = this.repo.findByIdentity({ device: resolved.ok, team, name })
+    const previous = target && this.repo.findById(target.agent_id)
+    if (previous?.identity_key != null && previous.identity_key !== input.identity_key) {
+      return { error: 'identity_key_conflict' as const, detail: { team, name } }
+    }
+    const old = previous?.delivery
+    if (!launchId && old?.kind !== 'antigravity-pty') return this.register(input)
+    if (originInfo?.origin === 'remote') return { error: 'local_launch_required' as const }
+    const generation = target && this.repo.getRegisterGeneration(target.agent_id)
+    if (old?.kind === 'antigravity-pty' && old.launch_id !== launchId) {
+      const prior = await requestAgyLauncher('probe', { launch_id: old.launch_id, name, team })
+      // A timeout or an unrecognized reply cannot release the incumbent's seat.
+      if (prior.status !== 'unavailable' ||
+        !/^(ENOENT|connect ECONNREFUSED)\b/.test(prior.detail ?? '')) {
+        this.log(`agy incumbent probe: status=${prior.status} detail=${prior.detail ?? ''}`)
+        return { error: 'agent_id_collision' as const }
+      }
+    }
+    if (launchId) {
+      const probe = await requestAgyLauncher('probe', { launch_id: launchId, name, team })
+      if (probe.status !== 'ready') {
+        this.log(`agy launcher probe: status=${probe.status} detail=${probe.detail ?? ''}`)
+        return { error: 'agy_launcher_not_ready' as const, ...probe }
+      }
+    }
+    return this.persistRegistration(input, { launchId, priorId: target?.agent_id, generation })
+  }
+
   register(
     input: RegisterInput & {
       agent_type?: Exclude<AgentType, 'opencode'>
@@ -275,6 +328,21 @@ export class RegisterAgentService {
   ): BaseRegisterResult
   register(input: RegisterInput): RegisterResult
   register(input: RegisterInput): RegisterResult {
+    return this.persistRegistration(input)
+  }
+
+  private persistRegistration(
+    input: RegisterInput,
+    launch?: { launchId?: string; priorId?: string; generation?: number },
+  ): RegisterResult {
+    const isAgy = input.agent_type === 'antigravity'
+    if (isAgy && (
+      input.delivery !== undefined || input.tmux_pane_id !== undefined
+      || input.runtime_ui_pid !== undefined || input.claude_ui_pid !== undefined
+      || input.opencode_runtime_generation !== undefined
+    )) {
+      return { error: 'invalid_delivery', reason: 'antigravity_transport_unsupported' }
+    }
     const rawValidated =
       input.delivery === undefined
         ? undefined
@@ -283,7 +351,12 @@ export class RegisterAgentService {
     // Canonicalize at the persistence boundary, not only in the MCP tool
     // layer: the share key and the reconnect lookup compare canonical URLs,
     // so service-direct callers must persist the same form.
-    let validated = rawValidated
+    if (rawValidated?.ok.kind === 'antigravity-pty') {
+      return { error: 'invalid_delivery', reason: 'antigravity_transport_unsupported' }
+    }
+    let validated: { ok: DeliverySpec } | undefined = launch?.launchId
+      ? { ok: { kind: 'antigravity-pty', launch_id: launch.launchId } }
+      : rawValidated
     if (rawValidated?.ok.kind === 'kimi-server') {
       validated = {
         ok: {
@@ -377,9 +450,23 @@ export class RegisterAgentService {
         team,
         name: input.name,
       })
+      if (launch && (target?.agent_id !== launch.priorId ||
+        (target && this.repo.getRegisterGeneration(target.agent_id) !== launch.generation))) {
+        return { error: 'agent_id_collision' as const }
+      }
       const stored = target
         ? this.repo.findById(target.agent_id)
         : undefined
+      if (stored?.delivery.kind === 'antigravity-pty' && !launch) {
+        return { error: 'agent_id_collision' as const }
+      }
+      const wasAgy = stored?.agent_type === 'antigravity'
+        || (stored?.agent_type === 'custom'
+          && stored.agent_type_name?.toLowerCase() === 'antigravity')
+      if ((isAgy || wasAgy) && stored?.identity_key != null
+        && stored.identity_key !== input.identity_key) {
+        return { error: 'identity_key_conflict' as const, detail: { team, name: input.name } }
+      }
       const migratingHolder = identityKeyPlan?.kind === 'migrate'
         ? this.repo.findById(identityKeyPlan.from_agent_id)
         : undefined
@@ -390,6 +477,12 @@ export class RegisterAgentService {
         return { error: 'opencode_runtime_coordinates_required' as const }
       }
       if (identityKeyPlan?.kind === 'migrate' && migratingHolder) {
+        if (launch?.launchId || migratingHolder.delivery.kind === 'antigravity-pty') {
+          return {
+            error: 'identity_key_conflict' as const,
+            detail: { team: migratingHolder.team, name: migratingHolder.name },
+          }
+        }
         this.repo.releaseIdentityClaim(
           identityKeyPlan.from_agent_id,
           planIdentityClaimRelease({
@@ -404,7 +497,7 @@ export class RegisterAgentService {
           })
         )
       }
-      return this.repo.register({
+      const result = this.repo.register({
         agent_type: input.agent_type,
         agent_type_name: input.agent_type_name,
         device: resolvedDevice.ok,
@@ -413,13 +506,21 @@ export class RegisterAgentService {
         role,
         team,
         tmux_pane_id: input.tmux_pane_id,
-        delivery: validated?.ok,
+        delivery: validated?.ok ?? (isAgy ? { kind: 'none' } : undefined),
         claude_ui_pid: input.claude_ui_pid,
         runtime_ui_pid: input.runtime_ui_pid,
         remote_addr: resolvedDevice.remote_addr,
         identity_key: input.identity_key,
         opencode_runtime_generation: input.opencode_runtime_generation,
       })
+      if (isAgy && stored) {
+        // A same-name upsert preserves the previous runtime's seat.
+        this.db.prepare(`UPDATE agents SET tmux_pane_id=NULL, prev_tmux_pane_id=NULL,
+          runtime_ui_pid=NULL, claude_ui_pid=NULL, runtime_tty=NULL,
+          runtime_verification_mode=NULL, runtime_bound_at=NULL WHERE agent_id=?`)
+          .run(result.agent_id)
+      }
+      return result
     })
     const result = write()
     if ('error' in result) return result

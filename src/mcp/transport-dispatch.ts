@@ -15,9 +15,11 @@ import {
   dispatchKimiServerPokeGated,
   type KimiServerDispatchResult,
 } from './kimi-server-dispatch.js'
+import { requestAgyLauncher } from './antigravity-pty.js'
 import type { PaneHostVerdict } from './pane-host-verify.js'
 
 export interface DispatchDeps {
+  agyLauncher?: typeof requestAgyLauncher
   channelWakeFanout?: ChannelWakeFanout
   tmuxPoke: (args: {
     pane_id: string
@@ -59,12 +61,14 @@ export interface TargetRow {
 }
 
 export interface DispatchInput {
+  mailboxTarget?: { name: string; team: string }
   content: string
   meta: Record<string, string>
   skipGuard?: boolean
 }
 
 export type DispatchResult =
+  | { ok: true; transport_used: 'antigravity-pty' }
   | {
       ok: true
       transport_used: 'claude-channel'
@@ -104,6 +108,25 @@ export async function dispatchPoke(
   input: DispatchInput
 ): Promise<DispatchResult> {
   const agentType = resolveAgentType(target)
+  if (agentType === 'antigravity') {
+    if (target.delivery.kind !== 'antigravity-pty') return { error: 'inbox_only' }
+    if (!input.mailboxTarget) return { error: 'agy_unavailable' }
+    const reply = await (deps.agyLauncher ?? requestAgyLauncher)('wake', {
+      launch_id: target.delivery.launch_id,
+      ...input.mailboxTarget,
+    })
+    if (reply.status === 'delivered') {
+      return { ok: true, transport_used: 'antigravity-pty' }
+    }
+    if (reply.status === 'busy') return { error: 'agy_busy' }
+    const detail = reply.detail ?? `launcher returned ${reply.status}`
+    console.error(JSON.stringify({
+      event: 'antigravity_wake_failed', agent_id: target.agent_id,
+      detail: detail.replaceAll(target.delivery.launch_id, '[launch]'),
+    }))
+    return { error: 'agy_unavailable', detail }
+  }
+  if (target.delivery.kind === 'antigravity-pty') return { error: 'agy_unavailable' }
   if (agentType === 'claude-code') return dispatchClaude(deps, target, input)
   if (agentType === 'codex') return dispatchCodex(deps, target, input)
   if (agentType === 'opencode') return dispatchOpencode(deps, target, input)

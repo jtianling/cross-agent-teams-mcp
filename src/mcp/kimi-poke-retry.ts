@@ -12,6 +12,7 @@ export type KimiPokeAttemptResult =
 export interface KimiRetryContext {
   agentId: string
   messageId: string
+  busyReason?: 'kimi_session_busy' | 'agy_busy'
   /** Re-runs the full precondition check and, if it passes, the injection. */
   attemptFn: () => Promise<KimiPokeAttemptResult>
   /**
@@ -24,7 +25,8 @@ export interface KimiRetryContext {
   updateStatusFn?: (args: {
     agentId: string
     wake_status: 'delivered' | 'retrying' | 'skipped' | 'failed'
-    skip_reason?: 'kimi_session_busy' | 'retry_exhausted' | 'already_read' | null
+    skip_reason?: 'kimi_session_busy' | 'agy_busy' | 'agy_unavailable' |
+      'inbox_only' | 'retry_exhausted' | 'already_read' | null
     retry_attempts?: number
     delivered_at?: string | null
   }) => void
@@ -42,21 +44,21 @@ function keyOf(ctx: KimiRetryContext): string {
   return `${ctx.messageId}:${ctx.agentId}`
 }
 
-export function scheduleKimiRetry(ctx: KimiRetryContext): void {
+export function scheduleKimiRetry(ctx: KimiRetryContext, attempt = 0, delayMs?: number): void {
   const key = keyOf(ctx)
   cancelKimiRetry(key)
-  retryMap.set(key, { attempt: 0, ctx })
-  enqueueNext(key)
+  retryMap.set(key, { attempt, ctx })
+  enqueueNext(key, delayMs)
 }
 
-function enqueueNext(key: string): void {
+function enqueueNext(key: string, delayMs?: number): void {
   const entry = retryMap.get(key)
   if (!entry) return
   if (entry.attempt >= KIMI_RETRY_DELAYS_MS.length) {
     retryMap.delete(key)
     return
   }
-  const delay = KIMI_RETRY_DELAYS_MS[entry.attempt]
+  const delay = delayMs ?? KIMI_RETRY_DELAYS_MS[entry.attempt]
   entry.timer = setTimeout(() => { void tick(key) }, delay)
 }
 
@@ -78,6 +80,7 @@ async function tick(key: string): Promise<void> {
       return
     }
     const result = await ctx.attemptFn()
+    if (retryMap.get(key) !== entry) return
     if (result.ok) {
       ctx.updateStatusFn?.({
         agentId: ctx.agentId,
@@ -92,7 +95,15 @@ async function tick(key: string): Promise<void> {
     // Only a busy session can clear on its own. Anything else — notably
     // kimi_pending_interaction, which waits on a human — cannot succeed on a
     // later attempt, so the gradient is abandoned rather than burned.
-    if (result.reason !== 'kimi_session_busy') {
+    const busyReason = ctx.busyReason ?? 'kimi_session_busy'
+    if (result.reason !== busyReason) {
+      if (busyReason === 'agy_busy') {
+        const inboxOnly = result.reason === 'inbox_only'
+        ctx.updateStatusFn?.({ agentId: ctx.agentId,
+          wake_status: inboxOnly ? 'skipped' : 'failed',
+          skip_reason: inboxOnly ? 'inbox_only' : 'agy_unavailable',
+          retry_attempts: entry.attempt + 1 })
+      }
       retryMap.delete(key)
       return
     }
@@ -112,11 +123,12 @@ async function tick(key: string): Promise<void> {
     ctx.updateStatusFn?.({
       agentId: ctx.agentId,
       wake_status: 'retrying',
-      skip_reason: 'kimi_session_busy',
+      skip_reason: busyReason,
       retry_attempts: entry.attempt,
     })
     enqueueNext(key)
   } catch {
+    if (retryMap.get(key) !== entry) return
     ctx.updateStatusFn?.({
       agentId: ctx.agentId,
       wake_status: 'failed',
