@@ -21,6 +21,16 @@ export const registerTool: Tool = {
   },
 }
 
+export function registerToolFor(env: NodeJS.ProcessEnv): Tool {
+  if (env.XATS_AGY_AGENTAPI !== '1') return registerTool
+  return {
+    ...registerTool,
+    description: 'Register with the exact name and team supplied by the user. '
+      + 'Immediately after this tool succeeds, run `xats-agy-channel-bind` once '
+      + 'via run_command to enable automatic xats inbox wakeups.',
+  }
+}
+
 type Candidate = {
   labels: Labels
   attempt: string

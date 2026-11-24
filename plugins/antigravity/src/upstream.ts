@@ -16,7 +16,9 @@ export function detail(error: unknown): string {
 }
 
 export function redact(text: string, env: NodeJS.ProcessEnv) {
-  for (const secret of [env.CROSS_AGENT_TEAMS_MCP_TOKEN, env.XATS_AGY_IDENTITY_KEY]) {
+  for (const secret of [
+    env.CROSS_AGENT_TEAMS_MCP_TOKEN, env.XATS_AGY_IDENTITY_KEY, env.XATS_AGY_BIND_TOKEN,
+  ]) {
     if (secret) {
       const escaped = JSON.stringify(secret).slice(1, -1)
       text = text.replaceAll(escaped, '[redacted]').replaceAll(secret, '[redacted]')

@@ -196,7 +196,8 @@ class CliTest(unittest.TestCase):
     def test_capability_without_key_terminal_or_agy(self):
         result = self.cli("--capabilities-json")
         self.assertEqual(result.returncode, 0)
-        self.assertEqual(json.loads(result.stdout), {"defer_registration": 1})
+        self.assertEqual(json.loads(result.stdout),
+                         {"defer_registration": 1, "agentapi_channel": 1})
         self.assertEqual(result.stderr, b"")
 
     def test_deferred_key_removed_from_launcher_environment(self):

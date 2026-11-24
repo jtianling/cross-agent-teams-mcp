@@ -4,7 +4,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import {
   CallToolRequestSchema, ErrorCode, ListToolsRequestSchema, McpError,
 } from '@modelcontextprotocol/sdk/types.js'
-import { DeferredRegistration, registerTool } from './deferred.js'
+import { DeferredRegistration, registerTool, registerToolFor } from './deferred.js'
 import { getLaunch, ownsLaunch } from './launch.js'
 import { offlineTools } from './offline-tools.js'
 import {
@@ -68,17 +68,18 @@ function attachTools(
 ) {
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     const active = named ?? deferred?.active
+    const regTool = registerToolFor(process.env)
     if (active) {
       const page = await active.run(listTools)
-      return deferred ? { tools: [registerTool, ...page.tools] } : page
+      return deferred ? { tools: [regTool, ...page.tools] } : page
     }
     if (!deferred) return { tools: [] }
     try {
       const page = await discoverTools(process.env, deferred.owner.pid)
-      return { tools: [registerTool, ...page.tools] }
+      return { tools: [regTool, ...page.tools] }
     } catch (err) {
       report(new Error('tools/list discovery failed: ' + detail(err)))
-      return { tools: [registerTool, ...offlineTools] }
+      return { tools: [regTool, ...offlineTools] }
     }
   })
   server.setRequestHandler(CallToolRequestSchema, async ({ params }, { signal }) => {
@@ -86,7 +87,13 @@ function attachTools(
       try {
         const identity = await deferred.register(params.arguments)
         startHeartbeat(deferred.active)
-        return { content: [{ type: 'text', text: JSON.stringify(identity) }] }
+        const payload = process.env.XATS_AGY_AGENTAPI === '1'
+          ? {
+              ...identity,
+              next_step: 'Run `xats-agy-channel-bind` once via run_command to enable automatic xats inbox wakeups.',
+            }
+          : identity
+        return { content: [{ type: 'text', text: JSON.stringify(payload) }] }
       } catch (err) {
         throw new Error(redact(detail(err), process.env))
       }

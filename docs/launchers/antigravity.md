@@ -38,6 +38,31 @@ stdio 服务根据当前启动器的身份连接本机 daemon.  默认从 xats �
 
 当前台有草稿、菜单、审批或屏幕状态无法确认时, `agy_busy` 表示邮件已经写入邮箱, daemon 将按重试时序再检查.  `agy_unavailable` 表示本次启动器无法接受通知.  普通 agy 或旧版 AoE stdio 桥可以继续使用原有邮箱和身份.  启动器只控制自己创建的 PTY.
 
+## 原生 agentapi 通道 (`--agentapi`, 推荐)
+
+除默认 PTY 模式外, `xats-agy` 支持 `--agentapi` 无 PTY 通道模式.  该模式直接 `fork/exec` 原生 `agy`, 不创建伪终端, 不解析终端屏幕, 也不向输入框粘贴提示词, 因此完全不受自定义 `statusLine`, 多行底栏或终端模式影响.  宿主运行 `xats-agy --capabilities-json` 返回 `{"defer_registration":1,"agentapi_channel":1}` 且 `PATH` 中存在 `xats-agy-channel-bind` 时可启用该模式.
+
+```sh
+# 延迟注册 (新建会话)
+xats-agy --agentapi --defer-registration -- --settings '{"permissions":{"allow":["command(regex:^xats-agy-channel-bind$)"]}}'
+
+# 命名会话或恢复会话
+xats-agy --agentapi --name reader --team demo -- --conversation "$conversation_id" -i 'Run xats-agy-channel-bind once via run_command to bind xats wakeup channel, then reply OK.'
+```
+
+在 `--agentapi` 模式下:
+
+- 启动器向子进程注入 `XATS_AGY_AGENTAPI=1` 和一次性内存令牌 `XATS_AGY_BIND_TOKEN`.  `xats-agy-mcp` 检测到 `XATS_AGY_AGENTAPI=1` 时, 会在 `register_agent` 的工具说明和成功返回体的 `next_step` 中提示模型立即执行一次 `xats-agy-channel-bind`.
+- `xats-agy-channel-bind` 在 `agy` 的 `run_command` 环境中读取 Antigravity 官方注入的 `ANTIGRAVITY_LS_ADDRESS`, `ANTIGRAVITY_CSRF_TOKEN`, `ANTIGRAVITY_CONVERSATION_ID` 与 `ANTIGRAVITY_AGENTAPI_EXE`, 通过本机 Unix socket 交给同会话 `xats-agy` 仅保存在进程内存中 (不落盘, 不写日志).
+- 绑定完成后, xats 新邮件到来时, 启动器直接调用 `agy agentapi send-message --title=xats <conversation_id> <message>` 以原生 `<SYSTEM_MESSAGE>` 唤醒当前对话.  绑定前到达的唤醒返回 `agy_busy` (`awaiting_agentapi_bind`), 由 daemon 自动重试.
+- 若用户在会话内手动执行 `/clear` 或 `/resume` 切换了 `conversation_id`, 宿主的 `SessionStart` hook 可调用 `xats-agy-channel-bind --update-conversation [<uuid>]` 同步更新内存中的目标对话 ID.  该命令在非 `--agentapi` 会话中静默退出并返回 `0`.
+
+---
+
+## PTY 屏幕模式 (兼容回退)
+
+以下诊断与接管机制仅适用于未启用 `--agentapi` 的 PTY 模式:
+
 收到 `agy_busy` 后, 可用本次启动的 `launch_id` 和已注册的名称、团队, 在另一个本机终端查询对应启动器:
 
 ```sh

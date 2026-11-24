@@ -22,10 +22,10 @@ const registration = (name = identity.name) => ({
   name: 'register_agent', arguments: { ...identity, name },
 })
 const inbox = { name: 'get_inbox' }
-async function setup() {
+async function setup(extraEnv: NodeJS.ProcessEnv = {}) {
   const socket = await claims()
   const daemon = await fixture()
-  const env = { ...socket.env, CROSS_AGENT_TEAMS_MCP_URL: daemon.url }
+  const env = { ...socket.env, CROSS_AGENT_TEAMS_MCP_URL: daemon.url, ...extraEnv }
   const bridge = await stdio(env)
   return { socket, daemon, env, ...bridge }
 }
@@ -291,5 +291,17 @@ describe('deferred stdio registration', { timeout: 15000 }, () => {
     }
     expect(socket.ops()).toEqual(['status', 'status', 'status'])
     expect(daemon.calls).toEqual([])
+  })
+
+  it('guides channel binding when XATS_AGY_AGENTAPI=1', async () => {
+    const { client } = await setup({ XATS_AGY_AGENTAPI: '1' })
+    const { tools: [register] } = await client.listTools()
+    expect(register.description).toContain('xats-agy-channel-bind')
+    const reply = await client.callTool(registration()) as {
+      content: Array<{ type: string; text: string }>
+    }
+    const payload = JSON.parse(reply.content[0].text)
+    expect(payload).toMatchObject({ team: identity.team })
+    expect(payload.next_step).toContain('xats-agy-channel-bind')
   })
 })

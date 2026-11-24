@@ -2,12 +2,14 @@
 import argparse
 import json
 import os
+import secrets
 import shutil
 import sys
 import uuid
 
 sys.dont_write_bytecode = True
 
+from agy_agentapi import AgentApiSession, DirectChild
 from agy_control import endpoint
 from agy_diagnose import diagnose
 from agy_process import Child
@@ -47,6 +49,7 @@ def main(args):
     parser.add_argument("--name")
     parser.add_argument("--team")
     parser.add_argument("--defer-registration", action="store_true")
+    parser.add_argument("--agentapi", action="store_true")
     parser.add_argument("--diagnose", metavar="LAUNCH_UUID")
     parser.add_argument("--capabilities-json", action="store_true")
     split = args.index("--") if "--" in args else len(args)
@@ -54,20 +57,28 @@ def main(args):
     if options.capabilities_json:
         if args != ["--capabilities-json"]:
             parser.error("--capabilities-json must be used alone")
-        print(json.dumps({"defer_registration": 1}, separators=(",", ":")))
+        print(json.dumps({"defer_registration": 1, "agentapi_channel": 1}, separators=(",", ":")))
         return 0
     if options.diagnose is not None:
-        if (options.defer_registration or split != len(args)
+        if (options.defer_registration or options.agentapi or split != len(args)
                 or not options.name or not options.team):
             parser.error("--diagnose requires --name and --team and takes no agy arguments")
         print(json.dumps(diagnose(options.diagnose, options.name, options.team)))
         return 0
     identity, binding = registration(options, parser)
-    if not os.isatty(0):
-        parser.error("interactive terminal required")
     path = shutil.which("agy")
     if not path:
         parser.exit(127, "xats-agy: agy not found on PATH\n")
+    if options.agentapi:
+        bind_token = secrets.token_hex(32)
+        with endpoint(identity["launch_id"]) as server:
+            child = DirectChild(path, args[split + 1:], identity, bind_token)
+            try:
+                return AgentApiSession(server, binding, child, bind_token).run()
+            finally:
+                child.close()
+    if not os.isatty(0):
+        parser.error("interactive terminal required")
     with signals() as pending, endpoint(identity["launch_id"]) as server:
         child = Child(path, args[split + 1:], identity)
         try:
