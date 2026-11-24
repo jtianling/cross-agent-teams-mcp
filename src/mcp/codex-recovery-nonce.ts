@@ -120,9 +120,14 @@ export function consumeCodexRecoveryNonce(nonce: string): string | undefined {
 }
 
 /** Drop the pane's nonce — its schedule was cancelled, replaced or expired. */
-export function clearCodexRecoveryNoncesForPane(paneId: string): void {
+export function clearCodexRecoveryNoncesForPane(
+  paneId: string, launchId?: string,
+): void {
   const existing = nonceByPane.get(paneId)
   if (existing === undefined) return
+  if (launchId !== undefined && paneByNonce.get(existing)?.launch_id !== launchId) {
+    return
+  }
   paneByNonce.delete(existing)
   nonceByPane.delete(paneId)
   deliveredPanes.delete(paneId)

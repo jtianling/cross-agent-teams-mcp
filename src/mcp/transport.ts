@@ -19,6 +19,7 @@ import type { DaemonContext } from '../daemon/server.js'
 import type { SessionOriginInfo } from '../daemon/network-origin.js'
 import type { ManagedService } from '../managed/service.js'
 import { managedIdentityExists, managedDeliveryExists } from '../managed/guard.js'
+import { handoffEpoch, handoffChannelTarget } from '../handoff/guard.js'
 import { describeRedactedError } from './log-redact.js'
 
 interface Session {
@@ -53,6 +54,8 @@ interface Session {
   originInfo: SessionOriginInfo
   managedToken?: string
   managedProxyToken?: string
+  handoffEpoch?: number
+  registerGeneration?: number
 }
 
 export interface OrphanSessionGcOptions {
@@ -147,6 +150,7 @@ export function mountMcp(
       .filter(session =>
         session.sessionId !== excludedSessionId &&
         session.agentIdHolder.current === agentId &&
+        (session.handoffEpoch ?? 0) >= handoffEpoch(db, agentId) &&
         session.registeredTeam !== undefined
       )
       .at(-1)
@@ -302,6 +306,9 @@ export function mountMcp(
         sessions.set(sessionIdForCaller, {
           ...currentSession,
           registeredTeam: team,
+          handoffEpoch: handoffEpoch(db, agent_id),
+          registerGeneration: (db.prepare(`SELECT register_generation AS value
+            FROM agents WHERE agent_id=?`).get(agent_id) as { value: number })?.value,
         })
       }
     }
@@ -567,9 +574,22 @@ export function mountMcp(
       return sendControlPlaneReject(reply, 403)
     }
     if (body?.method === 'tools/call') {
+      const boundId = session?.agentIdHolder.current
+      if (boundId && (session?.handoffEpoch ?? 0) < handoffEpoch(db, boundId)) {
+        return sendControlPlaneReject(reply, 409)
+      }
       const args = body.params?.arguments
       const channel = typeof args?.channel_session_id === 'string'
         ? args.channel_session_id.trim() : undefined
+      if (body.params?.name === 'subscribe_channel_wake' && channel
+        && handoffChannelTarget(db, context.localDevice, channel)) {
+        const current = db.prepare(`SELECT register_generation AS value
+          FROM agents WHERE agent_id=?`).get(boundId ?? '') as
+          { value: number } | undefined
+        if (!current || session?.registerGeneration !== current.value) {
+          return sendControlPlaneReject(reply, 409)
+        }
+      }
       if (body.params?.name === 'subscribe_channel_wake'
         && typeof channel === 'string'
         && managedDeliveryExists(db, context.localDevice, {

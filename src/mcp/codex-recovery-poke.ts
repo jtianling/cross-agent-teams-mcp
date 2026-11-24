@@ -36,6 +36,7 @@ export const RECOVERY_PROBE_INTERVAL_MS = 5_000
 export interface CodexRecoveryDeps {
   repo: CodexPanePreRegRepo
   findByIdentityKey: (key: string) => IdentityKeyMatch[]
+  registrationFence?: (key: string) => number | null
   localDevice: string
   isProcessAlive?: (pid: number) => boolean
   listPanes?: () => Promise<PaneTtyEntry[]>
@@ -240,6 +241,8 @@ export function evaluateCodexRecoveryOnPreRegister(
       name: holder.name,
     },
     deps,
+    registrationFence: row.identity_key === null ? undefined
+      : deps.registrationFence?.(row.identity_key),
     probeErrorLogged: new Set(),
     resumeLogged: new Set(),
     detectedPidsLogged: new Set(),
@@ -260,6 +263,7 @@ interface ProbeState {
    *  detect drift: every probe/send re-resolves the key and requires a match. */
   holder: { agent_id: string; team: string; name: string }
   deps: CodexRecoveryDeps
+  registrationFence?: number | null
   /** Probe stages whose infrastructure error was already logged (once each). */
   probeErrorLogged: Set<string>
   /** Transient-resume reasons already logged for the current consecutive
@@ -308,6 +312,9 @@ function cancelOwnGeneration(state: ProbeState): void {
 }
 
 function rowStillCurrent(state: ProbeState): boolean {
+  if (state.row.identity_key !== null && state.deps.registrationFence
+    && state.deps.registrationFence(state.row.identity_key)
+      !== state.registrationFence) return false
   const now = nowIso(state.deps)
   const current = state.deps.repo.getByPaneId(state.row.pane_id)
   // Full-snapshot equality: a same-value overwrite with a refreshed expiry is
@@ -321,6 +328,9 @@ function rowStillCurrent(state: ProbeState): boolean {
 
 /** Terminal-cancellation reason for a row that failed rowStillCurrent. */
 function rowGoneReason(state: ProbeState): string {
+  if (state.row.identity_key !== null && state.deps.registrationFence
+    && state.deps.registrationFence(state.row.identity_key)
+      !== state.registrationFence) return 'registration_changed'
   const current = state.deps.repo.getByPaneId(state.row.pane_id)
   if (current === undefined) return 'row_consumed'
   if (

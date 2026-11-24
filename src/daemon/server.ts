@@ -40,6 +40,8 @@ import { mountScheduleRoutes } from '../schedules/routes.js'
 import { SendMessageService } from '../mcp/send-message.js'
 import { EventsOutbox } from '../storage/events-outbox.js'
 import { createAutoPokeImpl } from '../mcp/tools.js'
+import { RuntimeHandoffService, type HandoffDeps } from '../handoff/service.js'
+import { mountHandoffRoutes } from '../handoff/routes.js'
 
 export interface ServerOpts {
   dbPath: string
@@ -62,6 +64,7 @@ export interface ServerOpts {
   runtimeControlService?: OpencodeRuntimeControlService
   kimiRuntimeControlService?: KimiRuntimeControlPort
   managedRuntimeProbe?: ManagedDeps['probe']
+  handoffRuntimeProbe?: HandoffDeps['probe']
 }
 export interface StartOpts extends ServerOpts {
   port: number
@@ -81,12 +84,12 @@ const DEFAULT_ORPHAN_GC_MAX_AGE_MS = 300_000
 const DEFAULT_ORPHAN_GC_MAX_SESSIONS = 500
 
 export interface DaemonContext {
+  bindingLookup?: CodexBindingLookup
   localDevice: string
   /** Supplied only by the daemon entry point.  Absent here the pre-register
    *  service reports pane visibility as `'unknown'`, so an in-process server
    *  never shells out to the host's tmux. */
   paneVisibleProbe?: (paneId: string) => boolean
-  bindingLookup?: CodexBindingLookup
 }
 
 function parsePositiveInt(raw: string | undefined, fallback: number): number {
@@ -104,14 +107,14 @@ export async function buildServer(opts: ServerOpts): Promise<FastifyInstance> {
     paneVisibleProbe: opts.paneVisibleProbe,
   }
   applySchema(db, { localDevice: context.localDevice })
+  const binding = bindingProbes(db, context.localDevice)
+  context.bindingLookup = binding?.lookup
+  if (binding) app.addHook('onClose', () => binding.close())
   const startedAt = Date.now()
   const version = '0.1.0'
   const fanout = opts.fanout ?? new SseFanout()
   const channelWakeFanout = opts.channelWakeFanout ?? new ChannelWakeFanout()
   const managedLog = opts.mcpLog ?? ((line: string) => console.error(line))
-  const binding = bindingProbes(db, context.localDevice)
-  context.bindingLookup = binding?.lookup
-  if (binding) app.addHook('onClose', () => binding.close())
   const managed = new ManagedService(db, context.localDevice,
     channelWakeFanout, { log: managedLog, probe: opts.managedRuntimeProbe })
   const runtimeRegisterSvc = new RegisterAgentService(db, {
@@ -161,6 +164,9 @@ export async function buildServer(opts: ServerOpts): Promise<FastifyInstance> {
     kimiRuntimeControlService,
   })
   mountManagedRoutes(app, managed, managedLog)
+  mountHandoffRoutes(app, new RuntimeHandoffService(db, context.localDevice,
+    channelWakeFanout, { log: managedLog, probe: opts.handoffRuntimeProbe }),
+  managedLog)
   const reminderAgents = new AgentsRepo(db)
   const reminderSender = new SendMessageService(
     db, reminderAgents, new EventsOutbox(db), {

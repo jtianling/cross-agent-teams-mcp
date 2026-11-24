@@ -1,5 +1,6 @@
 import type Database from 'better-sqlite3'
 import { managedIdentityExists, managedDeliveryExists } from '../managed/guard.js'
+import { handoffRegistrationAllowed } from '../handoff/guard.js'
 import {
   validateDeliveryForWrite,
   type DeliverySpec,
@@ -328,6 +329,9 @@ export class RegisterAgentService {
       team: input.team,
       project_dir: input.project_dir,
     })
+    if (!handoffRegistrationAllowed(this.db, {
+      ...input, device: resolvedDevice.ok, team, delivery: validated?.ok,
+    })) return { error: 'agent_id_collision' }
     if (managedIdentityExists(this.db, {
       device: resolvedDevice.ok, team, name: input.name,
       identity_key: input.identity_key,

@@ -112,6 +112,37 @@ describe('managed instance ownership', () => {
       .toEqual({ count: 0 })
   })
 
+  it('switches managed type with explicit source proof and exact idempotent retries', async () => {
+    const { input, control, result } = prepare()
+    const original = await service.bind({ ...control, runtime: runtime() })
+    if (!original.ok) throw new Error(original.error)
+    const source = new AgentsRepo(db).findOpencodeRuntimeByIdentityKey(
+      input.identity_key, 'local')!
+    db.prepare('UPDATE agents SET last_processed_event_id=17 WHERE agent_id=?')
+      .run(source.agent_id)
+    const next = { ...input, instance_id: randomUUID(), previous: result.fence,
+      previous_agent_type: 'codex' as const, agent_type: 'opencode' as const }
+    expect(service.prepare({ ...next, previous_agent_type: undefined }))
+      .toMatchObject({ error: 'identity_conflict' })
+    const prepared = service.prepare(next)
+    if (!prepared.ok) throw new Error(prepared.error)
+    expect(service.prepare(next)).toEqual(prepared)
+    expect(new AgentsRepo(db).getRegisterGeneration(source.agent_id))
+      .toBe(source.register_generation + 1)
+    expect(service.claims.byToken(result.mcp_token)).toBeUndefined()
+    const current = { protocol_version: 1 as const, identity_key: input.identity_key,
+      fence: prepared.fence }
+    const bound = await service.bind({ ...current, runtime: { agent_type: 'opencode',
+      base_url: 'http://127.0.0.1:12345', session_id: 'ses_target' } })
+    expect(bound).toMatchObject({ state: 'bound', agent_id: source.agent_id })
+    expect(service.prepare(next)).toMatchObject({ fence: prepared.fence,
+      state: 'bound', agent_id: source.agent_id })
+    expect(new AgentsRepo(db).findOpencodeRuntimeByIdentityKey(input.identity_key,
+      'local')).toMatchObject({ agent_type: 'opencode', last_processed_event_id: 17 })
+    expect(service.prepare({ ...next, previous_agent_type: 'claude-code' }))
+      .toMatchObject({ error: 'stale_fence' })
+  })
+
   it('does not resurrect a released instance through a replayed prepare', () => {
     const { input, control } = prepare()
     expect(service.release(control)).toMatchObject({ state: 'released' })

@@ -141,6 +141,23 @@ describe('codex recovery poke', () => {
     expect(content).toContain('$CODEX_THREAD_ID')
   })
 
+  it('does not send a late recovery after the registration fence changes', async () => {
+    seedRow()
+    let generation = 4
+    let complete!: () => void
+    const deps = makeDeps({ registrationFence: () => generation,
+      listPanes: () => new Promise(resolve => {
+        complete = () => resolve([{ pane_id: '%1972', tty: 'ttys001' }])
+      }) })
+    evaluate(deps)
+    await vi.advanceTimersByTimeAsync(0)
+    generation += 1
+    complete()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(deps.tmuxPoke).not.toHaveBeenCalled()
+    expect(__peekCodexRecoverySchedules()).toEqual([])
+  })
+
   it('schedules nothing without an identity_key', () => {
     seedRow(null)
     const deps = makeDeps()

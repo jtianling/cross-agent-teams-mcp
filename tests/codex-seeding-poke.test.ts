@@ -189,6 +189,23 @@ describe('codex seeding poke', () => {
     )
   })
 
+  it('does not seed a late challenge after the registration fence changes', async () => {
+    seedRow(LEFT, 'K1')
+    let generation = 4
+    let complete!: () => void
+    const deps = makeDeps({ registrationFence: () => generation,
+      listPanes: () => new Promise(resolve => {
+        complete = () => resolve([{ pane_id: LEFT.pane_id, tty: LEFT.tty }])
+      }) })
+    evaluateCodexSeedingOnPreRegister(writer(LEFT, 'K1'), deps)
+    await vi.advanceTimersByTimeAsync(0)
+    generation += 1
+    complete()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(deps.tmuxPoke).not.toHaveBeenCalled()
+    expect(__peekCodexSeedingSchedules()).toEqual([])
+  })
+
   it('two pending rows schedule BOTH panes, not only the one that wrote', () => {
     // The earlier pane's codex may already be up and about to register, so
     // scheduling only the writer would leave it with nothing to quote.

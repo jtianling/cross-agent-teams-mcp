@@ -28,7 +28,9 @@ export const prepareSchema = z.object({
   agent_type: managedAgentType,
   instance_id: z.string().uuid(),
   previous: fenceSchema.optional(),
-}).strict()
+  previous_agent_type: managedAgentType.optional(),
+}).strict().refine(value => value.previous_agent_type === undefined
+  || value.previous !== undefined, 'previous_agent_type requires previous fence')
 export const runtimeSchema = z.discriminatedUnion('agent_type', [
   z.object({
     agent_type: z.literal('codex'),

@@ -581,10 +581,13 @@ export function registerBusinessTools(
     repo: codexPanePreRegRepo,
     findByIdentityKey: key =>
       agents.findByIdentityKey(key, recoveryLocalDevice),
+    registrationFence: key => agents.findOpencodeRuntimeByIdentityKey(
+      key, recoveryLocalDevice)?.register_generation ?? null,
     localDevice: recoveryLocalDevice,
     log,
   }
-  const codexSeedingDeps: CodexSeedingDeps = { repo: codexPanePreRegRepo, log }
+  const codexSeedingDeps: CodexSeedingDeps = { repo: codexPanePreRegRepo, log,
+    registrationFence: codexRecoveryDeps.registrationFence }
   const preRegisterCodexPaneSvc = new PreRegisterCodexPaneService(
     codexPanePreRegRepo,
     {

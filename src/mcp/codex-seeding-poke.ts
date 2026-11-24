@@ -50,6 +50,7 @@ export const SEEDING_PROBE_INTERVAL_MS = 5_000
 
 export interface CodexSeedingDeps {
   repo: CodexPanePreRegRepo
+  registrationFence?: (key: string) => number | null
   listPanes?: () => Promise<PaneTtyEntry[]>
   ttyProcesses?: (tty: string) => Promise<string[]>
   /** Synchronous ps against the pane tty for the write-time carrier proof.
@@ -222,6 +223,7 @@ function paneTokenHolder(
 }
 
 interface SeedState {
+  registrationFence?: number | null
   entry: SeedingScheduleEntry
   /** Row snapshot this generation serves; every checkpoint re-reads the stored
    *  row and requires full equality with it. */
@@ -241,7 +243,9 @@ function scheduleSeeding(
   const entry: SeedingScheduleEntry = { cancelled: false, messageId }
   seedingSchedules.set(row.pane_id, entry)
   currentGenerationMessageId.set(row.pane_id, messageId)
-  const state: SeedState = { entry, row, deps, loggedOnce: new Set() }
+  const state: SeedState = { entry, row, deps, loggedOnce: new Set(),
+    registrationFence: row.identity_key === null ? undefined
+      : deps.registrationFence?.(row.identity_key) }
   // First probe fires immediately: the codex may already be up by the time
   // the pre-register call lands.
   entry.timer = setTimeout(() => { void probeIteration(state) }, 0)
@@ -268,6 +272,9 @@ function cancelOwnGeneration(state: SeedState): void {
 }
 
 function rowStillCurrent(state: SeedState): boolean {
+  if (state.row.identity_key !== null && state.deps.registrationFence
+    && state.deps.registrationFence(state.row.identity_key)
+      !== state.registrationFence) return false
   const current = state.deps.repo.getByPaneId(state.row.pane_id)
   // Full-snapshot equality: a same-value overwrite with a refreshed expiry is
   // a new generation and must not keep this schedule's sends alive.
@@ -279,6 +286,9 @@ function rowStillCurrent(state: SeedState): boolean {
 }
 
 function rowGoneReason(state: SeedState): string {
+  if (state.row.identity_key !== null && state.deps.registrationFence
+    && state.deps.registrationFence(state.row.identity_key)
+      !== state.registrationFence) return 'registration_changed'
   const current = state.deps.repo.getByPaneId(state.row.pane_id)
   if (current === undefined) return 'row_consumed'
   if (
@@ -313,6 +323,10 @@ async function probeIteration(state: SeedState): Promise<void> {
     }
     const detected = await detectCodexProcess(state)
     if (!generationActive(state)) return
+    if (!rowStillCurrent(state)) {
+      cancelOwnGeneration(state)
+      return
+    }
     if (detected === undefined) {
       entry.timer = setTimeout(
         () => { void probeIteration(state) },

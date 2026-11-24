@@ -3,6 +3,7 @@ import type { ChannelWakeFanout } from '../daemon/channel-wake-fanout.js'
 import { AgentsRepo } from '../storage/agents-repo.js'
 import { CHANNEL_PROXY_ROLE } from './subscribe-channel-wake.js'
 import { isGenerationAwareOpencodeRow } from '../lib/agent-runtime.js'
+import { handoffRegistrationAllowed } from '../handoff/guard.js'
 
 export interface BindInput {
   callerAgentId: string
@@ -45,6 +46,11 @@ export class BindChannelService {
       if (isGenerationAwareOpencodeRow(caller)) {
         return { error: 'opencode_runtime_coordinates_required' }
       }
+      if (!handoffRegistrationAllowed(this.db, { ...caller,
+        agent_type: 'claude-code', identity_key: caller.identity_key ?? undefined,
+        runtime_ui_pid: caller.runtime_ui_pid ?? undefined,
+        delivery: { kind: 'claude-channel', channel_session_id: csid },
+      })) return { error: 'forbidden_role' }
       this.repo.setAgentType(input.callerAgentId, 'claude-code')
       this.repo.setDelivery(input.callerAgentId, {
         kind: 'claude-channel',

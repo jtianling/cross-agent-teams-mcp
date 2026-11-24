@@ -3,6 +3,7 @@ import type { ChannelWakeFanout } from '../daemon/channel-wake-fanout.js'
 import { CHANNEL_PROXY_ROLE } from './subscribe-channel-wake.js'
 import { AgentsRepo } from '../storage/agents-repo.js'
 import { isGenerationAwareOpencodeRow } from '../lib/agent-runtime.js'
+import { handoffRegistrationAllowed } from '../handoff/guard.js'
 
 const LIVE_WINDOW_MS = 5 * 60 * 1000
 
@@ -84,6 +85,13 @@ export class AutoBindChannelService {
     const tx = this.db.transaction((): AutoBindResult => {
       const caller = this.repo.findById(input.callerAgentId)
       if (!caller) return { ok: false, reason: 'no_proxy_row' }
+      if (!handoffRegistrationAllowed(this.db, { ...caller,
+        agent_type: 'claude-code', identity_key: caller.identity_key ?? undefined,
+        runtime_ui_pid: input.ui_pid,
+        delivery: { kind: 'claude-channel', channel_session_id: csid },
+      })) {
+        return { ok: false, reason: 'sink_not_live' }
+      }
       if (isGenerationAwareOpencodeRow(caller)) {
         return {
           ok: false,

@@ -1,5 +1,6 @@
 import type Database from 'better-sqlite3'
 import { MANAGED_CLAIMS_DDL } from '../managed/claims.js'
+import { HANDOFF_DDL } from '../handoff/repo.js'
 
 const DDL = [
   `CREATE TABLE IF NOT EXISTS events (
@@ -406,6 +407,7 @@ export function applySchema(
 ): void {
   for (const sql of DDL) db.exec(sql)
   db.exec(MANAGED_CLAIMS_DDL)
+  db.exec(HANDOFF_DDL)
   dropLegacyTaskContractTables(db)
   migrateAgentsDeliveryColumns(db)
   migrateAgentsDeviceColumns(db, opts.localDevice ?? 'local')

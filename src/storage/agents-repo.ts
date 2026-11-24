@@ -998,6 +998,9 @@ export class AgentsRepo {
            delivery_payload = json_object('channel_session_id', ?),
            prev_codex_thread_id = NULL
        WHERE role != '__channel_proxy__'
+         AND NOT EXISTS (SELECT 1 FROM runtime_handoffs h
+           WHERE h.agent_id = agents.agent_id
+             AND h.committed_generation IS NOT NULL)
          AND NOT EXISTS (SELECT 1 FROM managed_claims m
            WHERE m.agent_id = agents.agent_id AND m.state != 'released')
          AND device = ?

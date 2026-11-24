@@ -172,19 +172,29 @@ export class ManagedClaims {
 
   private advance(row: Claim, input: PrepareInput): Claim | ManagedFailure {
     if (row.identity_key !== input.identity_key || row.name !== input.name
-      || row.team !== input.team || row.agent_type !== input.agent_type) {
+      || row.team !== input.team) {
       return failure('identity_conflict', 'Managed identity is already owned')
     }
     const previous = input.previous
-      ? JSON.stringify(fenceOf(input.previous)) : null
+      ? JSON.stringify({ ...fenceOf(input.previous),
+        ...(input.previous_agent_type === undefined ? {} : {
+          previous_agent_type: input.previous_agent_type,
+        }) }) : null
     if (row.instance_id === input.instance_id) {
-      if (row.previous_json !== previous || row.state === 'released') {
+      if (row.previous_json !== previous || row.state === 'released'
+        || row.agent_type !== input.agent_type) {
         return failure('stale_fence', 'Prepare does not match this instance')
       }
       return row
     }
     if (!input.previous || !sameFence(row, input.previous)) {
       return failure('stale_fence', 'Restart requires the current fence')
+    }
+    if ((row.agent_type !== input.agent_type
+      && input.previous_agent_type !== row.agent_type)
+      || (input.previous_agent_type !== undefined
+        && input.previous_agent_type !== row.agent_type)) {
+      return failure('identity_conflict', 'Previous agent type does not match')
     }
     if (this.usedInstance(input.instance_id)) {
       return failure('stale_fence', 'Instance ID has already been used')
@@ -200,20 +210,25 @@ export class ManagedClaims {
       return failure('generation_exhausted', 'Generation cannot be incremented')
     }
     const next: Claim = {
-      ...row, instance_id: input.instance_id, generation: row.generation + 1,
+      ...row, agent_type: input.agent_type,
+      instance_id: input.instance_id, generation: row.generation + 1,
       previous_json: previous, state: 'prepared', runtime_json: null,
     }
     this.db.prepare(
-      `UPDATE managed_claims SET instance_id = ?, generation = ?,
+      `UPDATE managed_claims SET instance_id = ?, generation = ?, agent_type = ?,
        previous_json = ?, token_hash = ?, state = 'prepared',
        runtime_json = NULL WHERE claim_id = ?`
-    ).run(next.instance_id, next.generation, previous,
+    ).run(next.instance_id, next.generation, next.agent_type, previous,
       tokenHash(managedToken(next)), row.claim_id)
     this.recordInstance(next)
     if (row.agent_id) {
       this.db.prepare(
         `UPDATE agents SET delivery_kind = 'none', delivery_payload = NULL,
-         tmux_pane_id = NULL,
+         register_generation = register_generation + 1,
+         tmux_pane_id = NULL, prev_tmux_pane_id = NULL,
+         prev_codex_thread_id = NULL, runtime_tty = NULL,
+         runtime_verification_mode = NULL, runtime_bound_at = NULL,
+         claude_ui_pid = NULL, channel_session_id = NULL,
          runtime_ui_pid = NULL WHERE agent_id = ?`
       ).run(row.agent_id)
     }
